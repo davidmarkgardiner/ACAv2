@@ -1,0 +1,569 @@
+---
+description: This document establishes the coding standards, conventions, and best practices for the Modern Business template project. All code must adhere to these rules to ensure consistency, maintainability, and quality.
+globs: ""
+alwaysApply: false
+---
+
+
+# Modern Business Template - Development Rules & Preferences
+
+This document establishes the coding standards, conventions, and best practices for the Modern Business template project. All code must adhere to these rules to ensure consistency, maintainability, and quality.
+
+## 🎯 Project Philosophy
+
+This codebase is designed for **agentic development** where AI agents collaborate with humans to build production-ready applications rapidly. Every component, API, and configuration follows predictable patterns that AI can understand and extend.
+
+## 📝 Coding Standards & Conventions
+
+### TypeScript Requirements
+
+#### Strict Mode - MANDATORY
+```typescript
+// tsconfig.json must have strict mode enabled
+{
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
+  }
+}
+```
+
+#### No `any` Types - ZERO TOLERANCE
+```typescript
+// ❌ NEVER do this
+function processData(data: any): any {
+  return data
+}
+
+// ✅ ALWAYS do this
+interface UserData {
+  id: string
+  name: string
+  email: string
+}
+
+function processData(data: UserData): UserData {
+  return data
+}
+```
+
+#### Explicit Return Types - REQUIRED
+```typescript
+// ❌ Missing return type
+function calculateTotal(items: OrderItem[]) {
+  return items.reduce((sum, item) => sum + item.price, 0)
+}
+
+// ✅ Explicit return type
+function calculateTotal(items: OrderItem[]): number {
+  return items.reduce((sum, item) => sum + item.price, 0)
+}
+```
+
+#### Interface Over Type Aliases - PREFERRED
+```typescript
+// ✅ Use interfaces for object shapes
+interface ProductProps {
+  id: string
+  name: string
+  price: number
+  onSelect?: (id: string) => void
+}
+
+// ✅ Use type aliases only for unions, primitives, or complex types
+type PaymentStatus = 'pending' | 'completed' | 'failed'
+type EventHandler<T> = (event: T) => void
+```
+
+### Component Patterns - MANDATORY STRUCTURE
+
+#### React Component Standard
+```typescript
+// REQUIRED: This exact pattern for all React components
+interface ComponentNameProps {
+  prop1: string
+  prop2?: number
+  onAction?: () => void
+}
+
+export default function ComponentName({ prop1, prop2, onAction }: ComponentNameProps): JSX.Element {
+  // Component logic here
+
+  return (
+    <div className="tailwind-classes">
+      {/* JSX content */}
+    </div>
+  )
+}
+```
+
+#### Astro Page Pattern
+```astro
+---
+// REQUIRED: Type imports and component imports at top
+import type { Props } from 'astro'
+import Layout from '@/components/layout/Layout.astro'
+import PageComponent from '@/components/PageComponent'
+import '@/styles/globals.css'
+
+// REQUIRED: Props interface for pages that need them
+export interface Props {
+  title?: string
+}
+
+const { title = 'Default Title' } = Astro.props
+---
+
+<Layout title={title} description="SEO description">
+  <PageComponent client:load />
+</Layout>
+```
+
+#### API Endpoint Pattern
+```typescript
+// REQUIRED: This exact structure for ALL API endpoints
+import type { APIRoute } from 'astro'
+import { createServerClient } from '@supabase/ssr'
+import { z } from 'zod'
+
+const requestSchema = z.object({
+  // REQUIRED: Zod validation for all inputs
+})
+
+export const POST: APIRoute = async ({ request, cookies }) => {
+  try {
+    // 1. REQUIRED: Parse and validate
+    const body = await request.json()
+    const validatedData = requestSchema.parse(body)
+
+    // 2. REQUIRED: Create Supabase client
+    const supabase = createServerClient(/* config */)
+
+    // 3. REQUIRED: Auth check (if protected endpoint)
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    if (authError || !user) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
+
+    // 4. Business logic here
+    const result = await performBusinessLogic(supabase, user, validatedData)
+
+    return new Response(JSON.stringify({ success: true, data: result }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    })
+  } catch (error) {
+    console.error('API Error:', error)
+    return new Response(JSON.stringify({
+      error: error instanceof Error ? error.message : 'Internal Server Error'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    })
+  }
+}
+```
+
+### Naming Conventions - STRICTLY ENFORCED
+
+#### Files and Directories
+```
+✅ CORRECT naming:
+- ComponentName.tsx (PascalCase for components)
+- api-endpoint.ts (kebab-case for API files)
+- user-profile.astro (kebab-case for pages)
+- useUserData.ts (camelCase for hooks)
+- constants.ts (lowercase for utilities)
+
+❌ INCORRECT naming:
+- componentname.tsx
+- ApiEndpoint.ts
+- UserProfile.astro
+- use_user_data.ts
+```
+
+#### Variables and Functions
+```typescript
+// ✅ CORRECT: camelCase for variables and functions
+const userName = 'John'
+const calculateOrderTotal = (items: OrderItem[]): number => { ... }
+
+// ✅ CORRECT: PascalCase for React components and types
+const ProductCard = ({ product }: ProductCardProps): JSX.Element => { ... }
+interface UserProfile { ... }
+
+// ✅ CORRECT: SCREAMING_SNAKE_CASE for constants
+const MAX_RETRY_ATTEMPTS = 3
+const API_ENDPOINTS = { ... }
+
+// ❌ INCORRECT: Don't mix conventions
+const user_name = 'John'  // Wrong: snake_case
+const CalculateTotal = () => { ... }  // Wrong: PascalCase for regular function
+```
+
+### Import Organization - REQUIRED ORDER
+
+```typescript
+// 1. Node modules (React, external libraries)
+import React, { useState, useEffect } from 'react'
+import { z } from 'zod'
+
+// 2. Internal utilities and configurations
+import { createSupabaseBrowserClient } from '@/lib/supabase'
+import { cn } from '@/lib/utils'
+
+// 3. Components (ordered: ui -> business components)
+import { Button } from '@/components/ui/button'
+import ProductCard from '@/components/shop/ProductCard'
+
+// 4. Types (always last)
+import type { Product } from '@/types/app'
+import type { Database } from '@/types/database'
+```
+
+## 🎨 Styling Guidelines - MANDATORY PRACTICES
+
+### Tailwind CSS - ONLY STYLING METHOD
+```typescript
+// ✅ REQUIRED: Use only Tailwind classes
+<div className="max-w-4xl mx-auto p-6 bg-white rounded-lg shadow-md">
+  <h1 className="text-2xl font-bold text-gray-900 mb-4">Title</h1>
+</div>
+
+// ❌ FORBIDDEN: No custom CSS files (except globals.css for variables)
+// ❌ FORBIDDEN: No inline styles
+// ❌ FORBIDDEN: No styled-components or emotion
+```
+
+### Responsive Design - MOBILE-FIRST MANDATORY
+```typescript
+// ✅ REQUIRED: Always mobile-first approach
+<div className="w-full md:w-1/2 lg:w-1/3 xl:w-1/4">
+  <div className="p-4 md:p-6 lg:p-8">
+    <h2 className="text-lg md:text-xl lg:text-2xl font-semibold">
+      Responsive Text
+    </h2>
+  </div>
+</div>
+
+// ❌ FORBIDDEN: Desktop-first breakpoints
+<div className="lg:w-full md:w-1/2 w-1/3"> // Wrong order
+```
+
+### shadcn/ui Integration - REQUIRED FOR UI COMPONENTS
+```typescript
+// ✅ REQUIRED: Use shadcn/ui components as base
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Card } from '@/components/ui/card'
+
+// ✅ CORRECT: Customize with additional Tailwind classes
+<Button className="w-full bg-coffee-600 hover:bg-coffee-700">
+  Order Coffee
+</Button>
+
+// ❌ FORBIDDEN: Creating custom button components when shadcn/ui exists
+```
+
+## ♿ Accessibility Guidelines - WCAG 2.1 AA COMPLIANCE
+
+### Semantic HTML - MANDATORY
+```typescript
+// ✅ REQUIRED: Always use semantic elements
+<main className="container mx-auto">
+  <section className="product-grid">
+    <h2 className="sr-only">Products</h2>
+    <article className="product-card">
+      <h3>Product Title</h3>
+      <p>Product description</p>
+      <button aria-label="Add Latte to cart">Add to Cart</button>
+    </article>
+  </section>
+</main>
+
+// ❌ FORBIDDEN: Generic div/span soup
+<div className="main-content">
+  <div className="section">
+    <div className="title">Products</div>
+    <div className="card" onClick={addToCart}>  {/* No keyboard support */}
+```
+
+### ARIA Labels - REQUIRED FOR INTERACTIVE ELEMENTS
+```typescript
+// ✅ REQUIRED: Descriptive ARIA labels
+<button
+  aria-label="Add Large Oat Milk Latte to cart for $5.99"
+  onClick={() => addToCart(product)}
+>
+  Add to Cart
+</button>
+
+<input
+  aria-label="Search coffee products"
+  aria-describedby="search-help"
+  placeholder="Search..."
+/>
+<div id="search-help" className="sr-only">
+  Type to search through our coffee menu
+</div>
+
+// ❌ FORBIDDEN: Generic or missing labels
+<button onClick={handleClick}>Click</button>  // No context
+<input placeholder="Search..."/>  // No label
+```
+
+### Focus Management - MANDATORY
+```typescript
+// ✅ REQUIRED: Visible focus indicators
+<button className="focus:outline-none focus:ring-2 focus:ring-coffee-500 focus:ring-offset-2">
+  Book Class
+</button>
+
+// ✅ REQUIRED: Focus trapping in modals
+const Modal = ({ isOpen, onClose }: ModalProps) => {
+  const firstFocusableRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (isOpen && firstFocusableRef.current) {
+      firstFocusableRef.current.focus()
+    }
+  }, [isOpen])
+
+  // Modal implementation with focus trapping
+}
+
+// ❌ FORBIDDEN: Removing focus indicators
+<button className="focus:outline-none"> // Must have alternative focus indicator
+```
+
+### Color Contrast - MINIMUM 4.5:1 RATIO
+```typescript
+// ✅ REQUIRED: High contrast text combinations
+<div className="bg-white text-gray-900">  // 21:1 ratio
+<div className="bg-gray-900 text-white">  // 21:1 ratio
+<div className="bg-coffee-600 text-white">  // Must test contrast
+
+// ❌ FORBIDDEN: Low contrast combinations
+<div className="bg-gray-200 text-gray-400">  // Likely fails contrast
+```
+
+## ⚡ Performance Best Practices - MANDATORY STANDARDS
+
+### Core Web Vitals - REQUIRED TARGETS
+```typescript
+// MANDATORY PERFORMANCE TARGETS:
+// - Largest Contentful Paint (LCP): < 2.5s
+// - First Input Delay (FID): < 100ms
+// - Cumulative Layout Shift (CLS): < 0.1
+// - Lighthouse Performance Score: > 90
+
+// ✅ REQUIRED: Optimize images
+<img
+  src="/images/coffee-hero.webp"
+  alt="Fresh coffee beans"
+  width={800}
+  height={600}
+  loading="lazy"
+  decoding="async"
+/>
+
+// ✅ REQUIRED: Code splitting with dynamic imports
+const AdminDashboard = lazy(() => import('@/components/admin/AdminDashboard'))
+
+// ✅ REQUIRED: Proper client directives in Astro
+<ProductCard client:visible />  // Load when visible
+<SearchBox client:load />      // Load immediately if critical
+```
+
+### Bundle Size - STRICT LIMITS
+```typescript
+// MANDATORY LIMITS:
+// - Initial JavaScript bundle: < 100KB gzipped
+// - Individual components: < 20KB gzipped
+// - Total page weight: < 500KB gzipped
+
+// ✅ REQUIRED: Tree shaking friendly imports
+import { createSupabaseBrowserClient } from '@/lib/supabase'
+
+// ❌ FORBIDDEN: Importing entire libraries
+import * as _ from 'lodash'  // Imports entire library
+```
+
+### Database Performance - REQUIRED OPTIMIZATIONS
+```sql
+-- ✅ REQUIRED: Index all frequently queried columns
+CREATE INDEX CONCURRENTLY idx_products_category_active
+ON products(category_id) WHERE is_active = true;
+
+-- ✅ REQUIRED: Use RLS policies efficiently
+CREATE POLICY "users_own_orders" ON orders
+FOR SELECT USING (user_id = auth.uid());
+
+-- ❌ FORBIDDEN: N+1 queries
+-- Always use joins or single queries with proper relations
+```
+
+## 🔒 Security Requirements - NON-NEGOTIABLE
+
+### Authentication & Authorization
+```typescript
+// ✅ REQUIRED: Check auth on all protected routes
+export const POST: APIRoute = async ({ request }) => {
+  const { data: { user }, error } = await supabase.auth.getUser()
+  if (!user) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    })
+  }
+  // Continue with authorized logic
+}
+
+// ✅ REQUIRED: Use RLS policies for data access
+// Never query data without proper RLS policies in place
+```
+
+### Input Validation - MANDATORY ZOD SCHEMAS
+```typescript
+// ✅ REQUIRED: Validate ALL inputs with Zod
+const createOrderSchema = z.object({
+  items: z.array(z.object({
+    productId: z.string().uuid(),
+    quantity: z.number().min(1).max(10),
+    customizations: z.record(z.string()).optional()
+  })),
+  customerInfo: z.object({
+    name: z.string().min(1).max(100),
+    email: z.string().email()
+  })
+})
+
+// ❌ FORBIDDEN: Unvalidated inputs
+const { items, customerInfo } = await request.json()  // No validation
+```
+
+### Secrets Management - CRITICAL SECURITY
+```typescript
+// ✅ REQUIRED: Environment variable validation
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY
+if (!STRIPE_SECRET_KEY) {
+  throw new Error('STRIPE_SECRET_KEY is required')
+}
+
+// ❌ FORBIDDEN: Hardcoded secrets or keys in code
+const stripeKey = 'sk_live_...' // Never do this
+```
+
+## 🧪 Testing Requirements - COMPREHENSIVE COVERAGE
+
+### Unit Testing - MINIMUM 80% COVERAGE
+```typescript
+// ✅ REQUIRED: Test all utility functions
+import { describe, it, expect } from 'vitest'
+import { calculateOrderTotal } from '@/lib/utils'
+
+describe('calculateOrderTotal', () => {
+  it('should calculate total with tax', () => {
+    const items = [{ price: 10, quantity: 2 }]
+    const result = calculateOrderTotal(items, 0.08)
+    expect(result).toBe(21.6) // $20 + 8% tax
+  })
+
+  it('should handle empty cart', () => {
+    const result = calculateOrderTotal([], 0.08)
+    expect(result).toBe(0)
+  })
+})
+```
+
+### E2E Testing - CRITICAL USER FLOWS
+```typescript
+// ✅ REQUIRED: Test complete business flows
+import { test, expect } from '@playwright/test'
+
+test('complete coffee order flow', async ({ page }) => {
+  // Test must cover: browse → add to cart → checkout → payment → confirmation
+  await page.goto('/menu')
+  await page.click('[data-testid="add-latte-to-cart"]')
+  await page.click('[data-testid="checkout"]')
+  // ... complete flow testing
+})
+
+test('yoga class booking flow', async ({ page }) => {
+  // Test must cover: login → browse classes → book → payment → confirmation
+  // ... complete flow testing
+})
+```
+
+## 📁 File Organization - STRICT STRUCTURE
+
+```
+src/
+├── components/
+│   ├── ui/              # shadcn/ui components ONLY
+│   ├── forms/           # Form components with Zod validation
+│   ├── booking/         # Yoga studio booking components
+│   ├── shop/            # Coffee shop e-commerce components
+│   ├── admin/           # Admin dashboard components
+│   └── layout/          # Layout and navigation components
+├── pages/
+│   ├── api/             # API endpoints with proper structure
+│   │   ├── auth/        # Authentication endpoints
+│   │   ├── coffee/      # Coffee shop APIs
+│   │   ├── yoga/        # Yoga studio APIs
+│   │   └── payments/    # Payment processing
+│   ├── auth/            # Auth pages (login, signup)
+│   ├── admin/           # Admin dashboard pages
+│   ├── booking/         # Yoga class booking pages
+│   └── shop/            # Coffee shop pages
+├── lib/                 # Utilities and configurations
+│   ├── supabase.ts      # Supabase client setup
+│   ├── stripe.ts        # Stripe configuration
+│   ├── utils.ts         # Utility functions
+│   ├── validations.ts   # Zod schemas
+│   └── constants.ts     # Application constants
+├── types/               # TypeScript type definitions
+│   ├── database.ts      # Generated Supabase types
+│   ├── stripe.ts        # Stripe type definitions
+│   └── app.ts           # Application-specific types
+└── styles/              # Global styles ONLY
+    └── globals.css      # Tailwind imports + CSS variables
+```
+
+## 🚫 FORBIDDEN PRACTICES
+
+### Absolutely Never Do These:
+
+1. **Use `any` type** - Zero tolerance policy
+2. **Create custom CSS files** - Use Tailwind only
+3. **Skip input validation** - All inputs must use Zod
+4. **Hardcode secrets** - Use environment variables
+5. **Skip error handling** - All functions must handle errors
+6. **Ignore accessibility** - WCAG 2.1 AA is mandatory
+7. **Skip tests** - All business logic must be tested
+8. **Use generic div elements** - Use semantic HTML
+9. **Skip TypeScript return types** - Must be explicit
+10. **Ignore performance budgets** - Must meet Core Web Vitals
+
+## ✅ SUCCESS CRITERIA
+
+Code is considered acceptable ONLY when ALL these conditions are met:
+
+- ✅ TypeScript compilation passes with NO errors or warnings
+- ✅ All tests pass (unit, integration, E2E)
+- ✅ Lighthouse score > 90 in all categories
+- ✅ WCAG 2.1 AA accessibility compliance
+- ✅ Core Web Vitals meet performance targets
+- ✅ Bundle size under limits
+- ✅ Zero security vulnerabilities
+- ✅ All business logic properly validated
+- ✅ Database queries optimized with proper indexes
+- ✅ All user flows tested end-to-end
+
+**Remember: This codebase is designed for AI collaboration. Following these rules ensures predictable, maintainable code that both humans and AI agents can understand and extend effectively.**

@@ -1,0 +1,895 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Create Checkout Layout and Progress Indicator",
+        "description": "Build the multi-step checkout layout structure with visual progress indication and responsive design using shadcn/ui components with claymorphism styling",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [],
+        "details": "Create the main checkout layout wrapper component that orchestrates the multi-step flow. Implement a progress indicator showing current and completed steps. Apply mobile-first responsive design with single column on mobile. Add step navigation logic with validation. Include breadcrumb navigation. Use claymorphism design with soft elevated cards.",
+        "testStrategy": "Unit test step navigation logic, integration test for layout responsiveness, E2E test for step progression flow",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create CheckoutLayout.tsx component",
+            "description": "Build main checkout layout wrapper with step management",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Create CheckoutLayout component in src/app/(shop)/checkout/components/. Implement step state management using React Context or useState. Add container with max-width and responsive padding. Apply claymorphism card styling.",
+            "testStrategy": "Unit test component rendering and step management"
+          },
+          {
+            "id": 2,
+            "title": "Build ProgressIndicator.tsx component",
+            "description": "Create visual progress indicator showing checkout steps",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Create ProgressIndicator component with steps array prop. Show completed, current, and upcoming steps visually. Add smooth transitions between steps. Use organic pill shapes for claymorphism design. Make responsive for mobile.",
+            "testStrategy": "Test step highlighting logic and responsive behavior"
+          },
+          {
+            "id": 3,
+            "title": "Implement step navigation logic",
+            "description": "Add logic for navigating between checkout steps with validation",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Create useCheckoutSteps hook for step management. Implement next/previous step functions. Add validation before allowing step progression. Handle browser back button properly. Persist step state in sessionStorage.",
+            "testStrategy": "Test navigation logic, validation gates, and state persistence"
+          },
+          {
+            "id": 4,
+            "title": "Add breadcrumb navigation",
+            "description": "Create breadcrumb component for easy step jumping",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "1.1",
+              "1.2"
+            ],
+            "details": "Build breadcrumb navigation showing all steps. Allow clicking to jump to previous completed steps. Disable future steps until requirements met. Show current step highlighted. Add to CheckoutLayout header.",
+            "testStrategy": "Test breadcrumb navigation and step access control"
+          },
+          {
+            "id": 5,
+            "title": "Apply responsive design",
+            "description": "Ensure checkout layout works perfectly on all devices",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1",
+              "1.2"
+            ],
+            "details": "Implement mobile-first responsive design. Stack components vertically on mobile. Use grid layout for desktop with sidebar. Test on various screen sizes. Ensure touch-friendly on mobile.",
+            "testStrategy": "Test on multiple viewport sizes and devices"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Build Customer Information Step",
+        "description": "Implement the first checkout step for collecting customer details with guest checkout support and optional account creation",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Create guest checkout form with email and contact fields. Add optional create account checkbox. Implement real-time email validation. Add returning customer login option. Handle authentication state and prefill for logged-in users. Store customer info in checkout state management.",
+        "testStrategy": "Unit test form validation, test authentication flow, test state persistence",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create CustomerInfo.tsx component",
+            "description": "Build customer information form component",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Create CustomerInfo component with form fields for email, first name, last name, phone. Use shadcn/ui form components. Add claymorphism styling to inputs.",
+            "testStrategy": "Test component rendering and form submission"
+          },
+          {
+            "id": 2,
+            "title": "Add guest checkout support",
+            "description": "Implement guest checkout without account requirement",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "2.1"
+            ],
+            "details": "Add 'Continue as guest' option. Create optional 'Create account' checkbox. Handle password fields conditionally. Store guest flag in checkout state.",
+            "testStrategy": "Test guest checkout flow and account creation option"
+          },
+          {
+            "id": 3,
+            "title": "Implement email validation",
+            "description": "Add real-time email validation with feedback",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "2.1"
+            ],
+            "details": "Use Zod schema for email validation. Show validation on blur. Display error messages below field. Check for valid email format.",
+            "testStrategy": "Test email validation rules and error display"
+          },
+          {
+            "id": 4,
+            "title": "Add returning customer login",
+            "description": "Create login option for existing customers",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "2.1"
+            ],
+            "details": "Add 'Already have an account? Sign in' link. Create mini login form or redirect. Prefill form after successful login. Handle Supabase auth.",
+            "testStrategy": "Test login flow and form prefilling"
+          },
+          {
+            "id": 5,
+            "title": "Handle authentication state",
+            "description": "Manage auth state and prefill for logged-in users",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "2.1",
+              "2.4"
+            ],
+            "details": "Check Supabase auth on component mount. Prefill form for authenticated users. Update checkout state with user info. Handle logout during checkout.",
+            "testStrategy": "Test auth state handling and data prefilling"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Create Shipping Address Form",
+        "description": "Build comprehensive shipping address form with EU country support, validation, and autofill capabilities",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Create address form with EU countries dropdown (DE, FR, NL, BE, AT, ES, IT). Implement postal code validation per country format. Add browser autofill support. Create address book for returning customers. Include special delivery instructions field. Apply claymorphism form styling.",
+        "testStrategy": "Unit test address validation schemas, test country-specific postal codes, test autofill functionality",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create ShippingAddress.tsx component",
+            "description": "Build shipping address form component",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Create ShippingAddress component with fields for name, company, address lines, city, postal code, country. Use shadcn/ui form components.",
+            "testStrategy": "Test component rendering and form structure"
+          },
+          {
+            "id": 2,
+            "title": "Add EU country selector",
+            "description": "Implement country dropdown with EU countries",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "3.1"
+            ],
+            "details": "Create country select with DE, FR, NL, BE, AT, ES, IT options. Use shadcn/ui Select component. Set Netherlands as default. Show country flags if available.",
+            "testStrategy": "Test country selection and default value"
+          },
+          {
+            "id": 3,
+            "title": "Implement postal code validation",
+            "description": "Add country-specific postal code validation",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "3.1",
+              "3.2"
+            ],
+            "details": "Create validation patterns per country. Dutch: 1234AB, German: 12345, French: 12345. Update validation when country changes. Show format hints.",
+            "testStrategy": "Test postal code formats for each country"
+          },
+          {
+            "id": 4,
+            "title": "Add browser autofill support",
+            "description": "Enable browser address autofill",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "3.1"
+            ],
+            "details": "Add proper autocomplete attributes. Use standard name attributes. Test with Chrome and Firefox autofill. Handle autofill styling.",
+            "testStrategy": "Test autofill functionality in different browsers"
+          },
+          {
+            "id": 5,
+            "title": "Add delivery instructions field",
+            "description": "Include optional delivery instructions textarea",
+            "status": "pending",
+            "priority": "low",
+            "dependencies": [
+              "3.1"
+            ],
+            "details": "Add textarea for special delivery instructions. Make it optional with character limit. Store in checkout state. Show character count.",
+            "testStrategy": "Test instructions field and character limit"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Build Billing Address Form",
+        "description": "Implement billing address collection with same-as-shipping optimization and VAT support for business customers",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "3"
+        ],
+        "details": "Create billing address form matching shipping structure. Add 'same as shipping' checkbox with state sync. Implement conditional form display. Include VAT number field for businesses. Handle address validation. Maintain separate billing state.",
+        "testStrategy": "Test same-as-shipping toggle, test VAT field validation, test state synchronization",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create BillingAddress.tsx component",
+            "description": "Build billing address form component",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "3.1"
+            ],
+            "details": "Create BillingAddress component matching ShippingAddress structure. Reuse address field components. Add to checkout step 3.",
+            "testStrategy": "Test component rendering and form structure"
+          },
+          {
+            "id": 2,
+            "title": "Implement same-as-shipping checkbox",
+            "description": "Add checkbox to use shipping address for billing",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "4.1"
+            ],
+            "details": "Add 'Same as shipping address' checkbox. When checked, hide billing form and copy shipping data. Update state when shipping changes. Default to checked.",
+            "testStrategy": "Test checkbox toggle and data synchronization"
+          },
+          {
+            "id": 3,
+            "title": "Add VAT number field",
+            "description": "Include VAT field for business customers",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "4.1"
+            ],
+            "details": "Add optional VAT number field. Validate EU VAT format. Show field only when business checkbox checked. Store in checkout state.",
+            "testStrategy": "Test VAT number validation and conditional display"
+          },
+          {
+            "id": 4,
+            "title": "Handle state synchronization",
+            "description": "Sync billing with shipping when checkbox checked",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "4.1",
+              "4.2"
+            ],
+            "details": "Watch shipping address changes. Auto-update billing when 'same as' checked. Clear billing when unchecked. Handle edge cases.",
+            "testStrategy": "Test state sync in various scenarios"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Integrate Stripe Payment Elements",
+        "description": "Set up Stripe Payment Elements for secure payment processing with multiple payment methods and 3D Secure support",
+        "status": "pending",
+        "priority": "critical",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Set up Stripe Payment Elements with React components. Create payment form component. Add support for card, SEPA, and iDEAL payment methods. Implement 3D Secure authentication. Handle payment errors gracefully. Create payment intent on server with order metadata.",
+        "testStrategy": "Integration test with Stripe test mode, test payment method switching, test 3D Secure flow, test error scenarios",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Install and configure Stripe packages",
+            "description": "Set up Stripe React components and SDK",
+            "status": "pending",
+            "priority": "critical",
+            "dependencies": [],
+            "details": "Install @stripe/stripe-js and @stripe/react-stripe-js. Configure Stripe provider with publishable key. Set up Elements provider.",
+            "testStrategy": "Test Stripe library initialization"
+          },
+          {
+            "id": 2,
+            "title": "Create PaymentForm.tsx component",
+            "description": "Build payment form with Stripe Elements",
+            "status": "pending",
+            "priority": "critical",
+            "dependencies": [
+              "5.1"
+            ],
+            "details": "Create PaymentForm component using Payment Element. Add to checkout step 4. Apply claymorphism styling to match design.",
+            "testStrategy": "Test payment form rendering and interaction"
+          },
+          {
+            "id": 3,
+            "title": "Create payment intent API endpoint",
+            "description": "Build API to create Stripe payment intents",
+            "status": "pending",
+            "priority": "critical",
+            "dependencies": [],
+            "details": "Create /api/stripe/create-payment-intent endpoint. Calculate order total with shipping. Include metadata. Return client secret.",
+            "testStrategy": "Test payment intent creation with various amounts"
+          },
+          {
+            "id": 4,
+            "title": "Handle 3D Secure authentication",
+            "description": "Implement 3D Secure payment flow",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "5.2",
+              "5.3"
+            ],
+            "details": "Handle authentication required status. Show 3D Secure modal. Wait for authentication. Handle success/failure.",
+            "testStrategy": "Test with 3D Secure test cards"
+          },
+          {
+            "id": 5,
+            "title": "Add payment error handling",
+            "description": "Handle and display payment errors",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "5.2"
+            ],
+            "details": "Catch payment errors. Display user-friendly messages. Allow retry. Log errors for debugging.",
+            "testStrategy": "Test with declining test cards"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Create Order Summary Component",
+        "description": "Build sticky order summary sidebar showing cart items, shipping, taxes, and totals with promo code support",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Create sticky sidebar (desktop) or collapsible section (mobile). Display cart items with images and quantities. Show real-time shipping and tax calculations. Add promo code input with validation. Include detailed total breakdown. Apply claymorphism floating panel design.",
+        "testStrategy": "Test responsive behavior, test promo code application, test calculation accuracy",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create OrderSummary.tsx component",
+            "description": "Build order summary sidebar component",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Create OrderSummary component. Make sticky on desktop, collapsible on mobile. Apply claymorphism floating panel style.",
+            "testStrategy": "Test component rendering and sticky behavior"
+          },
+          {
+            "id": 2,
+            "title": "Display cart items",
+            "description": "Show cart items with images and details",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "6.1"
+            ],
+            "details": "Fetch cart items from context/store. Display product images, names, quantities. Show individual prices. Allow quantity updates.",
+            "testStrategy": "Test cart item display and updates"
+          },
+          {
+            "id": 3,
+            "title": "Add promo code input",
+            "description": "Implement promo code functionality",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "6.1"
+            ],
+            "details": "Add promo code input field. Create apply button. Validate codes via API. Show discount amount. Handle invalid codes.",
+            "testStrategy": "Test promo code validation and application"
+          },
+          {
+            "id": 4,
+            "title": "Calculate and display totals",
+            "description": "Show subtotal, shipping, tax, and total",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "6.1",
+              "6.2"
+            ],
+            "details": "Calculate subtotal from cart items. Add shipping cost when selected. Calculate VAT (21% for NL). Show grand total prominently.",
+            "testStrategy": "Test calculation accuracy with various scenarios"
+          },
+          {
+            "id": 5,
+            "title": "Make responsive for mobile",
+            "description": "Optimize summary for mobile devices",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "6.1"
+            ],
+            "details": "Create collapsible summary on mobile. Show condensed view with total. Expand to show full details. Add smooth animations.",
+            "testStrategy": "Test mobile collapse/expand functionality"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Implement Shipping Method Selection",
+        "description": "Build shipping options selector with cost calculation based on destination and cart total",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "3"
+        ],
+        "details": "Create shipping method selector with radio buttons. Display delivery time estimates. Calculate shipping costs based on destination and cart total. Include express options (Standard, Express, Free over €50). Show carrier information (DHL, PostNL). Update order total on selection change.",
+        "testStrategy": "Test shipping calculation logic, test free shipping threshold, test UI updates on selection",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create ShippingMethod.tsx component",
+            "description": "Build shipping method selector component",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Create ShippingMethod component with radio button group. Use shadcn/ui RadioGroup. Show as checkout step 3.",
+            "testStrategy": "Test component rendering and selection"
+          },
+          {
+            "id": 2,
+            "title": "Define shipping methods data",
+            "description": "Create shipping options configuration",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Define Standard (€5.99, 3-5 days), Express (€12.99, 1-2 days), Free (€0, 5-7 days over €50). Include carrier info.",
+            "testStrategy": "Test shipping data structure"
+          },
+          {
+            "id": 3,
+            "title": "Implement shipping calculation",
+            "description": "Calculate shipping based on cart and location",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "7.1",
+              "7.2"
+            ],
+            "details": "Check cart total for free shipping threshold. Filter available methods. Consider destination country. Update checkout state.",
+            "testStrategy": "Test calculation with various cart totals"
+          },
+          {
+            "id": 4,
+            "title": "Display delivery estimates",
+            "description": "Show estimated delivery dates",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "7.1"
+            ],
+            "details": "Calculate delivery date ranges. Show estimated arrival dates. Consider weekends and holidays. Display carrier names.",
+            "testStrategy": "Test delivery date calculations"
+          },
+          {
+            "id": 5,
+            "title": "Update order total on selection",
+            "description": "Reflect shipping cost in order summary",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "7.1",
+              "6.4"
+            ],
+            "details": "Update order summary when method selected. Recalculate total with shipping. Store selection in checkout state.",
+            "testStrategy": "Test total updates when shipping changes"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Build Order Confirmation Flow",
+        "description": "Create order confirmation page and email system with receipt details and tracking information",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "5"
+        ],
+        "details": "Create confirmation page with receipt layout. Display complete order details and payment confirmation. Generate and send confirmation email. Include order tracking number. Show next steps timeline. Store order in Supabase with all details.",
+        "testStrategy": "Test order creation in database, test email generation, E2E test confirmation flow",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create confirmation page",
+            "description": "Build order confirmation page component",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Create /checkout/confirmation page. Show success message. Display order number prominently. Include print button.",
+            "testStrategy": "Test confirmation page rendering"
+          },
+          {
+            "id": 2,
+            "title": "Display order receipt",
+            "description": "Show detailed order information",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "8.1"
+            ],
+            "details": "Display order items, quantities, prices. Show shipping and billing addresses. Include payment method last 4 digits. Show totals breakdown.",
+            "testStrategy": "Test receipt data display"
+          },
+          {
+            "id": 3,
+            "title": "Create order in Supabase",
+            "description": "Store order data in database",
+            "status": "pending",
+            "priority": "critical",
+            "dependencies": [
+              "5.3"
+            ],
+            "details": "Create order record after payment success. Store customer info, addresses, items. Generate unique order number. Set initial status.",
+            "testStrategy": "Test database order creation"
+          },
+          {
+            "id": 4,
+            "title": "Send confirmation email",
+            "description": "Generate and send order confirmation email",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "8.3"
+            ],
+            "details": "Create email template with order details. Send via Resend or similar service. Include order tracking link. Handle email failures gracefully.",
+            "testStrategy": "Test email generation and sending"
+          },
+          {
+            "id": 5,
+            "title": "Add order tracking info",
+            "description": "Provide order tracking capabilities",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "8.1",
+              "8.3"
+            ],
+            "details": "Generate tracking number. Create order status page. Show estimated delivery timeline. Allow guest order lookup.",
+            "testStrategy": "Test tracking functionality"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Implement Form Validation System",
+        "description": "Create comprehensive form validation using Zod schemas with real-time feedback and error handling",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "3",
+          "4"
+        ],
+        "details": "Create Zod schemas for all form steps. Implement real-time field validation on blur. Add form-level validation before step progression. Create consistent error messages. Add required field indicators. Handle server-side validation responses.",
+        "testStrategy": "Unit test all validation schemas, test error message display, test validation timing",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create Zod validation schemas",
+            "description": "Define validation schemas for all forms",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Create schemas for customer info, shipping address, billing address. Define field requirements and formats. Export from lib/validations.",
+            "testStrategy": "Unit test each schema with valid/invalid data"
+          },
+          {
+            "id": 2,
+            "title": "Implement field-level validation",
+            "description": "Add real-time validation on blur",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "9.1"
+            ],
+            "details": "Validate fields on blur event. Show errors below fields. Clear errors on valid input. Use consistent error styling.",
+            "testStrategy": "Test validation triggers and error display"
+          },
+          {
+            "id": 3,
+            "title": "Add form-level validation",
+            "description": "Validate entire form before progression",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "9.1",
+              "9.2"
+            ],
+            "details": "Validate all fields on submit. Prevent step progression if invalid. Scroll to first error. Show summary of errors.",
+            "testStrategy": "Test form submission with various error states"
+          },
+          {
+            "id": 4,
+            "title": "Create error message component",
+            "description": "Build reusable error display component",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [],
+            "details": "Create FormError component. Use consistent red color and icon. Support field and form level errors. Add animations.",
+            "testStrategy": "Test error component variations"
+          },
+          {
+            "id": 5,
+            "title": "Add required field indicators",
+            "description": "Mark required fields visually",
+            "status": "pending",
+            "priority": "low",
+            "dependencies": [],
+            "details": "Add red asterisks to required field labels. Include '* Required' legend. Make accessible for screen readers.",
+            "testStrategy": "Test required field indicators display"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Add Error Handling and Recovery",
+        "description": "Build robust error handling throughout checkout with loading states, payment recovery, and retry logic",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "5",
+          "8"
+        ],
+        "details": "Add loading states for all async operations. Implement payment failure handling with retry. Create order recovery for abandoned checkouts. Handle network errors with offline detection. Implement exponential backoff retry logic. Show user-friendly error messages.",
+        "testStrategy": "Test payment failure scenarios, test network interruption, test recovery mechanisms",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add loading states",
+            "description": "Implement loading indicators for async operations",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Add loading spinners for API calls. Disable buttons during processing. Show skeleton loaders. Use consistent loading UI.",
+            "testStrategy": "Test loading states during async operations"
+          },
+          {
+            "id": 2,
+            "title": "Handle payment failures",
+            "description": "Implement payment error handling and retry",
+            "status": "pending",
+            "priority": "critical",
+            "dependencies": [
+              "5.5"
+            ],
+            "details": "Catch payment failures. Show specific error messages. Allow retry with same data. Suggest alternative payment methods.",
+            "testStrategy": "Test with various payment failure scenarios"
+          },
+          {
+            "id": 3,
+            "title": "Create order recovery mechanism",
+            "description": "Allow recovery of abandoned checkouts",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [],
+            "details": "Save checkout progress in localStorage. Restore on return. Clear after successful order. Add expiry timestamp.",
+            "testStrategy": "Test checkout recovery after abandonment"
+          },
+          {
+            "id": 4,
+            "title": "Handle network errors",
+            "description": "Deal with connection issues gracefully",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Detect offline status. Show connection error messages. Queue actions for retry. Implement offline mode where possible.",
+            "testStrategy": "Test with simulated network failures"
+          },
+          {
+            "id": 5,
+            "title": "Implement retry logic",
+            "description": "Add exponential backoff for failed requests",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [],
+            "details": "Implement exponential backoff. Set max retry attempts. Show retry status to user. Log failures for debugging.",
+            "testStrategy": "Test retry logic with failing endpoints"
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Mobile Optimization",
+        "description": "Ensure excellent mobile checkout experience with touch-optimized UI and mobile-specific enhancements",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7"
+        ],
+        "details": "Stack order summary below checkout form on mobile. Implement sticky CTA button at viewport bottom. Optimize touch targets. Add mobile-specific keyboard types. Ensure smooth scrolling between steps. Test on various devices and browsers.",
+        "testStrategy": "Test on multiple mobile devices, test touch interactions, test viewport handling",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Optimize mobile layout",
+            "description": "Stack components vertically on mobile",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.5",
+              "6.5"
+            ],
+            "details": "Use single column layout on mobile. Stack order summary below form. Ensure proper spacing. Test on various screen sizes.",
+            "testStrategy": "Test layout on multiple mobile devices"
+          },
+          {
+            "id": 2,
+            "title": "Add sticky CTA button",
+            "description": "Implement fixed continue button on mobile",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Add sticky footer with continue button. Show current step progress. Handle safe area insets. Add shadow for visibility.",
+            "testStrategy": "Test sticky button behavior and positioning"
+          },
+          {
+            "id": 3,
+            "title": "Optimize touch targets",
+            "description": "Ensure all interactive elements are touch-friendly",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [],
+            "details": "Ensure 44x44px minimum touch targets. Add padding to small buttons. Space elements appropriately. Test with touch devices.",
+            "testStrategy": "Test touch target sizes and spacing"
+          },
+          {
+            "id": 4,
+            "title": "Set mobile keyboard types",
+            "description": "Use appropriate keyboard for each input",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [],
+            "details": "Set inputmode='email' for email fields. Use 'tel' for phone numbers. Use 'numeric' for postal codes. Test keyboard behavior.",
+            "testStrategy": "Test keyboard types on mobile devices"
+          },
+          {
+            "id": 5,
+            "title": "Test mobile browsers",
+            "description": "Verify compatibility across mobile browsers",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "11.1",
+              "11.2",
+              "11.3",
+              "11.4"
+            ],
+            "details": "Test on iOS Safari, Chrome, Firefox. Test on Android Chrome, Firefox. Check viewport handling. Verify smooth scrolling.",
+            "testStrategy": "Cross-browser testing on mobile devices"
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "title": "Comprehensive Testing Implementation",
+        "description": "Create full test coverage including unit, integration, and E2E tests for the checkout flow",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11"
+        ],
+        "details": "Write unit tests for form validation logic. Create integration tests for Stripe payment flow. Implement E2E tests for complete checkout journey. Test error scenarios and edge cases. Verify mobile responsiveness. Test accessibility with screen readers.",
+        "testStrategy": "Achieve 80%+ code coverage, test all critical paths, verify accessibility compliance",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Write unit tests",
+            "description": "Create unit tests for validation and utilities",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "9.1"
+            ],
+            "details": "Test Zod schemas validation. Test utility functions. Test state management hooks. Use Vitest for unit tests.",
+            "testStrategy": "Achieve high coverage of business logic"
+          },
+          {
+            "id": 2,
+            "title": "Create integration tests",
+            "description": "Test Stripe payment integration",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "5.3",
+              "5.4"
+            ],
+            "details": "Test payment intent creation. Test 3D Secure flow. Test webhook handling. Use Stripe test mode.",
+            "testStrategy": "Test all payment scenarios"
+          },
+          {
+            "id": 3,
+            "title": "Implement E2E tests",
+            "description": "Test complete checkout journeys",
+            "status": "pending",
+            "priority": "high",
+            "dependencies": [
+              "1.1",
+              "2.1",
+              "3.1",
+              "4.1",
+              "5.2",
+              "8.1"
+            ],
+            "details": "Test guest checkout flow. Test returning customer flow. Test payment success and failure. Use Playwright for E2E.",
+            "testStrategy": "Test critical user paths end-to-end"
+          },
+          {
+            "id": 4,
+            "title": "Test error scenarios",
+            "description": "Verify error handling works correctly",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [
+              "10.1",
+              "10.2",
+              "10.4"
+            ],
+            "details": "Test network failures. Test payment declines. Test validation errors. Test recovery mechanisms.",
+            "testStrategy": "Cover all error paths"
+          },
+          {
+            "id": 5,
+            "title": "Test accessibility",
+            "description": "Ensure WCAG compliance",
+            "status": "pending",
+            "priority": "medium",
+            "dependencies": [],
+            "details": "Test with screen readers. Verify keyboard navigation. Check color contrast. Test focus management.",
+            "testStrategy": "Meet WCAG 2.1 AA standards"
+          }
+        ]
+      }
+    ],
+    "metadata": {
+      "created": "2025-09-18T20:44:57.613Z",
+      "updated": "2025-09-18T20:44:57.614Z",
+      "description": "Tasks for master context"
+    }
+  }
+}

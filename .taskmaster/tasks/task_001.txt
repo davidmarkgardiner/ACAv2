@@ -1,0 +1,43 @@
+# Task ID: 1
+# Title: Create Checkout Layout and Progress Indicator
+# Status: pending
+# Dependencies: None
+# Priority: high
+# Description: Build the multi-step checkout layout structure with visual progress indication and responsive design using shadcn/ui components with claymorphism styling
+# Details:
+Create the main checkout layout wrapper component that orchestrates the multi-step flow. Implement a progress indicator showing current and completed steps. Apply mobile-first responsive design with single column on mobile. Add step navigation logic with validation. Include breadcrumb navigation. Use claymorphism design with soft elevated cards.
+
+# Test Strategy:
+Unit test step navigation logic, integration test for layout responsiveness, E2E test for step progression flow
+
+# Subtasks:
+## 1. Create CheckoutLayout.tsx component [pending]
+### Dependencies: None
+### Description: Build main checkout layout wrapper with step management
+### Details:
+Create CheckoutLayout component in src/app/(shop)/checkout/components/. Implement step state management using React Context or useState. Add container with max-width and responsive padding. Apply claymorphism card styling.
+
+## 2. Build ProgressIndicator.tsx component [pending]
+### Dependencies: None
+### Description: Create visual progress indicator showing checkout steps
+### Details:
+Create ProgressIndicator component with steps array prop. Show completed, current, and upcoming steps visually. Add smooth transitions between steps. Use organic pill shapes for claymorphism design. Make responsive for mobile.
+
+## 3. Implement step navigation logic [pending]
+### Dependencies: 1.1
+### Description: Add logic for navigating between checkout steps with validation
+### Details:
+Create useCheckoutSteps hook for step management. Implement next/previous step functions. Add validation before allowing step progression. Handle browser back button properly. Persist step state in sessionStorage.
+
+## 4. Add breadcrumb navigation [pending]
+### Dependencies: 1.1, 1.2
+### Description: Create breadcrumb component for easy step jumping
+### Details:
+Build breadcrumb navigation showing all steps. Allow clicking to jump to previous completed steps. Disable future steps until requirements met. Show current step highlighted. Add to CheckoutLayout header.
+
+## 5. Apply responsive design [pending]
+### Dependencies: 1.1, 1.2
+### Description: Ensure checkout layout works perfectly on all devices
+### Details:
+Implement mobile-first responsive design. Stack components vertically on mobile. Use grid layout for desktop with sidebar. Test on various screen sizes. Ensure touch-friendly on mobile.
+

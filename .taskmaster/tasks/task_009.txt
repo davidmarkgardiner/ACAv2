@@ -1,0 +1,43 @@
+# Task ID: 9
+# Title: Implement Form Validation System
+# Status: pending
+# Dependencies: 2, 3, 4
+# Priority: high
+# Description: Create comprehensive form validation using Zod schemas with real-time feedback and error handling
+# Details:
+Create Zod schemas for all form steps. Implement real-time field validation on blur. Add form-level validation before step progression. Create consistent error messages. Add required field indicators. Handle server-side validation responses.
+
+# Test Strategy:
+Unit test all validation schemas, test error message display, test validation timing
+
+# Subtasks:
+## 1. Create Zod validation schemas [pending]
+### Dependencies: None
+### Description: Define validation schemas for all forms
+### Details:
+Create schemas for customer info, shipping address, billing address. Define field requirements and formats. Export from lib/validations.
+
+## 2. Implement field-level validation [pending]
+### Dependencies: 9.1
+### Description: Add real-time validation on blur
+### Details:
+Validate fields on blur event. Show errors below fields. Clear errors on valid input. Use consistent error styling.
+
+## 3. Add form-level validation [pending]
+### Dependencies: 9.1, 9.2
+### Description: Validate entire form before progression
+### Details:
+Validate all fields on submit. Prevent step progression if invalid. Scroll to first error. Show summary of errors.
+
+## 4. Create error message component [pending]
+### Dependencies: None
+### Description: Build reusable error display component
+### Details:
+Create FormError component. Use consistent red color and icon. Support field and form level errors. Add animations.
+
+## 5. Add required field indicators [pending]
+### Dependencies: None
+### Description: Mark required fields visually
+### Details:
+Add red asterisks to required field labels. Include '* Required' legend. Make accessible for screen readers.
+

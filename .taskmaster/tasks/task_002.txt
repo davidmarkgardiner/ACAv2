@@ -1,0 +1,43 @@
+# Task ID: 2
+# Title: Build Customer Information Step
+# Status: pending
+# Dependencies: 1
+# Priority: high
+# Description: Implement the first checkout step for collecting customer details with guest checkout support and optional account creation
+# Details:
+Create guest checkout form with email and contact fields. Add optional create account checkbox. Implement real-time email validation. Add returning customer login option. Handle authentication state and prefill for logged-in users. Store customer info in checkout state management.
+
+# Test Strategy:
+Unit test form validation, test authentication flow, test state persistence
+
+# Subtasks:
+## 1. Create CustomerInfo.tsx component [pending]
+### Dependencies: 1.1
+### Description: Build customer information form component
+### Details:
+Create CustomerInfo component with form fields for email, first name, last name, phone. Use shadcn/ui form components. Add claymorphism styling to inputs.
+
+## 2. Add guest checkout support [pending]
+### Dependencies: 2.1
+### Description: Implement guest checkout without account requirement
+### Details:
+Add 'Continue as guest' option. Create optional 'Create account' checkbox. Handle password fields conditionally. Store guest flag in checkout state.
+
+## 3. Implement email validation [pending]
+### Dependencies: 2.1
+### Description: Add real-time email validation with feedback
+### Details:
+Use Zod schema for email validation. Show validation on blur. Display error messages below field. Check for valid email format.
+
+## 4. Add returning customer login [pending]
+### Dependencies: 2.1
+### Description: Create login option for existing customers
+### Details:
+Add 'Already have an account? Sign in' link. Create mini login form or redirect. Prefill form after successful login. Handle Supabase auth.
+
+## 5. Handle authentication state [pending]
+### Dependencies: 2.1, 2.4
+### Description: Manage auth state and prefill for logged-in users
+### Details:
+Check Supabase auth on component mount. Prefill form for authenticated users. Update checkout state with user info. Handle logout during checkout.
+

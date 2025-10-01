@@ -1,0 +1,215 @@
+# Checkout Flow Components Implementation PRD
+
+## Project Overview
+Implement a complete multi-step checkout flow for a Honduras coffee e-commerce site using React, TypeScript, shadcn/ui components with claymorphism design, Stripe Payment Elements, and Supabase backend.
+
+## Key Requirements
+
+### 1. Multi-Step Checkout Layout with Progress Indicator
+Create a responsive multi-step checkout layout that guides users through the purchase process with clear visual progress indication.
+
+Requirements:
+- Build multi-step checkout layout structure with step navigation
+- Implement progress indicator component showing current step and completed steps
+- Create mobile-first responsive design with single column on mobile
+- Add step navigation logic with validation before proceeding
+- Include breadcrumb navigation for easy step jumping
+- Apply claymorphism styling with soft elevated cards and organic shapes
+
+### 2. Customer Information Step
+Implement the first step of checkout for collecting customer details with guest checkout support.
+
+Requirements:
+- Create guest checkout form with email and contact details
+- Add optional "create account" checkbox for new customers
+- Implement real-time email validation with error messages
+- Add returning customer login option with authentication
+- Handle authentication state and prefill for logged-in users
+- Store customer info in checkout state management
+
+### 3. Shipping Address Form
+Build comprehensive shipping address form with EU country support and validation.
+
+Requirements:
+- Create address form with all EU countries dropdown (DE, FR, NL, BE, AT, ES, IT)
+- Implement field validation for postal codes per country format
+- Add browser autofill support for address fields
+- Create address book functionality for returning customers
+- Include special delivery instructions text field
+- Apply claymorphism form field styling with inset effects
+
+### 4. Billing Address Form
+Implement billing address collection with same-as-shipping optimization.
+
+Requirements:
+- Create billing address form matching shipping structure
+- Add "same as shipping address" checkbox with state sync
+- Implement conditional form display based on checkbox
+- Include VAT number field for business customers
+- Handle address validation for billing addresses
+- Maintain separate billing state in checkout flow
+
+### 5. Stripe Payment Elements Integration
+Integrate Stripe Payment Elements for secure payment processing.
+
+Requirements:
+- Set up Stripe Payment Elements with React components
+- Create payment form component with card element
+- Add support for multiple payment methods (card, SEPA, iDEAL)
+- Implement 3D Secure authentication handling
+- Handle payment errors with user-friendly messages
+- Create payment intent on server with order metadata
+
+### 6. Order Summary Sidebar Component
+Build sticky order summary showing cart items and totals.
+
+Requirements:
+- Create sticky sidebar component (desktop) or collapsible section (mobile)
+- Display cart items with product images and quantities
+- Show real-time shipping and tax calculations
+- Add promo code input with validation
+- Include detailed order total breakdown
+- Apply claymorphism floating panel design with backdrop blur
+
+### 7. Shipping Method Selection
+Implement shipping options with cost calculation.
+
+Requirements:
+- Create shipping method selector with radio buttons
+- Display delivery time estimates for each method
+- Calculate shipping costs based on destination and cart total
+- Include express delivery options (Standard, Express, Free over €50)
+- Show carrier information (DHL, PostNL)
+- Update order total when shipping method changes
+
+### 8. Order Confirmation Flow
+Build confirmation page and email system.
+
+Requirements:
+- Create order confirmation page with receipt layout
+- Display complete order details and payment confirmation
+- Generate and send order confirmation email
+- Include order tracking information and number
+- Show next steps timeline and expected delivery
+- Store order in Supabase with all details
+
+### 9. Form Validation System
+Implement comprehensive form validation with Zod.
+
+Requirements:
+- Create Zod schemas for all form steps
+- Implement real-time field validation on blur
+- Add form-level validation before step progression
+- Create consistent validation error messages
+- Add required field indicators with asterisks
+- Handle server-side validation responses
+
+### 10. Error Handling and Recovery
+Build robust error handling throughout checkout.
+
+Requirements:
+- Add loading states for all async operations
+- Implement payment failure handling with retry
+- Create order recovery mechanism for abandoned checkouts
+- Handle network errors with offline detection
+- Implement exponential backoff retry logic
+- Show user-friendly error messages with recovery actions
+
+### 11. Mobile Optimization
+Ensure excellent mobile checkout experience.
+
+Requirements:
+- Stack order summary below checkout form on mobile
+- Implement sticky CTA button at viewport bottom
+- Optimize touch targets for mobile interaction
+- Add mobile-specific keyboard types for inputs
+- Ensure smooth scrolling between steps
+- Test on various mobile devices and browsers
+
+### 12. Testing Implementation
+Create comprehensive test coverage.
+
+Requirements:
+- Write unit tests for form validation logic
+- Create integration tests for Stripe payment flow
+- Implement E2E tests for complete checkout journey
+- Test error scenarios and edge cases
+- Verify mobile responsiveness across devices
+- Test accessibility with screen readers
+
+## Technical Architecture
+
+### Component Structure
+```
+src/app/(shop)/checkout/
+├── page.tsx                    # Main checkout orchestrator
+├── confirmation/page.tsx       # Order confirmation
+├── components/
+│   ├── CheckoutLayout.tsx     # Main layout wrapper
+│   ├── CustomerInfo.tsx       # Customer details form
+│   ├── ShippingAddress.tsx    # Shipping address form
+│   ├── BillingAddress.tsx     # Billing address form
+│   ├── ShippingMethod.tsx     # Shipping options
+│   ├── PaymentForm.tsx        # Stripe payment form
+│   ├── OrderSummary.tsx       # Order summary sidebar
+│   └── ProgressIndicator.tsx  # Step progress bar
+```
+
+### State Management
+- Use React Context or Zustand for checkout state
+- Persist checkout data in localStorage for recovery
+- Clear sensitive data after completion
+
+### API Endpoints
+- POST /api/stripe/create-payment-intent - Create Stripe payment intent
+- POST /api/orders/create - Create order in Supabase
+- POST /api/orders/confirm - Confirm order after payment
+- GET /api/shipping/calculate - Calculate shipping costs
+
+### Database Schema
+- orders table with customer, shipping, billing, items
+- order_items table with product details and quantities
+- shipping_methods table with rates and regions
+- promo_codes table with discounts
+
+## Design Requirements
+
+### Claymorphism Theme
+- Soft elevated cards with rounded corners (radius-lg)
+- Organic progress indicators with smooth transitions
+- Inset form fields with subtle shadows
+- Floating order summary with glass effect
+- Smooth color transitions on interactions
+- Natural, earthy color palette
+
+### Responsive Breakpoints
+- Mobile: < 640px (single column)
+- Tablet: 640px - 1024px (condensed sidebar)
+- Desktop: > 1024px (full sidebar layout)
+
+## Security Considerations
+- PCI compliance via Stripe hosted fields
+- Server-side validation for all inputs
+- Rate limiting on API endpoints
+- Secure session handling
+- HTTPS only for production
+
+## Performance Targets
+- Page load < 2 seconds
+- Step transitions < 300ms
+- Payment processing < 5 seconds
+- Form validation < 100ms response
+
+## Accessibility Requirements
+- WCAG 2.1 AA compliance
+- Keyboard navigation support
+- Screen reader compatibility
+- Clear error announcements
+- Focus management between steps
+
+## Success Metrics
+- Checkout conversion rate > 70%
+- Cart abandonment rate < 30%
+- Average checkout time < 3 minutes
+- Payment success rate > 95%
+- Mobile checkout usage > 40%

@@ -1,0 +1,43 @@
+# Task ID: 6
+# Title: Create Order Summary Component
+# Status: pending
+# Dependencies: 1
+# Priority: high
+# Description: Build sticky order summary sidebar showing cart items, shipping, taxes, and totals with promo code support
+# Details:
+Create sticky sidebar (desktop) or collapsible section (mobile). Display cart items with images and quantities. Show real-time shipping and tax calculations. Add promo code input with validation. Include detailed total breakdown. Apply claymorphism floating panel design.
+
+# Test Strategy:
+Test responsive behavior, test promo code application, test calculation accuracy
+
+# Subtasks:
+## 1. Create OrderSummary.tsx component [pending]
+### Dependencies: 1.1
+### Description: Build order summary sidebar component
+### Details:
+Create OrderSummary component. Make sticky on desktop, collapsible on mobile. Apply claymorphism floating panel style.
+
+## 2. Display cart items [pending]
+### Dependencies: 6.1
+### Description: Show cart items with images and details
+### Details:
+Fetch cart items from context/store. Display product images, names, quantities. Show individual prices. Allow quantity updates.
+
+## 3. Add promo code input [pending]
+### Dependencies: 6.1
+### Description: Implement promo code functionality
+### Details:
+Add promo code input field. Create apply button. Validate codes via API. Show discount amount. Handle invalid codes.
+
+## 4. Calculate and display totals [pending]
+### Dependencies: 6.1, 6.2
+### Description: Show subtotal, shipping, tax, and total
+### Details:
+Calculate subtotal from cart items. Add shipping cost when selected. Calculate VAT (21% for NL). Show grand total prominently.
+
+## 5. Make responsive for mobile [pending]
+### Dependencies: 6.1
+### Description: Optimize summary for mobile devices
+### Details:
+Create collapsible summary on mobile. Show condensed view with total. Expand to show full details. Add smooth animations.
+

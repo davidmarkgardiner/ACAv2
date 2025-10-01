@@ -1,0 +1,43 @@
+# Task ID: 3
+# Title: Create Shipping Address Form
+# Status: pending
+# Dependencies: 1
+# Priority: high
+# Description: Build comprehensive shipping address form with EU country support, validation, and autofill capabilities
+# Details:
+Create address form with EU countries dropdown (DE, FR, NL, BE, AT, ES, IT). Implement postal code validation per country format. Add browser autofill support. Create address book for returning customers. Include special delivery instructions field. Apply claymorphism form styling.
+
+# Test Strategy:
+Unit test address validation schemas, test country-specific postal codes, test autofill functionality
+
+# Subtasks:
+## 1. Create ShippingAddress.tsx component [pending]
+### Dependencies: 1.1
+### Description: Build shipping address form component
+### Details:
+Create ShippingAddress component with fields for name, company, address lines, city, postal code, country. Use shadcn/ui form components.
+
+## 2. Add EU country selector [pending]
+### Dependencies: 3.1
+### Description: Implement country dropdown with EU countries
+### Details:
+Create country select with DE, FR, NL, BE, AT, ES, IT options. Use shadcn/ui Select component. Set Netherlands as default. Show country flags if available.
+
+## 3. Implement postal code validation [pending]
+### Dependencies: 3.1, 3.2
+### Description: Add country-specific postal code validation
+### Details:
+Create validation patterns per country. Dutch: 1234AB, German: 12345, French: 12345. Update validation when country changes. Show format hints.
+
+## 4. Add browser autofill support [pending]
+### Dependencies: 3.1
+### Description: Enable browser address autofill
+### Details:
+Add proper autocomplete attributes. Use standard name attributes. Test with Chrome and Firefox autofill. Handle autofill styling.
+
+## 5. Add delivery instructions field [pending]
+### Dependencies: 3.1
+### Description: Include optional delivery instructions textarea
+### Details:
+Add textarea for special delivery instructions. Make it optional with character limit. Store in checkout state. Show character count.
+

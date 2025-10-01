@@ -1,0 +1,50 @@
+# Teller Configuration
+# Secure secrets management for local development
+# This file defines how secrets are fetched from Google Cloud Secret Manager
+
+project: 240676728422
+
+# Default configuration for all environments
+defaults:
+  confirm: false
+  carry_env: true
+
+providers:
+  google_secretmanager:
+    kind: google_secretmanager
+    maps:
+      - id: secrets
+        path: projects/240676728422
+        keys:
+          elevenlabs-api-key: ELEVENLABS_API_KEY
+          docker-registry-username: DOCKER_USERNAME
+          docker-registry-password: DOCKER_PASSWORD
+          brave-api-key: BRAVE_API_KEY
+          firecrawl-api: FIRECRAWL_API_KEY
+          azure-subscription-id: AZURE_SUBSCRIPTION_ID
+          azure-tenant-id: AZURE_TENANT_ID
+          azure-client-id-contributor: AZURE_CLIENT_ID_CONTRIBUTOR
+          azure-client-secret-contributor: AZURE_CLIENT_SECRET_CONTRIBUTOR
+          openai-api-key: OPENAI_API_KEY
+          supabase-yoga-db-password: SUPABASE_YOGA_DB_PASSWORD
+          supabase-yoga-secret-key: SUPABASE_YOGA_SECRET_KEY
+          supabase-yoga-publishable-key: SUPABASE_YOGA_PUBLISHABLE_KEY
+          supabase-yoga-public-url: SUPABASE_YOGA_PUBLIC_URL
+          public-supabase-anon-key: PUBLIC_SUPABASE_ANON_KEY
+          supabase-service-role-key: SUPABASE_SERVICE_ROLE_KEY
+          supabase-yoga-project-ref: SUPABASE_YOGA_PROJECT_REF
+          supabase-access-token: SUPABASE_ACCESS_TOKEN
+          unsplash-access-key: UNSPLASH_ACCESS_KEY
+          unsplash-secret-key: UNSPLASH_SECRET_KEY
+          anthropic-base-url: ANTHROPIC_BASE_URL
+          anthropic-auth-token: ANTHROPIC_AUTH_TOKEN
+          stripe-publishable-key: STRIPE_PUBLISHABLE_KEY
+          stripe-secret-key: STRIPE_SECRET_KEY
+          github-token-shadcn: GITHUB_TOKEN_SHADCN
+
+# Template mappings for MCP configuration
+mappings:
+  - from: google_secretmanager:secrets
+    to:
+      path: .mcp.json
+      template_path: templates/mcp.json.tpl

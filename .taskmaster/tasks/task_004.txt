@@ -1,0 +1,37 @@
+# Task ID: 4
+# Title: Build Billing Address Form
+# Status: pending
+# Dependencies: 3
+# Priority: high
+# Description: Implement billing address collection with same-as-shipping optimization and VAT support for business customers
+# Details:
+Create billing address form matching shipping structure. Add 'same as shipping' checkbox with state sync. Implement conditional form display. Include VAT number field for businesses. Handle address validation. Maintain separate billing state.
+
+# Test Strategy:
+Test same-as-shipping toggle, test VAT field validation, test state synchronization
+
+# Subtasks:
+## 1. Create BillingAddress.tsx component [pending]
+### Dependencies: 3.1
+### Description: Build billing address form component
+### Details:
+Create BillingAddress component matching ShippingAddress structure. Reuse address field components. Add to checkout step 3.
+
+## 2. Implement same-as-shipping checkbox [pending]
+### Dependencies: 4.1
+### Description: Add checkbox to use shipping address for billing
+### Details:
+Add 'Same as shipping address' checkbox. When checked, hide billing form and copy shipping data. Update state when shipping changes. Default to checked.
+
+## 3. Add VAT number field [pending]
+### Dependencies: 4.1
+### Description: Include VAT field for business customers
+### Details:
+Add optional VAT number field. Validate EU VAT format. Show field only when business checkbox checked. Store in checkout state.
+
+## 4. Handle state synchronization [pending]
+### Dependencies: 4.1, 4.2
+### Description: Sync billing with shipping when checkbox checked
+### Details:
+Watch shipping address changes. Auto-update billing when 'same as' checked. Clear billing when unchecked. Handle edge cases.
+

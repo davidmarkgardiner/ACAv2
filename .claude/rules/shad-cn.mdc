@@ -1,0 +1,17 @@
+
+---
+description:
+globs:
+alwaysApply: false
+---
+
+Usage Rule
+When asked to use shadcn compnenets Use the MCP server. 
+
+Plotting rule 
+We're asked to Plan anything related to Shadcn
+
+Use the MCP server during planning. 
+Apply components wherever components are applicable. 
+Use whole blocks where possible. (e.g. login page, calendar)
+

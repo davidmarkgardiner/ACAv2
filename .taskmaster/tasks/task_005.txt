@@ -1,0 +1,43 @@
+# Task ID: 5
+# Title: Integrate Stripe Payment Elements
+# Status: pending
+# Dependencies: 1
+# Priority: critical
+# Description: Set up Stripe Payment Elements for secure payment processing with multiple payment methods and 3D Secure support
+# Details:
+Set up Stripe Payment Elements with React components. Create payment form component. Add support for card, SEPA, and iDEAL payment methods. Implement 3D Secure authentication. Handle payment errors gracefully. Create payment intent on server with order metadata.
+
+# Test Strategy:
+Integration test with Stripe test mode, test payment method switching, test 3D Secure flow, test error scenarios
+
+# Subtasks:
+## 1. Install and configure Stripe packages [pending]
+### Dependencies: None
+### Description: Set up Stripe React components and SDK
+### Details:
+Install @stripe/stripe-js and @stripe/react-stripe-js. Configure Stripe provider with publishable key. Set up Elements provider.
+
+## 2. Create PaymentForm.tsx component [pending]
+### Dependencies: 5.1
+### Description: Build payment form with Stripe Elements
+### Details:
+Create PaymentForm component using Payment Element. Add to checkout step 4. Apply claymorphism styling to match design.
+
+## 3. Create payment intent API endpoint [pending]
+### Dependencies: None
+### Description: Build API to create Stripe payment intents
+### Details:
+Create /api/stripe/create-payment-intent endpoint. Calculate order total with shipping. Include metadata. Return client secret.
+
+## 4. Handle 3D Secure authentication [pending]
+### Dependencies: 5.2, 5.3
+### Description: Implement 3D Secure payment flow
+### Details:
+Handle authentication required status. Show 3D Secure modal. Wait for authentication. Handle success/failure.
+
+## 5. Add payment error handling [pending]
+### Dependencies: 5.2
+### Description: Handle and display payment errors
+### Details:
+Catch payment errors. Display user-friendly messages. Allow retry. Log errors for debugging.
+

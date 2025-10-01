@@ -1,0 +1,184 @@
+# User Account Dashboard - Product Requirements Document
+
+## Overview
+Build a comprehensive user account dashboard for the Honduras Coffee e-commerce platform. The dashboard will serve as a central hub for registered customers to manage their profile, orders, subscriptions, and account settings.
+
+## Technical Stack
+- Frontend: React + TypeScript + Tailwind CSS + shadcn/ui
+- Styling: Claymorphism design theme with organic shapes and soft elevation
+- Backend: Supabase (PostgreSQL + Auth)
+- Payments: Stripe integration
+- File Generation: PDF generation for invoices/receipts
+
+## Core Requirements
+
+### 1. Dashboard Layout & Overview
+Create a responsive dashboard layout with sidebar navigation and overview page showing:
+- Quick stats (total orders, active subscriptions, loyalty points)
+- Recent orders summary (last 3-5 orders)
+- Quick action buttons (reorder, manage subscription, update profile)
+- Mobile-optimized experience with collapsible sidebar
+- Claymorphism design with soft elevated cards
+
+### 2. Profile Management
+Build profile editing interface with:
+- Personal information form (name, email, phone)
+- Avatar upload functionality
+- Timezone and language settings
+- Profile completion indicator
+- Form validation and error handling
+
+### 3. Order History Section
+Implement comprehensive order management with:
+- Order listing with pagination (10 orders per page)
+- Order detail modal/page with full information
+- Order filtering by status, date range, search
+- Reorder functionality with one-click
+- Order status tracking with timeline
+- Download order invoice as PDF
+
+### 4. Address Book Management
+Create address management system with:
+- List of saved addresses (shipping and billing)
+- Add/edit/delete address forms
+- Set default shipping/billing addresses
+- Address validation
+- Confirmation dialogs for deletion
+
+### 5. Subscription Management
+Build subscription control panel with:
+- Overview of active subscriptions
+- Modify subscription frequency and quantity
+- Pause/resume subscription functionality
+- Delivery schedule management
+- Subscription cancellation with confirmation
+- Next delivery date display
+
+### 6. Payment Methods
+Implement payment management with:
+- List of saved payment methods
+- Stripe Customer Portal integration
+- Add/remove payment methods
+- Set default payment method
+- Billing history view
+
+### 7. Preference Settings
+Create preference management with:
+- Email notification preferences
+- Marketing consent toggles
+- Email frequency settings
+- Privacy settings
+- Communication channel preferences
+
+### 8. Invoice & Receipt Downloads
+Generate and provide:
+- PDF invoice generation for orders
+- Download functionality for invoices
+- Email resend option for receipts
+- Invoice history listing
+- Tax document generation
+
+### 9. Security Settings
+Build security features including:
+- Password change form with validation
+- Two-factor authentication setup
+- Login activity log display
+- Active device management
+- Account deletion option with confirmation
+
+### 10. Data Export (GDPR Compliance)
+Implement data portability with:
+- User data export request
+- Generate JSON/CSV data package
+- Include all user data (profile, orders, preferences)
+- Automated export email delivery
+- Privacy compliance documentation
+
+### 11. Error Handling & Loading States
+Ensure robust UX with:
+- Loading skeletons for all data fetching
+- Error boundaries for component failures
+- Retry mechanisms for failed requests
+- Success/error toast notifications
+- Network failure handling
+
+### 12. Testing & Validation
+Complete test coverage including:
+- Unit tests for all components
+- Integration tests for data flows
+- E2E tests for user workflows
+- Mobile responsiveness testing
+- Accessibility compliance testing
+
+## UI/UX Requirements
+
+### Design Theme - Claymorphism
+- Soft elevated sections with subtle shadows
+- Organic shapes and rounded corners
+- Smooth transitions and hover effects
+- Muted color palette with coffee tones
+- Natural textures and gradients
+
+### Component Library
+- Use shadcn/ui components as foundation
+- Customize with claymorphism styling
+- Maintain consistent spacing and typography
+- Implement responsive breakpoints
+- Support dark mode variant
+
+### Mobile Experience
+- Touch-optimized interactions
+- Swipe gestures for navigation
+- Collapsible sidebar menu
+- Bottom navigation for key actions
+- Optimized loading for mobile networks
+
+## Technical Implementation
+
+### Route Structure
+```
+/account/                    # Dashboard overview
+/account/profile            # Profile management
+/account/orders             # Order history
+/account/orders/[id]        # Order details
+/account/addresses          # Address book
+/account/subscriptions      # Subscription management
+/account/payments           # Payment methods
+/account/preferences        # Settings
+/account/security           # Security settings
+```
+
+### Component Architecture
+- DashboardLayout wrapper component
+- Reusable card components for data display
+- Form components with validation
+- Modal/dialog components for actions
+- Loading skeleton components
+
+### State Management
+- Use React hooks and context for local state
+- SWR or React Query for data fetching
+- Form state with React Hook Form
+- Toast notifications with state management
+
+### API Integration
+- Supabase client for database operations
+- Stripe API for payment management
+- PDF generation API for invoices
+- File download utilities
+
+## Success Criteria
+- All 12 acceptance criteria fully implemented
+- 100% TypeScript coverage with no any types
+- Mobile-first responsive design
+- Accessibility WCAG 2.1 AA compliance
+- Performance metrics: LCP < 2.5s, FID < 100ms
+- Complete test coverage for critical paths
+
+## Development Priority
+1. UI Foundation - Layout, routing, and base components
+2. Core Features - Profile, orders, addresses
+3. Payment Integration - Stripe and payment methods
+4. Subscription Features - Management and scheduling
+5. Additional Features - Preferences, security, exports
+6. Polish - Loading states, error handling, testing

@@ -1,0 +1,43 @@
+# Task ID: 8
+# Title: Build Order Confirmation Flow
+# Status: pending
+# Dependencies: 5
+# Priority: high
+# Description: Create order confirmation page and email system with receipt details and tracking information
+# Details:
+Create confirmation page with receipt layout. Display complete order details and payment confirmation. Generate and send confirmation email. Include order tracking number. Show next steps timeline. Store order in Supabase with all details.
+
+# Test Strategy:
+Test order creation in database, test email generation, E2E test confirmation flow
+
+# Subtasks:
+## 1. Create confirmation page [pending]
+### Dependencies: None
+### Description: Build order confirmation page component
+### Details:
+Create /checkout/confirmation page. Show success message. Display order number prominently. Include print button.
+
+## 2. Display order receipt [pending]
+### Dependencies: 8.1
+### Description: Show detailed order information
+### Details:
+Display order items, quantities, prices. Show shipping and billing addresses. Include payment method last 4 digits. Show totals breakdown.
+
+## 3. Create order in Supabase [pending]
+### Dependencies: 5.3
+### Description: Store order data in database
+### Details:
+Create order record after payment success. Store customer info, addresses, items. Generate unique order number. Set initial status.
+
+## 4. Send confirmation email [pending]
+### Dependencies: 8.3
+### Description: Generate and send order confirmation email
+### Details:
+Create email template with order details. Send via Resend or similar service. Include order tracking link. Handle email failures gracefully.
+
+## 5. Add order tracking info [pending]
+### Dependencies: 8.1, 8.3
+### Description: Provide order tracking capabilities
+### Details:
+Generate tracking number. Create order status page. Show estimated delivery timeline. Allow guest order lookup.
+

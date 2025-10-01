@@ -1,0 +1,43 @@
+# Task ID: 11
+# Title: Mobile Optimization
+# Status: pending
+# Dependencies: 1, 2, 3, 4, 5, 6, 7
+# Priority: medium
+# Description: Ensure excellent mobile checkout experience with touch-optimized UI and mobile-specific enhancements
+# Details:
+Stack order summary below checkout form on mobile. Implement sticky CTA button at viewport bottom. Optimize touch targets. Add mobile-specific keyboard types. Ensure smooth scrolling between steps. Test on various devices and browsers.
+
+# Test Strategy:
+Test on multiple mobile devices, test touch interactions, test viewport handling
+
+# Subtasks:
+## 1. Optimize mobile layout [pending]
+### Dependencies: 1.5, 6.5
+### Description: Stack components vertically on mobile
+### Details:
+Use single column layout on mobile. Stack order summary below form. Ensure proper spacing. Test on various screen sizes.
+
+## 2. Add sticky CTA button [pending]
+### Dependencies: 1.1
+### Description: Implement fixed continue button on mobile
+### Details:
+Add sticky footer with continue button. Show current step progress. Handle safe area insets. Add shadow for visibility.
+
+## 3. Optimize touch targets [pending]
+### Dependencies: None
+### Description: Ensure all interactive elements are touch-friendly
+### Details:
+Ensure 44x44px minimum touch targets. Add padding to small buttons. Space elements appropriately. Test with touch devices.
+
+## 4. Set mobile keyboard types [pending]
+### Dependencies: None
+### Description: Use appropriate keyboard for each input
+### Details:
+Set inputmode='email' for email fields. Use 'tel' for phone numbers. Use 'numeric' for postal codes. Test keyboard behavior.
+
+## 5. Test mobile browsers [pending]
+### Dependencies: 11.1, 11.2, 11.3, 11.4
+### Description: Verify compatibility across mobile browsers
+### Details:
+Test on iOS Safari, Chrome, Firefox. Test on Android Chrome, Firefox. Check viewport handling. Verify smooth scrolling.
+

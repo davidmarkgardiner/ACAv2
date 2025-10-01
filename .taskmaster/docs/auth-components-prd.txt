@@ -1,0 +1,104 @@
+# Authentication Component Implementation PRD
+
+## Overview
+Implement the complete authentication system for Honduras Coffee e-commerce platform using shadcn/ui components with claymorphism theme and Supabase integration.
+
+## Core Authentication Components to Implement
+
+### 1. Login Form Components
+- LoginForm component with Form + Card + Input + Label + Button
+- LoginModal with Dialog + Dialog.Trigger + Dialog.Content
+- Error handling with Alert components
+- Remember me functionality with Checkbox
+- Social login dividers with Separator
+
+### 2. Registration Flow Components
+- Multi-step registration form with Progress indicator
+- Registration fields with Input + Textarea + Button
+- Email verification states with Alert + Badge + Skeleton
+- Form validation and error display
+
+### 3. Password Management Components
+- Password reset form with Form + Card + Input
+- Password change functionality
+- Password strength indicator with Progress
+- Reset confirmation with Button + Alert
+
+### 4. Account Dashboard Components
+- Account settings with Tabs + Card + Switch + Select
+- Profile management with Avatar
+- Order history with Table + Pagination
+- Status indicators with Badge components
+
+### 5. Mobile Authentication Components
+- Mobile auth drawer with Sheet + Sheet.Trigger + Sheet.Content
+- Mobile navigation with Navigation-Menu + Dropdown-Menu
+- Responsive design patterns
+
+### 6. Security Features Components
+- Two-factor authentication with Form + Input + Badge
+- Session management with Table + Button
+- Security settings with Switch + Alert
+
+### 7. Loading and Error States Components
+- Loading indicators with Skeleton + Progress + Spinner
+- Error handling with Alert variants
+- Toast notifications with Sonner for session and security updates
+
+## Technical Requirements
+
+### Integration Points
+- Supabase Auth for authentication backend
+- Database integration for user profiles
+- Stripe integration for payment methods in account settings
+- Responsive design for all screen sizes
+- Claymorphism theme throughout
+
+### File Structure
+```
+components/auth/
+├── LoginForm.tsx
+├── LoginModal.tsx
+├── RegisterForm.tsx
+├── PasswordReset.tsx
+├── AccountDashboard.tsx
+├── TwoFactorAuth.tsx
+├── SessionManager.tsx
+└── MobileAuth.tsx
+
+components/auth/ui/
+├── AuthCard.tsx
+├── AuthForm.tsx
+├── PasswordStrength.tsx
+└── SocialLoginDivider.tsx
+
+app/(auth)/
+├── login/page.tsx
+├── signup/page.tsx
+├── forgot-password/page.tsx
+└── verify-email/page.tsx
+
+app/api/auth/
+├── login/route.ts
+├── register/route.ts
+├── logout/route.ts
+└── callback/route.ts
+```
+
+### Success Criteria
+- All authentication flows working with Supabase
+- Mobile-responsive design
+- Proper error handling and loading states
+- Security best practices implemented
+- Claymorphism theme consistently applied
+- TypeScript strict mode compliance
+- No 'any' types used
+
+## Implementation Priority
+1. Basic login/logout functionality
+2. Registration and email verification
+3. Password management flows
+4. Account dashboard
+5. Mobile optimization
+6. Security features (2FA)
+7. Admin authentication management

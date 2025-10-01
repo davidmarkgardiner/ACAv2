@@ -1,0 +1,29 @@
+{
+  "folders": [
+    {
+      "path": "../../../backstage/template",
+    },
+    {
+      "path": "../.claude",
+    },
+    {
+      "path": ".",
+    },
+    {
+      "path": "../.devbox",
+    },
+    {
+      "path": "../.devcontainer",
+    },
+    {
+      "path": "../.github",
+    },
+    {
+      "path": "../.serena",
+    },
+    {
+      "path": "../.vscode",
+    },
+  ],
+  "settings": {},
+}

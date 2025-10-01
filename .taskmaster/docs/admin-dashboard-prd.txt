@@ -1,0 +1,125 @@
+# Admin Dashboard Layout - Story 5.1 Implementation
+
+## Project Overview
+Implement a comprehensive admin dashboard layout for Honduras Coffee business with navigation, metrics, and management capabilities using Astro + React + shadcn/ui components with claymorphism theme.
+
+## Core Requirements
+
+### 1. Admin Layout Structure
+- Create responsive admin layout with sidebar navigation
+- Implement collapsible sidebar for desktop and mobile hamburger menu
+- Add breadcrumb navigation system
+- Include user profile dropdown with admin actions
+- Ensure mobile-optimized interface
+
+### 2. Dashboard Overview Page
+- Display key business metrics in cards (revenue, orders, customers)
+- Add sales chart with time period selection
+- Implement conversion rate tracking widget
+- Show top products performance
+- Include growth indicators and trend analysis
+
+### 3. Admin Authentication & RBAC
+- Create admin login with elevated permissions
+- Implement role-based access control (admin, manager, staff)
+- Add admin session management with Supabase
+- Include admin user verification system
+- Create admin password policies
+
+### 4. Quick Actions Section
+- Add quick action buttons for common tasks
+- Include "Add Product" shortcut
+- Implement "Process Order" action
+- Add "Send Newsletter" button
+- Include "Generate Report" option
+
+### 5. Activity Feed System
+- Create real-time activity log system
+- Add activity filtering capabilities
+- Implement activity details modal
+- Include user activity tracking
+- Show recent system events
+
+### 6. Inventory Management
+- Build low stock alert system
+- Add inventory threshold settings
+- Create stock alert notifications
+- Implement reorder suggestions
+- Add inventory trend analysis
+
+### 7. Order Management Overview
+- Create order status dashboard
+- Add pending orders queue
+- Implement order processing workflow
+- Add order priority indicators
+- Include shipping status tracking
+
+### 8. User Management Section
+- Build customer overview widget
+- Add customer growth metrics
+- Implement customer segmentation
+- Add customer activity insights
+- Include subscription analytics
+
+### 9. System Settings Access
+- Create settings navigation
+- Add configuration management
+- Implement system health monitoring
+- Add backup and maintenance tools
+- Include audit log access
+
+## Technical Implementation
+
+### Tech Stack
+- Astro with React integration
+- TypeScript with strict mode
+- Tailwind CSS with claymorphism theme
+- shadcn/ui components
+- Supabase for backend
+- Zustand for state management
+
+### Component Structure Required
+- AdminLayout component with authentication
+- AdminSidebar with navigation
+- AdminHeader with breadcrumbs
+- MetricsCard for dashboard stats
+- SalesChart using recharts
+- ActivityFeed with real-time updates
+- QuickActions grid layout
+- InventoryAlerts component
+- OrderStatusTable component
+- UserManagement dashboard
+
+### Key Pages to Create
+- /admin (dashboard overview)
+- /admin/login (authentication)
+- /admin/products (product management)
+- /admin/orders (order management)
+- /admin/customers (customer management)
+- /admin/inventory (stock management)
+- /admin/analytics (detailed analytics)
+- /admin/settings (system configuration)
+
+### Database Requirements
+- Admin users table with roles
+- Activity log table for events
+- Admin sessions table
+- Permission system tables
+- Audit log for admin actions
+
+### Security Requirements
+- Protected admin routes
+- Row Level Security policies
+- Admin role verification
+- Session timeout handling
+- Activity logging for compliance
+
+## Success Criteria
+- Responsive admin interface works on all devices
+- All admin authentication flows function correctly
+- Dashboard metrics display accurate real-time data
+- Quick actions navigate to correct pages
+- Activity feed updates in real-time
+- All components follow claymorphism design theme
+- TypeScript strict mode compliance
+- Comprehensive test coverage

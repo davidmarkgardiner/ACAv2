@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.2/.schema/devbox.schema.json",
+  "packages": [
+    "azure-cli@2.73.0",
+    "nushell@0.104.1",
+    "kubectl@1.33.1",
+    "kind@0.29.0",
+    "kubernetes-helm@3.18.2",
+    "google-cloud-sdk",
+    "git@2.49.0",
+    "postgresql@17.5",
+    "awscli2@2.27.2",
+    "eksctl@0.210.0",
+    "aws-iam-authenticator@0.7.2",
+    "teller@2.0.7",
+    "detect-secrets"
+  ],
+  "shell": {
+    // "init_hook": [
+    //   "echo '🔐 Loading secrets with Teller...'",
+    //   "if command -v teller >/dev/null 2>&1; then",
+    //   "  echo '📡 Fetching secrets from Google Cloud...'",
+    //   "  eval $(teller env 2>/dev/null || echo 'echo \"⚠️  Teller configuration issue - check .teller.yml\"')",
+    //   "  echo '✅ Secrets loaded: DOCKER_USERNAME, ELEVENLABS_API_KEY, BRAVE_API_KEY, FIRECRAWL_API_KEY'",
+    //   "else",
+    //   "  echo '❌ Teller not available'",
+    //   "fi",
+    //   "echo '🔍 Running security scan with detect-secrets...'",
+    //   "if command -v detect-secrets >/dev/null 2>&1; then",
+    //   "  if [ ! -f .secrets.baseline ]; then",
+    //   "    echo '📝 Creating secrets baseline...'",
+    //   "    detect-secrets scan --all-files > .secrets.baseline 2>/dev/null",
+    //   "  fi",
+    //   "  detect-secrets scan --all-files --baseline .secrets.baseline && echo '✅ No secrets detected in codebase'",
+    //   "else",
+    //   "  echo '❌ detect-secrets not available'",
+    //   "fi"
+    // ],
+    "scripts": {
+      "load-secrets": "eval $(teller env)",
+      "show-secrets": "teller env",
+      "test-secrets": "echo \"Docker User: $DOCKER_USERNAME\" && echo \"ElevenLabs: ${ELEVENLABS_API_KEY:0:10}...\" && echo \"Brave: ${BRAVE_API_KEY:0:10}...\"",
+      "scan-secrets": "detect-secrets scan --all-files --baseline .secrets.baseline",
+      "audit-secrets": "detect-secrets audit .secrets.baseline",
+      "init-secrets-baseline": "detect-secrets scan --all-files --baseline .secrets.baseline --update",
+      "security-check": "echo '🔍 Running security scan...' && detect-secrets scan --all-files --baseline .secrets.baseline && echo '✅ No secrets detected'"
+    }
+  },
+  "env": {
+    "AZURE_EXTENSION_USE_DYNAMIC_INSTALL": "no",
+    "TELLER_CONFIG": ".teller.yml"
+  }
+}

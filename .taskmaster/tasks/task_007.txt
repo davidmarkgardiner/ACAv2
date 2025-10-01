@@ -1,0 +1,43 @@
+# Task ID: 7
+# Title: Implement Shipping Method Selection
+# Status: pending
+# Dependencies: 3
+# Priority: high
+# Description: Build shipping options selector with cost calculation based on destination and cart total
+# Details:
+Create shipping method selector with radio buttons. Display delivery time estimates. Calculate shipping costs based on destination and cart total. Include express options (Standard, Express, Free over €50). Show carrier information (DHL, PostNL). Update order total on selection change.
+
+# Test Strategy:
+Test shipping calculation logic, test free shipping threshold, test UI updates on selection
+
+# Subtasks:
+## 1. Create ShippingMethod.tsx component [pending]
+### Dependencies: 1.1
+### Description: Build shipping method selector component
+### Details:
+Create ShippingMethod component with radio button group. Use shadcn/ui RadioGroup. Show as checkout step 3.
+
+## 2. Define shipping methods data [pending]
+### Dependencies: None
+### Description: Create shipping options configuration
+### Details:
+Define Standard (€5.99, 3-5 days), Express (€12.99, 1-2 days), Free (€0, 5-7 days over €50). Include carrier info.
+
+## 3. Implement shipping calculation [pending]
+### Dependencies: 7.1, 7.2
+### Description: Calculate shipping based on cart and location
+### Details:
+Check cart total for free shipping threshold. Filter available methods. Consider destination country. Update checkout state.
+
+## 4. Display delivery estimates [pending]
+### Dependencies: 7.1
+### Description: Show estimated delivery dates
+### Details:
+Calculate delivery date ranges. Show estimated arrival dates. Consider weekends and holidays. Display carrier names.
+
+## 5. Update order total on selection [pending]
+### Dependencies: 7.1, 6.4
+### Description: Reflect shipping cost in order summary
+### Details:
+Update order summary when method selected. Recalculate total with shipping. Store selection in checkout state.
+
