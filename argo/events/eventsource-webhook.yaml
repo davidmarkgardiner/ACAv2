@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: aca-webhook
+  namespace: argo-events
+  labels:
+    app: aca-platform
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    # Webhook endpoint for Container App operations
+    container-app-operations:
+      port: "12000"
+      endpoint: /container-apps
+      method: POST

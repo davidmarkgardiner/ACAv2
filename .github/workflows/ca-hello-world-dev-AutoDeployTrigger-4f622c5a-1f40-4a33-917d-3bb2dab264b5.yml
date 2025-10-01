@@ -29,15 +29,15 @@ jobs:
       - name: Build and push container image to registry
         uses: azure/container-apps-deploy-action@v2
         with:
-          appSourcePath: ${{ github.workspace }}
-          _dockerfilePathKey_: _dockerfilePath_
-          _targetLabelKey_: _targetLabel_
+          appSourcePath: ${{ github.workspace }}/python-function-app
+          dockerfilePath: python-function-app/Dockerfile
           registryUrl: docker.io
           registryUsername: ${{ secrets.CAHELLOWORLDDEV_REGISTRY_USERNAME }}
           registryPassword: ${{ secrets.CAHELLOWORLDDEV_REGISTRY_PASSWORD }}
           containerAppName: ca-hello-world-dev
           resourceGroup: rg-aca-demo
           imageToBuild: davidgardiner/azurefunctionsimage:${{ github.sha }}
+          targetPort: 80
           
             
 

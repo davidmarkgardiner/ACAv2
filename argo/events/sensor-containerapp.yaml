@@ -1,0 +1,148 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: aca-operations
+  namespace: argo-events
+  labels:
+    app: aca-platform
+spec:
+  template:
+    serviceAccountName: aca-sensor-sa
+
+  # ============================================================================
+  # Event Dependencies - Define what events to listen for
+  # ============================================================================
+  dependencies:
+    - name: container-app-webhook
+      eventSourceName: aca-webhook
+      eventName: container-app-operations
+
+  # ============================================================================
+  # Triggers - Route events to appropriate workflows
+  # ============================================================================
+  triggers:
+    # CREATE Operation Trigger
+    - template:
+        name: create-trigger
+        conditions: "container-app-webhook"
+        # Only trigger if operation is 'create'
+        conditionsReset:
+          - byTime:
+              cron: "0 0 * * *"
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: aca-create-
+                namespace: argo
+                labels:
+                  app: aca-platform
+                  operation: create
+              spec:
+                workflowTemplateRef:
+                  name: containerapp-create
+                arguments:
+                  parameters:
+                    - name: payload
+                      # Extract entire event body as payload
+                      value: ""
+                    - name: requestId
+                      value: ""
+          parameters:
+            - src:
+                dependencyName: container-app-webhook
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: container-app-webhook
+                dataKey: body.metadata.requestId
+              dest: spec.arguments.parameters.1.value
+        # Filter: only trigger on 'create' operation
+        filter:
+          exprs:
+            - expr: operation == "create"
+              fields:
+                - name: operation
+                  path: body.operation
+
+    # DELETE Operation Trigger
+    - template:
+        name: delete-trigger
+        conditions: "container-app-webhook"
+        conditionsReset:
+          - byTime:
+              cron: "0 0 * * *"
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: aca-delete-
+                namespace: argo
+                labels:
+                  app: aca-platform
+                  operation: delete
+              spec:
+                workflowTemplateRef:
+                  name: containerapp-delete
+                arguments:
+                  parameters:
+                    - name: payload
+                      value: ""
+                    - name: requestId
+                      value: ""
+          parameters:
+            - src:
+                dependencyName: container-app-webhook
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: container-app-webhook
+                dataKey: body.metadata.requestId
+              dest: spec.arguments.parameters.1.value
+        # Filter: only trigger on 'delete' operation
+        filter:
+          exprs:
+            - expr: operation == "delete"
+              fields:
+                - name: operation
+                  path: body.operation
+
+    # UPDATE Operation Trigger (placeholder for Phase 2)
+    - template:
+        name: update-trigger
+        conditions: "container-app-webhook"
+        conditionsReset:
+          - byTime:
+              cron: "0 0 * * *"
+        log:
+          intervalSeconds: 1
+        # Log for now, workflow to be implemented in Phase 2
+        filter:
+          exprs:
+            - expr: operation == "update"
+              fields:
+                - name: operation
+                  path: body.operation
+
+    # SCALE Operation Trigger (placeholder for Phase 2)
+    - template:
+        name: scale-trigger
+        conditions: "container-app-webhook"
+        conditionsReset:
+          - byTime:
+              cron: "0 0 * * *"
+        log:
+          intervalSeconds: 1
+        # Log for now, workflow to be implemented in Phase 2
+        filter:
+          exprs:
+            - expr: operation == "scale"
+              fields:
+                - name: operation
+                  path: body.operation

@@ -1,70 +1,74 @@
-'use client'
-
-import { useAuth } from '@/context/AuthContext'
-import LoginForm from '@/components/LoginForm'
-import UserProfile from '@/components/UserProfile'
-import FirestoreDemo from '@/components/FirestoreDemo'
-
 export default function Home() {
-  const { user } = useAuth()
-
   return (
     <main className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <div className="container mx-auto px-4 py-8">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-4">
-            🔥 Firebase Hello World
+            Azure Container Apps Platform
           </h1>
           <p className="text-lg text-gray-600 dark:text-gray-300">
-            A complete Next.js template with Firebase Authentication and Firestore
+            Self-service platform for provisioning and managing Azure Container Apps
           </p>
         </div>
 
-        <div className="mb-8 grid text-center lg:max-w-5xl lg:w-full lg:mb-0 lg:grid-cols-4 lg:text-left mx-auto">
-          <div className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-white/50 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30">
-            <h3 className="mb-3 text-xl font-semibold">🔐 Authentication</h3>
-            <p className="m-0 max-w-[30ch] text-sm opacity-70">
-              Sign up and login functionality with Firebase Auth.
-            </p>
-          </div>
+        <div className="max-w-4xl mx-auto">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
+            <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-4">
+              API Endpoint
+            </h2>
+            <div className="bg-gray-100 dark:bg-gray-900 rounded p-4 mb-4">
+              <code className="text-sm text-gray-800 dark:text-gray-200">
+                POST /api/v1/container-apps
+              </code>
+            </div>
 
-          <div className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-white/50 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30">
-            <h3 className="mb-3 text-xl font-semibold">🗄️ Database</h3>
-            <p className="m-0 max-w-[30ch] text-sm opacity-70">
-              Store and retrieve data with Firestore.
-            </p>
-          </div>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+              Test with cURL:
+            </h3>
+            <div className="bg-gray-100 dark:bg-gray-900 rounded p-4 overflow-x-auto">
+              <pre className="text-xs text-gray-800 dark:text-gray-200">
+{`curl -X POST http://localhost:3000/api/v1/container-apps \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "operation": "create",
+    "metadata": {
+      "requestId": "550e8400-e29b-41d4-a716-446655440000",
+      "requestedBy": "admin@example.com",
+      "team": "platform",
+      "environment": "dev"
+    },
+    "containerApp": {
+      "name": "test-app",
+      "resourceGroup": "rg-test-dev",
+      "location": "eastus",
+      "image": {
+        "registry": "mcr.microsoft.com",
+        "repository": "azuredocs/containerapps-helloworld",
+        "tag": "latest"
+      },
+      "resources": {
+        "cpu": 0.25,
+        "memory": "0.5Gi"
+      },
+      "scaling": {
+        "minReplicas": 0,
+        "maxReplicas": 5
+      },
+      "ingress": {
+        "external": true,
+        "targetPort": 80
+      }
+    }
+  }'`}
+              </pre>
+            </div>
 
-          <div className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-white/50 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30">
-            <h3 className="mb-3 text-xl font-semibold">⚡ Real-time</h3>
-            <p className="m-0 max-w-[30ch] text-sm opacity-70">
-              Real-time updates and synchronization.
-            </p>
-          </div>
-
-          <div className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-white/50 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30">
-            <h3 className="mb-3 text-xl font-semibold">🚀 Deploy</h3>
-            <p className="m-0 max-w-[30ch] text-sm opacity-70">
-              Deploy easily to Firebase Hosting.
-            </p>
-          </div>
-        </div>
-
-        {/* Authentication Section */}
-        {!user ? (
-          <LoginForm />
-        ) : (
-          <>
-            <UserProfile />
-            <FirestoreDemo />
-          </>
-        )}
-
-        {/* Status Section */}
-        <div className="mt-12 text-center">
-          <div className="inline-flex items-center px-4 py-2 rounded-full bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100">
-            <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-            Firebase connected and ready!
+            <div className="mt-6">
+              <div className="inline-flex items-center px-4 py-2 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-100">
+                <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
+                API ready for testing
+              </div>
+            </div>
           </div>
         </div>
       </div>

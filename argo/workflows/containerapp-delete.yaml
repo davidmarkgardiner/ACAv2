@@ -1,0 +1,338 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: containerapp-delete
+  namespace: argo
+  labels:
+    app: aca-platform
+    operation: delete
+spec:
+  entrypoint: main
+  serviceAccountName: aca-workflow-sa
+
+  arguments:
+    parameters:
+    - name: payload
+      description: "JSON payload containing Container App to delete"
+    - name: requestId
+      description: "Unique request identifier"
+
+  templates:
+  # ============================================================================
+  # Main workflow orchestration
+  # ============================================================================
+  - name: main
+    steps:
+    - - name: validate
+        template: validate-payload
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+    - - name: backup
+        template: backup-configuration
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+    - - name: delete
+        template: delete-containerapp
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+    - - name: cleanup
+        template: cleanup-resources
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+    - - name: notify
+        template: send-notification
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+          - name: status
+            value: "success"
+
+  # ============================================================================
+  # Validate Payload
+  # ============================================================================
+  - name: validate-payload
+    inputs:
+      parameters:
+      - name: payload
+    script:
+      image: python:3.11-slim
+      command: [python]
+      source: |
+        import json
+        import sys
+
+        payload = json.loads('''{{inputs.parameters.payload}}''')
+
+        # Validate required fields
+        if payload.get('operation') != 'delete':
+            print(f"ERROR: Invalid operation: {payload.get('operation')}")
+            sys.exit(1)
+
+        # Validate containerApp fields
+        app_required = ['name', 'resourceGroup']
+        for field in app_required:
+            if field not in payload.get('containerApp', {}):
+                print(f"ERROR: Missing containerApp field: {field}")
+                sys.exit(1)
+
+        print("✓ Payload validation successful")
+        print(f"  App: {payload['containerApp']['name']}")
+        print(f"  Resource Group: {payload['containerApp']['resourceGroup']}")
+
+  # ============================================================================
+  # Backup Configuration
+  # ============================================================================
+  - name: backup-configuration
+    inputs:
+      parameters:
+      - name: payload
+    outputs:
+      artifacts:
+      - name: backup
+        path: /tmp/backup.json
+    script:
+      image: mcr.microsoft.com/azure-cli:latest
+      command: [bash]
+      source: |
+        set -e
+
+        PAYLOAD='{{inputs.parameters.payload}}'
+        APP_NAME=$(echo $PAYLOAD | jq -r '.containerApp.name')
+        RESOURCE_GROUP=$(echo $PAYLOAD | jq -r '.containerApp.resourceGroup')
+
+        echo "Backing up configuration for: $APP_NAME"
+
+        # Authenticate
+        az login --service-principal \
+          -u $AZURE_CLIENT_ID \
+          -p $AZURE_CLIENT_SECRET \
+          --tenant $AZURE_TENANT_ID
+
+        az account set --subscription $AZURE_SUBSCRIPTION_ID
+
+        # Get current Container App configuration
+        az containerapp show \
+          --name $APP_NAME \
+          --resource-group $RESOURCE_GROUP \
+          --output json > /tmp/backup.json
+
+        echo "✓ Configuration backed up"
+        cat /tmp/backup.json | jq '{name, location, properties: {configuration, template}}'
+      env:
+      - name: AZURE_CLIENT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-id
+      - name: AZURE_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-secret
+      - name: AZURE_TENANT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: tenant-id
+      - name: AZURE_SUBSCRIPTION_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: subscription-id
+
+  # ============================================================================
+  # Delete Container App
+  # ============================================================================
+  - name: delete-containerapp
+    inputs:
+      parameters:
+      - name: payload
+    script:
+      image: mcr.microsoft.com/azure-cli:latest
+      command: [bash]
+      source: |
+        set -e
+
+        PAYLOAD='{{inputs.parameters.payload}}'
+        APP_NAME=$(echo $PAYLOAD | jq -r '.containerApp.name')
+        RESOURCE_GROUP=$(echo $PAYLOAD | jq -r '.containerApp.resourceGroup')
+
+        echo "Deleting Container App: $APP_NAME"
+
+        # Authenticate
+        az login --service-principal \
+          -u $AZURE_CLIENT_ID \
+          -p $AZURE_CLIENT_SECRET \
+          --tenant $AZURE_TENANT_ID
+
+        az account set --subscription $AZURE_SUBSCRIPTION_ID
+
+        # Delete Container App
+        az containerapp delete \
+          --name $APP_NAME \
+          --resource-group $RESOURCE_GROUP \
+          --yes
+
+        echo "✓ Container App deleted: $APP_NAME"
+      env:
+      - name: AZURE_CLIENT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-id
+      - name: AZURE_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-secret
+      - name: AZURE_TENANT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: tenant-id
+      - name: AZURE_SUBSCRIPTION_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: subscription-id
+
+  # ============================================================================
+  # Cleanup Associated Resources (Optional)
+  # ============================================================================
+  - name: cleanup-resources
+    inputs:
+      parameters:
+      - name: payload
+    script:
+      image: mcr.microsoft.com/azure-cli:latest
+      command: [bash]
+      source: |
+        set -e
+
+        PAYLOAD='{{inputs.parameters.payload}}'
+        RESOURCE_GROUP=$(echo $PAYLOAD | jq -r '.containerApp.resourceGroup')
+
+        echo "Checking for cleanup opportunities..."
+
+        # Authenticate
+        az login --service-principal \
+          -u $AZURE_CLIENT_ID \
+          -p $AZURE_CLIENT_SECRET \
+          --tenant $AZURE_TENANT_ID
+
+        az account set --subscription $AZURE_SUBSCRIPTION_ID
+
+        # Check if resource group has any other Container Apps
+        REMAINING_APPS=$(az containerapp list \
+          --resource-group $RESOURCE_GROUP \
+          --query "length([?properties.provisioningState=='Succeeded'])" \
+          --output tsv)
+
+        echo "Remaining Container Apps in resource group: $REMAINING_APPS"
+
+        if [ "$REMAINING_APPS" = "0" ]; then
+          echo "⚠ No more Container Apps in resource group"
+          echo "Consider manual cleanup of resource group if no longer needed"
+        else
+          echo "✓ Resource group still contains Container Apps, no cleanup needed"
+        fi
+      env:
+      - name: AZURE_CLIENT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-id
+      - name: AZURE_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-secret
+      - name: AZURE_TENANT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: tenant-id
+      - name: AZURE_SUBSCRIPTION_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: subscription-id
+
+  # ============================================================================
+  # Send Notification
+  # ============================================================================
+  - name: send-notification
+    inputs:
+      parameters:
+      - name: payload
+      - name: status
+    script:
+      image: curlimages/curl:latest
+      command: [sh]
+      source: |
+        PAYLOAD='{{inputs.parameters.payload}}'
+        STATUS='{{inputs.parameters.status}}'
+        REQUEST_ID='{{workflow.parameters.requestId}}'
+
+        APP_NAME=$(echo $PAYLOAD | jq -r '.containerApp.name')
+        RESOURCE_GROUP=$(echo $PAYLOAD | jq -r '.containerApp.resourceGroup')
+        TEAM=$(echo $PAYLOAD | jq -r '.metadata.team // "default"')
+        REQUESTED_BY=$(echo $PAYLOAD | jq -r '.metadata.requestedBy // "unknown"')
+
+        # Prepare Slack message
+        if [ "$STATUS" = "success" ]; then
+          COLOR="warning"
+          EMOJI=":wastebasket:"
+        else
+          COLOR="danger"
+          EMOJI=":x:"
+        fi
+
+        MESSAGE=$(cat <<EOF
+        {
+          "text": "$EMOJI Container App Deletion $STATUS",
+          "attachments": [
+            {
+              "color": "$COLOR",
+              "fields": [
+                {"title": "App Name", "value": "$APP_NAME", "short": true},
+                {"title": "Resource Group", "value": "$RESOURCE_GROUP", "short": true},
+                {"title": "Team", "value": "$TEAM", "short": true},
+                {"title": "Requested By", "value": "$REQUESTED_BY", "short": true},
+                {"title": "Request ID", "value": "$REQUEST_ID", "short": false}
+              ]
+            }
+          ]
+        }
+        EOF
+        )
+
+        # Send to Slack (if webhook configured)
+        if [ -n "$SLACK_WEBHOOK" ]; then
+          curl -X POST $SLACK_WEBHOOK \
+            -H 'Content-Type: application/json' \
+            -d "$MESSAGE"
+          echo "✓ Notification sent"
+        else
+          echo "⚠ Slack webhook not configured, skipping notification"
+        fi
+      env:
+      - name: SLACK_WEBHOOK
+        valueFrom:
+          secretKeyRef:
+            name: notification-config
+            key: slack-webhook
+            optional: true

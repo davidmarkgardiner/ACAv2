@@ -1,0 +1,420 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: containerapp-create
+  namespace: argo
+  labels:
+    app: aca-platform
+    operation: create
+spec:
+  entrypoint: main
+  serviceAccountName: aca-workflow-sa
+
+  arguments:
+    parameters:
+    - name: payload
+      description: "JSON payload containing Container App configuration"
+    - name: requestId
+      description: "Unique request identifier"
+
+  templates:
+  # ============================================================================
+  # Main workflow orchestration
+  # ============================================================================
+  - name: main
+    steps:
+    - - name: validate
+        template: validate-payload
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+    - - name: pre-deploy
+        template: pre-deployment-checks
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+    - - name: deploy
+        template: bicep-deploy
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+    - - name: verify
+        template: verify-deployment
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+          - name: fqdn
+            value: "{{steps.deploy.outputs.parameters.fqdn}}"
+
+    - - name: notify
+        template: send-notification
+        arguments:
+          parameters:
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+          - name: fqdn
+            value: "{{steps.deploy.outputs.parameters.fqdn}}"
+          - name: status
+            value: "success"
+
+  # ============================================================================
+  # Validate Payload
+  # ============================================================================
+  - name: validate-payload
+    inputs:
+      parameters:
+      - name: payload
+    script:
+      image: python:3.11-slim
+      command: [python]
+      source: |
+        import json
+        import sys
+
+        payload = json.loads('''{{inputs.parameters.payload}}''')
+
+        # Debug output
+        print(f"DEBUG: Parsed payload operation: '{payload.get('operation', 'MISSING')}'")
+        print(f"DEBUG: Operation type: {type(payload.get('operation'))}")
+        print(f"DEBUG: Operation repr: {repr(payload.get('operation'))}")
+
+        # Validate required fields
+        required_fields = ['operation', 'metadata', 'containerApp']
+        for field in required_fields:
+            if field not in payload:
+                print(f"ERROR: Missing required field: {field}")
+                sys.exit(1)
+
+        # Validate operation type (strip whitespace)
+        operation = payload['operation'].strip()
+        if operation != 'create':
+            print(f"ERROR: Invalid operation: {operation}")
+            sys.exit(1)
+
+        # Validate containerApp fields
+        app_required = ['name', 'resourceGroup', 'image']
+        for field in app_required:
+            if field not in payload['containerApp']:
+                print(f"ERROR: Missing containerApp field: {field}")
+                sys.exit(1)
+
+        print("✓ Payload validation successful")
+        print(f"  App: {payload['containerApp']['name']}")
+        print(f"  Resource Group: {payload['containerApp']['resourceGroup']}")
+        print(f"  Image: {payload['containerApp']['image']['repository']}:{payload['containerApp']['image']['tag']}")
+
+  # ============================================================================
+  # Pre-deployment Checks
+  # ============================================================================
+  - name: pre-deployment-checks
+    inputs:
+      parameters:
+      - name: payload
+    script:
+      image: mcr.microsoft.com/azure-cli:latest
+      command: [bash]
+      source: |
+        set -e
+
+        PAYLOAD='{{inputs.parameters.payload}}'
+        RESOURCE_GROUP=$(echo $PAYLOAD | jq -r '.containerApp.resourceGroup')
+        LOCATION=$(echo $PAYLOAD | jq -r '.containerApp.location // "eastus"')
+
+        echo "Pre-deployment checks..."
+
+        # Authenticate to Azure
+        az login --service-principal \
+          -u $AZURE_CLIENT_ID \
+          -p $AZURE_CLIENT_SECRET \
+          --tenant $AZURE_TENANT_ID
+
+        az account set --subscription $AZURE_SUBSCRIPTION_ID
+
+        # Check/create resource group
+        if ! az group show --name $RESOURCE_GROUP &>/dev/null; then
+          echo "Creating resource group: $RESOURCE_GROUP"
+          az group create --name $RESOURCE_GROUP --location $LOCATION \
+            --tags managedBy=aca-platform
+        else
+          echo "✓ Resource group exists: $RESOURCE_GROUP"
+        fi
+
+        echo "✓ Pre-deployment checks complete"
+      env:
+      - name: AZURE_CLIENT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-id
+      - name: AZURE_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-secret
+      - name: AZURE_TENANT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: tenant-id
+      - name: AZURE_SUBSCRIPTION_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: subscription-id
+
+  # ============================================================================
+  # Deploy Container App using Bicep
+  # ============================================================================
+  - name: bicep-deploy
+    inputs:
+      parameters:
+      - name: payload
+    outputs:
+      parameters:
+      - name: fqdn
+        valueFrom:
+          path: /tmp/fqdn.txt
+      - name: appUrl
+        valueFrom:
+          path: /tmp/app-url.txt
+    script:
+      image: mcr.microsoft.com/azure-cli:latest
+      command: [bash]
+      source: |
+        set -e
+
+        PAYLOAD='{{inputs.parameters.payload}}'
+
+        # Extract parameters from payload
+        APP_NAME=$(echo $PAYLOAD | jq -r '.containerApp.name')
+        RESOURCE_GROUP=$(echo $PAYLOAD | jq -r '.containerApp.resourceGroup')
+        LOCATION=$(echo $PAYLOAD | jq -r '.containerApp.location // "eastus"')
+        ENVIRONMENT=$(echo $PAYLOAD | jq -r '.metadata.environment // "dev"')
+        TEAM=$(echo $PAYLOAD | jq -r '.metadata.team // "default"')
+
+        # Container image
+        REGISTRY=$(echo $PAYLOAD | jq -r '.containerApp.image.registry')
+        REPOSITORY=$(echo $PAYLOAD | jq -r '.containerApp.image.repository')
+        TAG=$(echo $PAYLOAD | jq -r '.containerApp.image.tag')
+        IMAGE="${REGISTRY}/${REPOSITORY}:${TAG}"
+
+        # Resources
+        CPU=$(echo $PAYLOAD | jq -r '.containerApp.resources.cpu // "0.25"')
+        MEMORY=$(echo $PAYLOAD | jq -r '.containerApp.resources.memory // "0.5Gi"')
+
+        # Scaling
+        MIN_REPLICAS=$(echo $PAYLOAD | jq -r '.containerApp.scaling.minReplicas // 0')
+        MAX_REPLICAS=$(echo $PAYLOAD | jq -r '.containerApp.scaling.maxReplicas // 10')
+
+        # Ingress
+        TARGET_PORT=$(echo $PAYLOAD | jq -r '.containerApp.ingress.targetPort // 80')
+        EXTERNAL_INGRESS=$(echo $PAYLOAD | jq -r '.containerApp.ingress.external // true')
+
+        echo "Deploying Container App..."
+        echo "  Name: $APP_NAME"
+        echo "  Image: $IMAGE"
+        echo "  Resources: $CPU CPU, $MEMORY memory"
+        echo "  Replicas: $MIN_REPLICAS-$MAX_REPLICAS"
+
+        # Authenticate
+        az login --service-principal \
+          -u $AZURE_CLIENT_ID \
+          -p $AZURE_CLIENT_SECRET \
+          --tenant $AZURE_TENANT_ID
+
+        az account set --subscription $AZURE_SUBSCRIPTION_ID
+
+        # Copy Bicep files into proper directory structure
+        mkdir -p /tmp/bicep/modules /tmp/bicep/templates /tmp/bicep/parameters
+        cp /bicep/basic-web-app.bicep /tmp/bicep/templates/
+        cp /bicep/monitoring.bicep /tmp/bicep/modules/
+        cp /bicep/networking.bicep /tmp/bicep/modules/
+        cp /bicep/environment.bicep /tmp/bicep/modules/
+        cp /bicep/container-app.bicep /tmp/bicep/modules/
+        cp /bicep/security.bicep /tmp/bicep/modules/
+        cp /bicep/dev.bicepparam /tmp/bicep/parameters/
+
+        # Deploy using Bicep template
+        DEPLOYMENT_NAME="aca-deploy-$(date +%s)"
+
+        az deployment group create \
+          --name $DEPLOYMENT_NAME \
+          --resource-group $RESOURCE_GROUP \
+          --template-file /tmp/bicep/templates/basic-web-app.bicep \
+          --parameters \
+            appName=$APP_NAME \
+            environmentName=$ENVIRONMENT \
+            teamName=$TEAM \
+            location=$LOCATION \
+            containerImage=$IMAGE \
+            cpu=$CPU \
+            memory=$MEMORY \
+            minReplicas=$MIN_REPLICAS \
+            maxReplicas=$MAX_REPLICAS \
+            targetPort=$TARGET_PORT \
+            externalIngress=$EXTERNAL_INGRESS \
+          --output json > /tmp/deployment.json
+
+        # Extract outputs
+        FQDN=$(jq -r '.properties.outputs.applicationUrl.value' /tmp/deployment.json)
+        echo $FQDN | tee /tmp/fqdn.txt
+        echo "https://$FQDN" | tee /tmp/app-url.txt
+
+        echo "✓ Deployment complete"
+        echo "  URL: https://$FQDN"
+      volumeMounts:
+      - name: bicep-templates
+        mountPath: /bicep
+      env:
+      - name: AZURE_CLIENT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-id
+      - name: AZURE_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: client-secret
+      - name: AZURE_TENANT_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: tenant-id
+      - name: AZURE_SUBSCRIPTION_ID
+        valueFrom:
+          secretKeyRef:
+            name: azure-credentials
+            key: subscription-id
+
+  # ============================================================================
+  # Verify Deployment Health
+  # ============================================================================
+  - name: verify-deployment
+    inputs:
+      parameters:
+      - name: payload
+      - name: fqdn
+    retryStrategy:
+      limit: 5
+      retryPolicy: "Always"
+      backoff:
+        duration: "10s"
+        factor: 2
+        maxDuration: "5m"
+    script:
+      image: curlimages/curl:latest
+      command: [sh]
+      source: |
+        set -e
+
+        FQDN='{{inputs.parameters.fqdn}}'
+
+        if [ -z "$FQDN" ] || [ "$FQDN" = "null" ]; then
+          echo "ERROR: No FQDN provided"
+          exit 1
+        fi
+
+        echo "Verifying deployment health..."
+        echo "  URL: https://$FQDN"
+
+        # Wait for app to be ready
+        MAX_ATTEMPTS=30
+        ATTEMPT=0
+
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          echo "Attempt $((ATTEMPT+1))/$MAX_ATTEMPTS..."
+
+          if curl -sSf -m 10 "https://$FQDN" > /dev/null 2>&1; then
+            echo "✓ Health check passed"
+            exit 0
+          fi
+
+          ATTEMPT=$((ATTEMPT+1))
+          sleep 10
+        done
+
+        echo "ERROR: Health check failed after $MAX_ATTEMPTS attempts"
+        exit 1
+
+  # ============================================================================
+  # Send Notification
+  # ============================================================================
+  - name: send-notification
+    inputs:
+      parameters:
+      - name: payload
+      - name: fqdn
+      - name: status
+    script:
+      image: curlimages/curl:latest
+      command: [sh]
+      source: |
+        PAYLOAD='{{inputs.parameters.payload}}'
+        FQDN='{{inputs.parameters.fqdn}}'
+        STATUS='{{inputs.parameters.status}}'
+        REQUEST_ID='{{workflow.parameters.requestId}}'
+
+        APP_NAME=$(echo $PAYLOAD | jq -r '.containerApp.name')
+        TEAM=$(echo $PAYLOAD | jq -r '.metadata.team // "default"')
+        REQUESTED_BY=$(echo $PAYLOAD | jq -r '.metadata.requestedBy // "unknown"')
+
+        # Prepare Slack message
+        if [ "$STATUS" = "success" ]; then
+          COLOR="good"
+          EMOJI=":white_check_mark:"
+        else
+          COLOR="danger"
+          EMOJI=":x:"
+        fi
+
+        MESSAGE=$(cat <<EOF
+        {
+          "text": "$EMOJI Container App Deployment $STATUS",
+          "attachments": [
+            {
+              "color": "$COLOR",
+              "fields": [
+                {"title": "App Name", "value": "$APP_NAME", "short": true},
+                {"title": "Team", "value": "$TEAM", "short": true},
+                {"title": "Requested By", "value": "$REQUESTED_BY", "short": true},
+                {"title": "Request ID", "value": "$REQUEST_ID", "short": true},
+                {"title": "URL", "value": "https://$FQDN", "short": false}
+              ]
+            }
+          ]
+        }
+        EOF
+        )
+
+        # Send to Slack (if webhook configured)
+        if [ -n "$SLACK_WEBHOOK" ]; then
+          curl -X POST $SLACK_WEBHOOK \
+            -H 'Content-Type: application/json' \
+            -d "$MESSAGE"
+          echo "✓ Notification sent"
+        else
+          echo "⚠ Slack webhook not configured, skipping notification"
+        fi
+      env:
+      - name: SLACK_WEBHOOK
+        valueFrom:
+          secretKeyRef:
+            name: notification-config
+            key: slack-webhook
+            optional: true
+
+  # ============================================================================
+  # Volume configuration for Bicep templates
+  # ============================================================================
+  volumes:
+  - name: bicep-templates
+    configMap:
+      name: bicep-templates

@@ -1,0 +1,150 @@
+---
+# ServiceAccount for Argo Workflows
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aca-workflow-sa
+  namespace: argo
+  labels:
+    app: aca-platform
+
+---
+# ServiceAccount for Argo Events Sensor
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aca-sensor-sa
+  namespace: argo-events
+  labels:
+    app: aca-platform
+
+---
+# Role for Workflow ServiceAccount to create workflows
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aca-workflow-role
+  namespace: argo
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+      - configmaps
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - workflows
+      - workflowtemplates
+      - workflowtaskresults
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - update
+
+---
+# RoleBinding for Workflow ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aca-workflow-rolebinding
+  namespace: argo
+subjects:
+  - kind: ServiceAccount
+    name: aca-workflow-sa
+    namespace: argo
+roleRef:
+  kind: Role
+  name: aca-workflow-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Role for Sensor ServiceAccount to create workflows
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aca-sensor-role
+  namespace: argo
+rules:
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - workflows
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+
+---
+# RoleBinding for Sensor ServiceAccount to create workflows in argo namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aca-sensor-rolebinding
+  namespace: argo
+subjects:
+  - kind: ServiceAccount
+    name: aca-sensor-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: aca-sensor-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Role for Sensor in its own namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aca-sensor-local-role
+  namespace: argo-events
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+
+---
+# RoleBinding for Sensor in its own namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aca-sensor-local-rolebinding
+  namespace: argo-events
+subjects:
+  - kind: ServiceAccount
+    name: aca-sensor-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: aca-sensor-local-role
+  apiGroup: rbac.authorization.k8s.io
