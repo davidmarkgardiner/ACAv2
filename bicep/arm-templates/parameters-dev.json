@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": {
+      "value": "funcapp"
+    },
+    "environment": {
+      "value": "dev"
+    },
+    "location": {
+      "value": "eastus"
+    },
+    "containerImage": {
+      "value": "YOUR_REGISTRY.azurecr.io/function-app:latest"
+    },
+    "minReplicas": {
+      "value": 0
+    },
+    "maxReplicas": {
+      "value": 10
+    },
+    "cpu": {
+      "value": "0.25"
+    },
+    "memory": {
+      "value": "0.5Gi"
+    },
+    "tags": {
+      "value": {
+        "environment": "dev",
+        "application": "function-app",
+        "managedBy": "arm-template",
+        "costCenter": "engineering",
+        "deployedBy": "azure-cli"
+      }
+    }
+  }
+}
