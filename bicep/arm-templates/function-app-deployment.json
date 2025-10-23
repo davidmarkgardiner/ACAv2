@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.38.3.11034",
-      "templateHash": "18215247958567871705"
+      "templateHash": "17664456391039672354"
     }
   },
   "parameters": {
@@ -359,7 +359,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.38.3.11034",
-              "templateHash": "12746055899615318043"
+              "templateHash": "12831828602580991957"
             }
           },
           "parameters": {
@@ -519,6 +519,27 @@
               "metadata": {
                 "description": "Revision mode (Single or Multiple)"
               }
+            },
+            "healthProbesEnabled": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Enable health probes"
+              }
+            },
+            "healthProbePath": {
+              "type": "string",
+              "defaultValue": "/api/health",
+              "metadata": {
+                "description": "Health probe path"
+              }
+            },
+            "healthProbePort": {
+              "type": "int",
+              "defaultValue": "[parameters('targetPort')]",
+              "metadata": {
+                "description": "Health probe port"
+              }
             }
           },
           "resources": [
@@ -551,7 +572,8 @@
                         "cpu": "[json(parameters('cpu'))]",
                         "memory": "[parameters('memory')]"
                       },
-                      "env": "[parameters('environmentVariables')]"
+                      "env": "[parameters('environmentVariables')]",
+                      "probes": "[if(parameters('healthProbesEnabled'), createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', parameters('healthProbePath'), 'port', parameters('healthProbePort'), 'scheme', 'HTTP'), 'initialDelaySeconds', 10, 'periodSeconds', 10, 'timeoutSeconds', 3, 'successThreshold', 1, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', parameters('healthProbePath'), 'port', parameters('healthProbePort'), 'scheme', 'HTTP'), 'initialDelaySeconds', 5, 'periodSeconds', 5, 'timeoutSeconds', 3, 'successThreshold', 1, 'failureThreshold', 3), createObject('type', 'Startup', 'httpGet', createObject('path', parameters('healthProbePath'), 'port', parameters('healthProbePort'), 'scheme', 'HTTP'), 'initialDelaySeconds', 0, 'periodSeconds', 5, 'timeoutSeconds', 3, 'successThreshold', 1, 'failureThreshold', 30)), createArray())]"
                     }
                   ],
                   "scale": {

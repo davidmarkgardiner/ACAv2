@@ -74,6 +74,15 @@ param containerPort int = targetPort
 @allowed(['Single', 'Multiple'])
 param revisionMode string = 'Single'
 
+@description('Enable health probes')
+param healthProbesEnabled bool = true
+
+@description('Health probe path')
+param healthProbePath string = '/api/health'
+
+@description('Health probe port')
+param healthProbePort int = targetPort
+
 // ============================================================================
 // Container App
 // ============================================================================
@@ -119,6 +128,47 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             memory: memory
           }
           env: environmentVariables
+          probes: healthProbesEnabled ? [
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: healthProbePath
+                port: healthProbePort
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 3
+              successThreshold: 1
+              failureThreshold: 3
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: healthProbePath
+                port: healthProbePort
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              timeoutSeconds: 3
+              successThreshold: 1
+              failureThreshold: 3
+            }
+            {
+              type: 'Startup'
+              httpGet: {
+                path: healthProbePath
+                port: healthProbePort
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 0
+              periodSeconds: 5
+              timeoutSeconds: 3
+              successThreshold: 1
+              failureThreshold: 30
+            }
+          ] : []
         }
       ]
       scale: {
