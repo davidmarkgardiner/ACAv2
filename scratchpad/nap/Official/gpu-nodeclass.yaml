@@ -1,0 +1,19 @@
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: gpu-config
+spec:
+  imageFamily: Ubuntu2204
+  osDiskSizeGB: 512  # Larger disk for ML models/data
+  maxPods: 30
+  kubelet:
+    cpuManagerPolicy: "static"
+    topologyManagerPolicy: "best-effort"  # Coordinate CPU/GPU resources
+    imageGCHighThresholdPercent: 90
+    imageGCLowThresholdPercent: 80
+  tags:
+    Environment: "development"
+    Team: "platform"
+    Purpose: "gpu-workloads"
+    GPU: "nvidia-t4"
+    SKU: "Standard_NC4as_T4_v3"
