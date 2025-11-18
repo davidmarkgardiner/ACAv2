@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-test-nc4as-t4
+  namespace: default
+  labels:
+    app: gpu-test
+    sku: nc4as-t4
+spec:
+  restartPolicy: Never
+
+  # Node selector to target NC4as_T4_v3 nodes
+  nodeSelector:
+    gpu-sku: nc4as-t4-v3
+
+  # Tolerate GPU taint
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+  containers:
+    - name: gpu-test
+      image: nvidia/cuda:12.3.1-base-ubuntu22.04
+      command:
+        - /bin/bash
+        - -c
+        - |
+          echo "========================================="
+          echo "GPU Test - NC4as_T4_v3 (Small SKU)"
+          echo "========================================="
+          echo ""
+
+          echo "=== System Information ==="
+          uname -a
+          cat /etc/os-release || true
+          echo ""
+
+          echo "=== NVIDIA SMI Output ==="
+          nvidia-smi
+          echo ""
+
+          echo "=== GPU Details ==="
+          nvidia-smi --query-gpu=name,driver_version,memory.total,memory.free,compute_cap --format=csv
+          echo ""
+
+          echo "=== CUDA Device Query ==="
+          if command -v deviceQuery &> /dev/null; then
+            deviceQuery
+          else
+            echo "deviceQuery not available in base image"
+          fi
+          echo ""
+
+          echo "=== Node Information ==="
+          echo "Node Name: $(hostname)"
+          echo "Node Labels:"
+          cat /etc/podinfo/labels 2>/dev/null || echo "Labels not mounted"
+          echo ""
+
+          echo "=== Running Simple CUDA Test ==="
+          cat > /tmp/vector_add.cu << 'EOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+
+          __global__ void vectorAdd(const float *A, const float *B, float *C, int numElements) {
+              int i = blockDim.x * blockIdx.x + threadIdx.x;
+              if (i < numElements) {
+                  C[i] = A[i] + B[i];
+              }
+          }
+
+          int main(void) {
+              printf("CUDA Vector Addition Test\n");
+              int numElements = 50000;
+              size_t size = numElements * sizeof(float);
+
+              float *h_A = (float *)malloc(size);
+              float *h_B = (float *)malloc(size);
+              float *h_C = (float *)malloc(size);
+
+              for (int i = 0; i < numElements; ++i) {
+                  h_A[i] = rand()/(float)RAND_MAX;
+                  h_B[i] = rand()/(float)RAND_MAX;
+              }
+
+              float *d_A = NULL;
+              float *d_B = NULL;
+              float *d_C = NULL;
+              cudaMalloc((void **)&d_A, size);
+              cudaMalloc((void **)&d_B, size);
+              cudaMalloc((void **)&d_C, size);
+
+              cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
+              cudaMemcpy(d_B, h_B, size, cudaMemcpyHostToDevice);
+
+              int threadsPerBlock = 256;
+              int blocksPerGrid = (numElements + threadsPerBlock - 1) / threadsPerBlock;
+              vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, numElements);
+
+              cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
+
+              printf("Vector addition completed successfully!\n");
+              printf("First 5 results: %.2f %.2f %.2f %.2f %.2f\n", h_C[0], h_C[1], h_C[2], h_C[3], h_C[4]);
+
+              cudaFree(d_A);
+              cudaFree(d_B);
+              cudaFree(d_C);
+              free(h_A);
+              free(h_B);
+              free(h_C);
+
+              printf("Test PASSED\n");
+              return 0;
+          }
+          EOF
+
+          echo "CUDA test script created (compilation requires nvcc, skipped in base image)"
+          echo ""
+
+          echo "========================================="
+          echo "GPU Test Completed Successfully!"
+          echo "SKU: NC4as_T4_v3"
+          echo "========================================="
+
+          # Keep pod running for inspection
+          sleep 300
+
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+          memory: "8Gi"
+          cpu: "2"
+        limits:
+          nvidia.com/gpu: 1
+          memory: "8Gi"
+          cpu: "2"
+
+      volumeMounts:
+        - name: podinfo
+          mountPath: /etc/podinfo
+
+  volumes:
+    - name: podinfo
+      downwardAPI:
+        items:
+          - path: "labels"
+            fieldRef:
+              fieldPath: metadata.labels

@@ -1,0 +1,59 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-nc64as-t4
+  annotations:
+    kubernetes.io/description: Multi-GPU NodePool - 4x T4 GPU, 64 vCPU, 440GB RAM
+spec:
+  weight: 23
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+    budgets:
+      - nodes: "0"
+  template:
+    metadata:
+      labels:
+        workload-type: gpu
+        gpu-type: nvidia-t4
+        gpu-sku: nc64as-t4-v3
+        gpu-count: "4"
+        os: azurelinux
+    spec:
+      expireAfter: Never
+
+      requirements:
+        # Multi-GPU T4 SKU
+        - key: karpenter.azure.com/sku-name
+          operator: In
+          values:
+            - Standard_NC64as_T4_v3
+
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand
+
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: gpu-azurelinux-config
+
+  limits:
+    cpu: "64"
+    memory: 440Gi
+    nvidia.com/gpu: "4"

@@ -1,0 +1,61 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-spot-nc4as-t4
+  annotations:
+    kubernetes.io/description: Spot GPU NodePool - 1x T4 GPU, 4 vCPU (Low Priority)
+spec:
+  weight: 15  # Lower priority than on-demand
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+  template:
+    metadata:
+      labels:
+        workload-type: gpu
+        gpu-type: nvidia-t4
+        gpu-sku: nc4as-t4-v3-spot
+        os: azurelinux
+        capacity-type: spot
+    spec:
+      expireAfter: Never
+
+      requirements:
+        # Small T4 SKU
+        - key: karpenter.azure.com/sku-name
+          operator: In
+          values:
+            - Standard_NC4as_T4_v3
+
+        # SPOT capacity to use low-priority quota
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - spot
+
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+        - key: kubernetes.azure.com/scalesetpriority
+          value: "spot"
+          effect: NoSchedule
+
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: gpu-azurelinux-config
+
+  limits:
+    cpu: "4"
+    memory: 28Gi
+    nvidia.com/gpu: "1"

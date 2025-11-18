@@ -1,0 +1,58 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-nc8as-t4
+  annotations:
+    kubernetes.io/description: Medium GPU NodePool - 1x T4 GPU, 8 vCPU, 56GB RAM
+spec:
+  weight: 21
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+    budgets:
+      - nodes: "0"
+  template:
+    metadata:
+      labels:
+        workload-type: gpu
+        gpu-type: nvidia-t4
+        gpu-sku: nc8as-t4-v3
+        os: azurelinux
+    spec:
+      expireAfter: Never
+
+      requirements:
+        # Medium T4 SKU
+        - key: karpenter.azure.com/sku-name
+          operator: In
+          values:
+            - Standard_NC8as_T4_v3
+
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand
+
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: gpu-azurelinux-config
+
+  limits:
+    cpu: "16"
+    memory: 112Gi
+    nvidia.com/gpu: "2"
