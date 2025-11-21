@@ -1,0 +1,92 @@
+---
+# RBAC for Certification Workflows
+# This provides the necessary permissions for certification workflows to validate clusters
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-certification-validator
+  labels:
+    app: argo-workflows
+    component: certification
+rules:
+  # Read KRO resources
+  - apiGroups: ["kro.run"]
+    resources:
+      - resourcegraphdefinitions
+      - uk8sclusterpublics
+      - uk8sclusters
+      - uk8sjobs
+      - uk8sfluxgitops
+      - uk8scertifications
+    verbs: ["get", "list", "watch"]
+
+  # Read ASO resources
+  - apiGroups: ["resources.azure.com"]
+    resources:
+      - resourcegroups
+    verbs: ["get", "list"]
+
+  - apiGroups: ["containerservice.azure.com"]
+    resources:
+      - managedclusters
+    verbs: ["get", "list"]
+
+  - apiGroups: ["managedidentity.azure.com"]
+    resources:
+      - userassignedidentities
+      - federatedidentitycredentials
+    verbs: ["get", "list"]
+
+  # Read Flux resources
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: ["get", "list"]
+
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+    verbs: ["get", "list"]
+
+  - apiGroups: [""]
+    resources:
+      - pods
+      - serviceaccounts
+      - nodes
+    verbs: ["get", "list"]
+
+  # Read Argo Workflow resources (for self-inspection)
+  - apiGroups: ["argoproj.io"]
+    resources:
+      - workflows
+      - workflowtemplates
+      - cronworkflows
+      - workflowtaskresults
+    verbs: ["get", "list", "create", "patch"]
+
+  # Cluster info
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["get", "list"]
+
+  - nonResourceURLs: ["/version", "/apis", "/api/*"]
+    verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-certification-validator-binding
+  labels:
+    app: argo-workflows
+    component: certification
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-certification-validator
+subjects:
+  - kind: ServiceAccount
+    name: argo-workflow-executor
+    namespace: argo

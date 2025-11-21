@@ -1,0 +1,671 @@
+---
+# ResourceGraphDefinition for UK8S AKS Public Cluster
+# This defines a complete PUBLIC AKS cluster with all supporting infrastructure including:
+# - Resource Group
+# - AKS Managed Cluster with PUBLIC API endpoint (NAP, Istio, KEDA, VPA)
+# - User-Assigned Managed Identities (External Secrets, External DNS, Cert Manager)
+# - Federated Identity Credentials for Workload Identity
+# - Integration with Flux GitOps and supporting jobs
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: uk8sclusterpublic.kro.run
+  labels:
+    kro.run/type: cluster
+    kro.run/category: infrastructure
+    kro.run/access: public
+  annotations:
+    kro.run/description: "Complete PUBLIC AKS cluster with GitOps, identities, and integrations"
+    kro.run/version: "1.0.0"
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: UK8SClusterPublic
+    spec:
+      # ========================================
+      # Cluster Identity
+      # ========================================
+      clusterName: string | required=true description="The name of the AKS cluster (lowercase, alphanumeric, max 63 chars)" pattern="^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+      targetNamespace: string | default="uk8s-nextgen" required=true description="The namespace where the cluster resource will be created"
+      location: string | required=true description="Azure region for the cluster" default="uksouth" enum="uksouth,ukwest,westeurope,northeurope"
+      subscriptionId: string | required=true description="Azure subscription ID for the cluster resources" pattern="^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+      # ========================================
+      # Owner Resource Group
+      # ========================================
+      resourceGroup: string | required=true description="The resource group that owns this cluster" pattern="^[a-zA-Z0-9_\-\.]+$"
+
+      # ========================================
+      # Kubernetes Version
+      # ========================================
+      kubernetesVersion: string | default="1.33" description="Kubernetes version"
+
+      # ========================================
+      # SSH Configuration
+      # ========================================
+      sshPublicKey: string | required=true description="SSH public key for Linux nodes (ssh-rsa format)"
+
+      # ========================================
+      # Network Configuration
+      # ========================================
+      network:
+        vnetSubscriptionId: string | required=true description="Subscription ID for the VNET" pattern="^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        vnetResourceGroup: string | required=true description="Resource group containing the VNET"
+        vnetName: string | required=true description="Virtual network name"
+        subnetName: string | required=true description="Subnet name for nodes"
+        serviceCidr: string | default="10.251.0.0/17" description="Service CIDR block" pattern="^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+        dnsServiceIP: string | default="10.251.0.10" description="DNS service IP (must be within serviceCidr)" pattern="^([0-9]{1,3}\.){3}[0-9]{1,3}$"
+        podCidr: string | default="10.251.128.0/17" description="Pod CIDR block" pattern="^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+
+      # ========================================
+      # Identity Configuration
+      # ========================================
+      identity:
+        controlPlaneIdentityResourceId: string | required=true description="ARM ID of the control plane managed identity"
+        kubeletIdentityClientId: string | required=true description="Client ID of the kubelet identity" pattern="^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        kubeletIdentityObjectId: string | required=true description="Object ID of the kubelet identity" pattern="^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        kubeletIdentityResourceId: string | required=true description="ARM ID of the kubelet identity"
+        fluxClientId: string | required=true description="Client ID of the flux identity for image and source controller" pattern="^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+      # ========================================
+      # AAD Configuration
+      # ========================================
+      aad:
+        enableAzureRBAC: boolean | default=true description="Enable Azure RBAC for Kubernetes authorization"
+        adminGroupObjectIds: '[]string | required=true description="List of Azure AD group object IDs for cluster admin access"'
+
+      # ========================================
+      # Node Pool Configuration
+      # ========================================
+      nodePool:
+        name: string | default="sysnpl" description="Name of the system node pool" pattern="^[a-z][a-z0-9]{0,11}$"
+        vmSize: string | default="Standard_D4s_v5" description="VM size for nodes"
+        count: integer | default=1 minimum=1 maximum=100 description="Number of nodes"
+        enableAutoScaling: boolean | default=false description="Enable autoscaling"
+        minCount: integer | default=1 minimum=1 maximum=100 description="Minimum number of nodes (if autoscaling enabled)"
+        maxCount: integer | default=10 minimum=1 maximum=1000 description="Maximum number of nodes (if autoscaling enabled)"
+        availabilityZones: '[]string | default=["1"] description="Availability zones for node distribution"'
+        osDiskType: string | default="Managed" enum="Managed,Ephemeral" description="OS disk type"
+        osDiskSizeGB: integer | default=128 minimum=30 maximum=2048 description="OS disk size in GB"
+        osSKU: string | default="AzureLinux" enum="AzureLinux,Ubuntu,Windows2019,Windows2022" description="OS SKU"
+        maxPods: integer | default=110 minimum=10 maximum=250 description="Maximum pods per node"
+
+      # ========================================
+      # Security Configuration
+      # ========================================
+      security:
+        enableSecureBoot: boolean | default=true description="Enable secure boot for nodes"
+        enableVTPM: boolean | default=true description="Enable vTPM for nodes"
+        disableLocalAccounts: boolean | default=true description="Disable local Kubernetes accounts (AAD only)"
+        disableRunCommand: boolean | default=true description="Disable kubectl run command access"
+        enableDefender: boolean | default=true description="Enable Microsoft Defender for Containers"
+        defenderWorkspaceResourceId: string | required=true description="Log Analytics workspace ARM ID for Defender"
+        authorizedIPRanges: '[]string | default=[] description="List of authorized IP ranges for public API access (e.g., [\"203.0.113.0/24\"])"'
+
+      # ========================================
+      # Workload Identity
+      # ========================================
+      workloadIdentity:
+        enabled: boolean | default=true description="Enable workload identity federation"
+
+      # ========================================
+      # OIDC Issuer
+      # ========================================
+      oidcIssuer:
+        enabled: boolean | default=true description="Enable OIDC issuer for workload identity"
+        configMapKey: string | default="issuer-url" description="ConfigMap key for OIDC issuer URL"
+
+      # ========================================
+      # Auto Upgrade
+      # ========================================
+      autoUpgrade:
+        upgradeChannel: string | default="stable" enum="none,patch,stable,rapid,node-image" description="Auto upgrade channel"
+        nodeOSUpgradeChannel: string | default="NodeImage" enum="None,Unmanaged,SecurityPatch,NodeImage" description="Node OS upgrade channel"
+
+      # ========================================
+      # Storage Profile
+      # ========================================
+      storage:
+        diskCSIDriverEnabled: boolean | default=true description="Enable Azure Disk CSI driver"
+        fileCSIDriverEnabled: boolean | default=true description="Enable Azure File CSI driver"
+        snapshotControllerEnabled: boolean | default=true description="Enable volume snapshot controller"
+
+      # ========================================
+      # Addons
+      # ========================================
+      addons:
+        azureKeyvaultSecretsProvider:
+          enabled: boolean | default=true description="Enable Azure Key Vault secrets provider"
+          enableSecretRotation: string | default="true" enum="true,false" description="Enable secret rotation (string value)"
+          rotationPollInterval: string | default="30m" description="Rotation poll interval (e.g., 30m, 1h)"
+        azurePolicy:
+          enabled: boolean | default=true description="Enable Azure Policy add-on"
+          version: string | default="v2" enum="v1,v2" description="Azure Policy version"
+
+      # ========================================
+      # Workload Auto Scaler
+      # ========================================
+      workloadAutoScaler:
+        keda:
+          enabled: boolean | default=true description="Enable KEDA for event-driven autoscaling"
+        verticalPodAutoscaler:
+          enabled: boolean | default=true description="Enable Vertical Pod Autoscaler"
+
+      # ========================================
+      # Service Mesh (Istio)
+      # ========================================
+      serviceMesh:
+        enabled: boolean | default=true description="Enable Istio service mesh"
+        istioRevisions: '[]string | default=["asm-1-27"] description="Istio revisions to install"'
+        internalIngressEnabled: boolean | default=true description="Enable internal ingress gateway"
+        externalIngressEnabled: boolean | default=true description="Enable external ingress gateway"
+
+      # ========================================
+      # Monitoring and Metrics
+      # ========================================
+      azureMonitorProfile:
+        metrics:
+          enabled: boolean | default=true description="Enable Azure Monitor managed Prometheus metrics"
+
+      # ========================================
+      # SKU and Support
+      # ========================================
+      sku:
+        name: string | default="Base" enum="Base,Premium" description="AKS SKU name"
+        tier: string | default="Standard" enum="Free,Standard,Premium" description="AKS SKU tier (Standard recommended for production)"
+      supportPlan: string | default="KubernetesOfficial" enum="KubernetesOfficial,AKSLongTermSupport" description="Support plan"
+
+      # ========================================
+      # Tags
+      # ========================================
+      tags: 'map[string]string | required=true description="Resource tags for cost tracking and organization"'
+
+      # ========================================
+      # Flux GitOps Configuration
+      # ========================================
+      flux:
+        core:
+          url: string | default="" description="Git repository URL for core cluster configuration"
+          branch: string | default="main" description="Git branch for core configuration"
+        config:
+          url: string | default="" description="Git repository URL for application configuration"
+          branch: string | default="main" description="Git branch for application configuration"
+
+      # ========================================
+      # Environment Classification
+      # ========================================
+      environment: string | default="dev" enum="dev,staging,production" description="Environment classification for configuration management"
+
+  # ========================================
+  # Resources Created by this RGD
+  # ========================================
+  resources:
+    # ----------------------------------------
+    # Supporting Orchestrations
+    # ----------------------------------------
+    - id: jobs
+      template:
+        apiVersion: kro.run/v1alpha1
+        kind: UK8Sjobs
+        metadata:
+          name: jobs-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: post-deployment-jobs
+        spec:
+          clusterName: ${schema.spec.clusterName}
+          resourceGroup: ${schema.spec.resourceGroup}
+          subscriptionId: ${schema.spec.subscriptionId}
+          targetNamespace: ${schema.spec.targetNamespace}
+          # These will be populated by the jobs RGD if needed
+          azureTenantId: ""
+          azureMonitorWorkspaceResourceId: ""
+          grafanaResourceId: ""
+          asoClientId: ""
+
+    - id: fluxGitOps
+      template:
+        apiVersion: kro.run/v1alpha1
+        kind: UK8SFluxGitOps
+        metadata:
+          name: flux-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: gitops
+        spec:
+          clusterName: ${schema.spec.clusterName}
+          resourceGroup: ${schema.spec.resourceGroup}
+          targetNamespace: ${schema.spec.targetNamespace}
+          environment: ${schema.spec.environment}
+          flux:
+            core:
+              url: ${schema.spec.flux.core.url}
+              branch: ${schema.spec.flux.core.branch}
+            config:
+              url: ${schema.spec.flux.config.url}
+              branch: ${schema.spec.flux.config.branch}
+
+    # ----------------------------------------
+    # Resource Group
+    # ----------------------------------------
+    - id: resourceGroup
+      template:
+        apiVersion: resources.azure.com/v1api20200601
+        kind: ResourceGroup
+        metadata:
+          name: ${schema.spec.resourceGroup}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            environment: ${schema.spec.environment}
+        spec:
+          azureName: ${schema.spec.resourceGroup}
+          location: ${schema.spec.location}
+          tags: ${schema.spec.tags}
+
+    # ----------------------------------------
+    # AKS Managed Cluster (PUBLIC)
+    # ----------------------------------------
+    - id: managedCluster
+      template:
+        apiVersion: containerservice.azure.com/v1api20240402preview
+        kind: ManagedCluster
+        metadata:
+          name: ${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            environment: ${schema.spec.environment}
+        spec:
+          azureName: ${schema.spec.clusterName}
+          location: ${schema.spec.location}
+          owner:
+            name: ${schema.spec.resourceGroup}
+          operatorSpec:
+            configMaps:
+              oidcIssuerProfile:
+                name: oidc-${schema.spec.clusterName}
+                key: ${schema.spec.oidcIssuer.configMapKey}
+          dnsPrefix: ${schema.spec.clusterName}k8s
+          kubernetesVersion: ${schema.spec.kubernetesVersion}
+          linuxProfile:
+            adminUsername: localadmin
+            ssh:
+              publicKeys:
+                - keyData: ${schema.spec.sshPublicKey}
+          nodeProvisioningProfile:
+            mode: Auto
+          identity:
+            type: UserAssigned
+            userAssignedIdentities:
+              - reference:
+                  armId: ${schema.spec.identity.controlPlaneIdentityResourceId}
+          aadProfile:
+            enableAzureRBAC: ${schema.spec.aad.enableAzureRBAC}
+            managed: true
+            adminGroupObjectIDs: ${schema.spec.aad.adminGroupObjectIds}
+          enableRBAC: true
+          disableLocalAccounts: ${schema.spec.security.disableLocalAccounts}
+          networkProfile:
+            networkPlugin: azure
+            networkPluginMode: overlay
+            networkPolicy: cilium
+            networkDataplane: cilium
+            serviceCidr: ${schema.spec.network.serviceCidr}
+            dnsServiceIP: ${schema.spec.network.dnsServiceIP}
+            podCidr: ${schema.spec.network.podCidr}
+            ipFamilies: ["IPv4"]
+            loadBalancerSku: standard
+            outboundType: loadBalancer
+          apiServerAccessProfile:
+            enablePrivateCluster: false
+            authorizedIPRanges: ${schema.spec.security.authorizedIPRanges}
+            disableRunCommand: ${schema.spec.security.disableRunCommand}
+          agentPoolProfiles:
+            - name: ${schema.spec.nodePool.name}
+              vnetSubnetReference:
+                armId: /subscriptions/${schema.spec.network.vnetSubscriptionId}/resourceGroups/${schema.spec.network.vnetResourceGroup}/providers/Microsoft.Network/virtualNetworks/${schema.spec.network.vnetName}/subnets/${schema.spec.network.subnetName}
+              mode: System
+              count: ${schema.spec.nodePool.count}
+              enableAutoScaling: ${schema.spec.nodePool.enableAutoScaling}
+              vmSize: ${schema.spec.nodePool.vmSize}
+              availabilityZones: ${schema.spec.nodePool.availabilityZones}
+              osDiskType: ${schema.spec.nodePool.osDiskType}
+              osDiskSizeGB: ${schema.spec.nodePool.osDiskSizeGB}
+              osType: Linux
+              osSKU: ${schema.spec.nodePool.osSKU}
+              maxPods: ${schema.spec.nodePool.maxPods}
+              enableNodePublicIP: false
+              enableEncryptionAtHost: false
+              securityProfile:
+                enableSecureBoot: ${schema.spec.security.enableSecureBoot}
+                enableVTPM: ${schema.spec.security.enableVTPM}
+                sshAccess: Disabled
+          identityProfile:
+            kubeletidentity:
+              clientId: ${schema.spec.identity.kubeletIdentityClientId}
+              objectId: ${schema.spec.identity.kubeletIdentityObjectId}
+              resourceReference:
+                armId: ${schema.spec.identity.kubeletIdentityResourceId}
+          autoUpgradeProfile:
+            upgradeChannel: ${schema.spec.autoUpgrade.upgradeChannel}
+            nodeOSUpgradeChannel: ${schema.spec.autoUpgrade.nodeOSUpgradeChannel}
+          securityProfile:
+            defender:
+              logAnalyticsWorkspaceResourceReference:
+                armId: ${schema.spec.security.defenderWorkspaceResourceId}
+              securityMonitoring:
+                enabled: ${schema.spec.security.enableDefender}
+            workloadIdentity:
+              enabled: ${schema.spec.workloadIdentity.enabled}
+            imageCleaner:
+              enabled: false
+              intervalHours: 48
+          storageProfile:
+            diskCSIDriver:
+              enabled: ${schema.spec.storage.diskCSIDriverEnabled}
+            fileCSIDriver:
+              enabled: ${schema.spec.storage.fileCSIDriverEnabled}
+            snapshotController:
+              enabled: ${schema.spec.storage.snapshotControllerEnabled}
+          addonProfiles:
+            azureKeyvaultSecretsProvider:
+              enabled: ${schema.spec.addons.azureKeyvaultSecretsProvider.enabled}
+              config:
+                enableSecretRotation: ${schema.spec.addons.azureKeyvaultSecretsProvider.enableSecretRotation}
+                rotationPollInterval: ${schema.spec.addons.azureKeyvaultSecretsProvider.rotationPollInterval}
+            azurepolicy:
+              enabled: ${schema.spec.addons.azurePolicy.enabled}
+              config:
+                version: ${schema.spec.addons.azurePolicy.version}
+          sku:
+            name: ${schema.spec.sku.name}
+            tier: ${schema.spec.sku.tier}
+          supportPlan: ${schema.spec.supportPlan}
+          oidcIssuerProfile:
+            enabled: ${schema.spec.oidcIssuer.enabled}
+          serviceMeshProfile:
+            mode: Istio
+            istio:
+              components:
+                ingressGateways:
+                  - enabled: ${schema.spec.serviceMesh.internalIngressEnabled}
+                    mode: Internal
+                  - enabled: ${schema.spec.serviceMesh.externalIngressEnabled}
+                    mode: External
+              revisions: ${schema.spec.serviceMesh.istioRevisions}
+          podIdentityProfile:
+            enabled: false
+            userAssignedIdentityExceptions:
+              - name: k8s-control-plane-exception
+                namespace: kube-system
+                podLabels:
+                  kubernetes.azure.com/managedby: aks
+              - name: ubs-control-plane-exception
+                namespace: ubs-system
+                podLabels:
+                  kubernetes.azure.com/managedby: aks
+          nodeResourceGroup: MC_${schema.spec.resourceGroup}_${schema.spec.clusterName}_${schema.spec.location}
+          servicePrincipalProfile:
+            clientId: msi
+          tags: ${schema.spec.tags}
+          azureMonitorProfile:
+            metrics:
+              enabled: ${schema.spec.azureMonitorProfile.metrics.enabled}
+              kubeStateMetrics:
+                metricLabelsAllowlist: "namespaces=[owner, swID]"
+          workloadAutoScalerProfile:
+            keda:
+              enabled: ${schema.spec.workloadAutoScaler.keda.enabled}
+            verticalPodAutoscaler:
+              enabled: ${schema.spec.workloadAutoScaler.verticalPodAutoscaler.enabled}
+
+    # ----------------------------------------
+    # User-Assigned Managed Identities
+    # ----------------------------------------
+    - id: externalSecretsIdentity
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: UserAssignedIdentity
+        metadata:
+          name: uami-${schema.spec.clusterName}-externalsecrets
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: external-secrets-identity
+        spec:
+          azureName: uami-${schema.spec.clusterName}-externalsecrets
+          location: ${schema.spec.location}
+          owner:
+            name: ${schema.spec.resourceGroup}
+          operatorSpec:
+            configMaps:
+              clientId:
+                name: eso-identity-cm-${schema.spec.clusterName}
+                key: clientId
+              principalId:
+                name: eso-identity-cm-${schema.spec.clusterName}
+                key: principalId
+              tenantId:
+                name: eso-identity-cm-${schema.spec.clusterName}
+                key: tenantId
+
+    - id: externalDnsIdentity
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: UserAssignedIdentity
+        metadata:
+          name: uami-${schema.spec.clusterName}-externaldns
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: external-dns-identity
+        spec:
+          azureName: uami-${schema.spec.clusterName}-externaldns
+          location: ${schema.spec.location}
+          owner:
+            name: ${schema.spec.resourceGroup}
+          operatorSpec:
+            configMaps:
+              clientId:
+                name: external-dns-identity-cm-${schema.spec.clusterName}
+                key: clientId
+              principalId:
+                name: external-dns-identity-cm-${schema.spec.clusterName}
+                key: principalId
+              tenantId:
+                name: external-dns-identity-cm-${schema.spec.clusterName}
+                key: tenantId
+
+    - id: certManagerIdentity
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: UserAssignedIdentity
+        metadata:
+          name: uami-${schema.spec.clusterName}-certmanager
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: cert-manager-identity
+        spec:
+          azureName: uami-${schema.spec.clusterName}-certmanager
+          location: ${schema.spec.location}
+          owner:
+            name: ${schema.spec.resourceGroup}
+          operatorSpec:
+            configMaps:
+              clientId:
+                name: cert-manager-identity-cm-${schema.spec.clusterName}
+                key: clientId
+              principalId:
+                name: cert-manager-identity-cm-${schema.spec.clusterName}
+                key: principalId
+              tenantId:
+                name: cert-manager-identity-cm-${schema.spec.clusterName}
+                key: tenantId
+
+    # ----------------------------------------
+    # Federated Identity Credentials
+    # ----------------------------------------
+    - id: externalSecretsFederatedCredential
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: FederatedIdentityCredential
+        metadata:
+          name: externalsecrets-fic-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: external-secrets-fedcred
+        spec:
+          azureName: federated_workload_identity_eso_${schema.spec.clusterName}
+          owner:
+            name: uami-${schema.spec.clusterName}-externalsecrets
+          audiences:
+            - api://AzureADTokenExchange
+          issuerFromConfig:
+            name: oidc-${schema.spec.clusterName}
+            key: ${schema.spec.oidcIssuer.configMapKey}
+          subject: system:serviceaccount:external-secrets:external-secrets
+
+    - id: externalDnsFederatedCredential
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: FederatedIdentityCredential
+        metadata:
+          name: externaldns-fic-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: external-dns-fedcred
+        spec:
+          azureName: federated_workload_identity_extdns_${schema.spec.clusterName}
+          owner:
+            name: uami-${schema.spec.clusterName}-externaldns
+          audiences:
+            - api://AzureADTokenExchange
+          issuerFromConfig:
+            name: oidc-${schema.spec.clusterName}
+            key: ${schema.spec.oidcIssuer.configMapKey}
+          subject: system:serviceaccount:external-dns:extdns-workload-identity-sa
+
+    - id: externalDnsBcmFederatedCredential
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: FederatedIdentityCredential
+        metadata:
+          name: externaldnsbcm-fic-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: external-dns-bcm-fedcred
+        spec:
+          azureName: federated_workload_identity_external_dns_bcm_${schema.spec.clusterName}
+          owner:
+            name: uami-${schema.spec.clusterName}-externaldns
+          audiences:
+            - api://AzureADTokenExchange
+          issuerFromConfig:
+            name: oidc-${schema.spec.clusterName}
+            key: ${schema.spec.oidcIssuer.configMapKey}
+          subject: system:serviceaccount:external-dns-bcm:extdns-workload-identity-sa
+
+    - id: certManagerFederatedCredential
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: FederatedIdentityCredential
+        metadata:
+          name: certmanager-fic-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: cert-manager-fedcred
+        spec:
+          azureName: federated_workload_identity_certmgr_${schema.spec.clusterName}
+          owner:
+            name: uami-${schema.spec.clusterName}-certmanager
+          audiences:
+            - api://AzureADTokenExchange
+          issuerFromConfig:
+            name: oidc-${schema.spec.clusterName}
+            key: ${schema.spec.oidcIssuer.configMapKey}
+          subject: system:serviceaccount:ubs-issuer-system:cert-manager
+
+    # NOTE: Flux federated credentials reference external management identities
+    # These should be created separately or parameterized
+    - id: fluxSourceFederatedCredential
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: FederatedIdentityCredential
+        metadata:
+          name: fluxsource-fic-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: flux-source-fedcred
+          annotations:
+            kro.run/note: "References external management identity - ensure it exists"
+        spec:
+          azureName: federated_workload_identity_flux_src_${schema.spec.clusterName}
+          owner:
+            # TODO: Parameterize this external identity reference
+            armId: /subscriptions/${schema.spec.subscriptionId}/resourcegroups/eng-management-cluster/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-weu-at39473-flux-mi4-dev
+          audiences:
+            - api://AzureADTokenExchange
+          issuerFromConfig:
+            name: oidc-${schema.spec.clusterName}
+            key: ${schema.spec.oidcIssuer.configMapKey}
+          subject: system:serviceaccount:flux-system:source-controller
+
+    - id: fluxImageFederatedCredential
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: FederatedIdentityCredential
+        metadata:
+          name: fluximage-fic-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: flux-image-fedcred
+          annotations:
+            kro.run/note: "References external management identity - ensure it exists"
+        spec:
+          azureName: federated_workload_identity_flux_img_${schema.spec.clusterName}
+          owner:
+            # TODO: Parameterize this external identity reference
+            armId: /subscriptions/${schema.spec.subscriptionId}/resourcegroups/eng-management-cluster/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-weu-at39473-flux-mi4-dev
+          audiences:
+            - api://AzureADTokenExchange
+          issuerFromConfig:
+            name: oidc-${schema.spec.clusterName}
+            key: ${schema.spec.oidcIssuer.configMapKey}
+          subject: system:serviceaccount:flux-system:image-automation-controller
+
+    # ----------------------------------------
+    # Certification System (Externalized)
+    # ----------------------------------------
+    - id: certification
+      template:
+        apiVersion: kro.run/v1alpha1
+        kind: UK8SCertification
+        metadata:
+          name: cert-${schema.spec.clusterName}
+          namespace: ${schema.spec.targetNamespace}
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: certification
+        spec:
+          clusterName: ${schema.spec.clusterName}
+          resourceGroup: ${schema.spec.resourceGroup}
+          targetNamespace: ${schema.spec.targetNamespace}
+          instanceName: ${schema.metadata.name}
+          subscriptionId: ${schema.spec.subscriptionId}
+          environment: ${schema.spec.environment}
+          clusterType: "PUBLIC"
+          certification:
+            timeout: 1800
+            schedule: "0 2 * * 0"
+            suspended: true
+            autoTrigger: true
