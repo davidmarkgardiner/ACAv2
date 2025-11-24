@@ -1,0 +1,181 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: system-surge
+  annotations:
+    kubernetes.io/description: "Override system-surge NodePool to prevent runaway scaling with Azure Linux"
+spec:
+  # Very high weight for system surge operations
+  weight: 150
+
+  disruption:
+    # Only consolidate when completely empty - system surge needs to be stable
+    consolidationPolicy: WhenEmpty
+
+    # Wait longer before consolidating surge nodes
+    consolidateAfter: 15m
+
+    # Never expire system surge nodes automatically
+    expireAfter: Never
+
+    # CRITICAL: Strict disruption budgets to prevent rapid scaling
+    budgets:
+      # ONLY allow 1 node to be disrupted at a time
+      - nodes: "1"
+
+      # Block ALL disruptions during business hours for stability
+      - nodes: "0"
+        schedule: "0 8-18 * * MON-FRI"  # 8 AM - 6 PM Mon-Fri
+        duration: 10h
+
+      # Block ALL disruptions during peak hours (additional safety)
+      - nodes: "0"
+        schedule: "0 12-14 * * *"  # Lunch time UTC
+        duration: 2h
+
+  template:
+    metadata:
+      labels:
+        node-role: system-surge
+        workload-type: system-critical
+        managed-by: karpenter
+        os: azurelinux
+        surge-control: "strict"
+
+    spec:
+      # System surge nodes should never expire
+      expireAfter: Never
+
+      requirements:
+        # Use D-series VMs - balanced for system workloads
+        - key: karpenter.azure.com/sku-family
+          operator: In
+          values:
+            - D  # General purpose
+
+        # SPECIFIC VM sizes for system surge (limited choices to prevent variety)
+        - key: karpenter.azure.com/sku-name
+          operator: In
+          values:
+            - Standard_D4s_v5   # 4 vCPU, 16 GB RAM
+            - Standard_D8s_v5   # 8 vCPU, 32 GB RAM (preferred)
+
+        # On-demand ONLY for system surge - no spot instances
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand
+
+        # Architecture
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        # OS
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+        # Ensure premium storage capability
+        - key: karpenter.azure.com/sku-storage-premium-capable
+          operator: In
+          values:
+            - "true"
+
+        # Ensure accelerated networking
+        - key: karpenter.azure.com/sku-networking-accelerated
+          operator: In
+          values:
+            - "true"
+
+      # Taint system-surge nodes to prevent user workloads
+      taints:
+        - key: CriticalAddonsOnly
+          effect: NoSchedule
+        - key: node-role
+          value: system-surge
+          effect: NoSchedule
+        - key: system-surge
+          value: "true"
+          effect: NoExecute  # Evict non-tolerating pods
+
+      # Reference to Azure Linux node class for system surge
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: system-surge-azurelinux
+
+  # CRITICAL: Resource limits to prevent surge beyond 2-3 nodes
+  # With D8s_v5 (8 vCPU each), max 2-3 nodes = 16-24 vCPUs total
+  limits:
+    cpu: "16"       # Maximum 16 vCPUs (2 x D8s_v5 nodes)
+    memory: 64Gi    # Maximum 64GB RAM (2 x 32GB nodes)
+
+---
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: system-surge-azurelinux
+  annotations:
+    kubernetes.io/description: "Azure Linux node class optimized for system surge operations"
+spec:
+  # Azure Linux for optimal AKS performance
+  imageFamily: AzureLinux
+
+  # System surge nodes require moderate disk size
+  osDiskSizeGB: 128
+
+  # Standard pod limit for system workloads
+  maxPods: 110
+
+  # Kubelet configuration optimized for system surge
+  kubelet:
+    # Reserve more resources for system components during surge
+    kubeReserved:
+      cpu: "300m"
+      memory: "1.5Gi"
+      ephemeral-storage: "1Gi"
+
+    systemReserved:
+      cpu: "300m"
+      memory: "1.5Gi"
+      ephemeral-storage: "1Gi"
+
+    # Aggressive image garbage collection for surge scenarios
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 75
+
+    # Tighter container log limits to prevent disk pressure
+    containerLogMaxSize: "10Mi"
+    containerLogMaxFiles: 3
+
+    # Eviction thresholds to prevent node pressure
+    evictionHard:
+      memory.available: "500Mi"
+      nodefs.available: "10%"
+      nodefs.inodesFree: "5%"
+      imagefs.available: "10%"
+
+    evictionSoft:
+      memory.available: "1Gi"
+      nodefs.available: "15%"
+      nodefs.inodesFree: "10%"
+      imagefs.available: "15%"
+
+    evictionSoftGracePeriod:
+      memory.available: "2m"
+      nodefs.available: "2m"
+      nodefs.inodesFree: "2m"
+      imagefs.available: "2m"
+
+  tags:
+    nodeType: "system-surge"
+    os: "azurelinux"
+    workload: "system-critical"
+    surge-control: "enabled"
+    Environment: "production"
+    Team: "platform"
+    Purpose: "system-surge-operations"
+    MaxNodes: "2"

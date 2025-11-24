@@ -1,0 +1,98 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+  annotations:
+    kubernetes.io/description: "Override default NodePool with AzureLinux and strict limits"
+spec:
+  # Standard weight for general workloads
+  weight: 50
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 3m
+    expireAfter: Never
+
+    # Prevent aggressive scaling
+    budgets:
+      # Max 20% of nodes can be disrupted at once
+      - nodes: "20%"
+      # Or maximum 2 nodes at once
+      - nodes: "2"
+
+  template:
+    metadata:
+      labels:
+        node-role: general
+        workload-type: user-workloads
+        managed-by: karpenter
+        os: azurelinux
+
+    spec:
+      requirements:
+        # General purpose VMs
+        - key: karpenter.azure.com/sku-family
+          operator: In
+          values:
+            - D  # General purpose
+
+        # On-demand for default pool
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand
+
+        # Architecture
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        # OS
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+      # Reference to Azure Linux node class
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: default-azurelinux
+
+  # Resource limits for default pool
+  limits:
+    cpu: "100"      # Maximum 100 vCPUs
+    memory: 400Gi   # Maximum 400GB RAM
+
+---
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: default-azurelinux
+  annotations:
+    kubernetes.io/description: "Azure Linux node class for general workloads"
+spec:
+  imageFamily: AzureLinux
+  osDiskSizeGB: 128
+  maxPods: 110
+
+  kubelet:
+    kubeReserved:
+      cpu: "100m"
+      memory: "512Mi"
+      ephemeral-storage: "1Gi"
+
+    systemReserved:
+      cpu: "100m"
+      memory: "512Mi"
+      ephemeral-storage: "1Gi"
+
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 80
+
+  tags:
+    nodeType: "general"
+    os: "azurelinux"
+    Environment: "production"
+    Team: "platform"
