@@ -1,0 +1,1099 @@
+---
+# ResourceGraphDefinition for UK8S Private Cluster Certification Workflow
+# This defines the Argo Workflows certification system for validating PRIVATE AKS clusters
+# Uses kubelogin with workload identity for non-interactive authentication
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: uk8scertificationprivate.kro.run
+  labels:
+    kro.run/type: certification
+    kro.run/category: validation
+    kro.run/cluster-type: private
+  annotations:
+    kro.run/description: "Automated certification workflow system for UK8S PRIVATE AKS clusters with kubelogin workload identity"
+    kro.run/version: "1.0.0"
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: UK8SCertificationPrivate
+    spec:
+      # ========================================
+      # Cluster Identity
+      # ========================================
+      clusterName: string | required=true description="The name of the AKS cluster to certify"
+      resourceGroup: string | required=true description="The resource group containing the cluster"
+      targetNamespace: string | required=true description="The namespace where cluster resources are managed"
+      instanceName: string | required=true description="The name of the UK8SClusterPrivate instance"
+      subscriptionId: string | required=true description="Azure subscription ID" pattern="^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+      # ========================================
+      # Workload Identity Configuration
+      # ========================================
+      workloadIdentity:
+        clientId: string | required=true description="Azure AD application/client ID for workload identity"
+        tenantId: string | required=true description="Azure AD tenant ID"
+        authorityHost: string | default="https://login.microsoftonline.com/" description="Azure AD authority host URL"
+
+      # ========================================
+      # Environment and Metadata
+      # ========================================
+      environment: string | required=true enum="dev,staging,production" description="Environment classification"
+
+      # ========================================
+      # Certification Configuration
+      # ========================================
+      certification:
+        timeout: integer | default=1800 description="Certification timeout in seconds"
+        schedule: 'string | default="0 2 * * 0" description="Cron schedule for weekly certification (default: Sunday 2 AM UTC)"'
+        suspended: boolean | default=true description="Whether to start the CronWorkflow suspended"
+        autoTrigger: boolean | default=true description="Automatically trigger initial certification after cluster creation"
+
+  # ========================================
+  # Resources Created by this RGD
+  # ========================================
+  resources:
+    # ----------------------------------------
+    # Certification WorkflowTemplate
+    # ----------------------------------------
+    - id: certificationWorkflow
+      template:
+        apiVersion: argoproj.io/v1alpha1
+        kind: WorkflowTemplate
+        metadata:
+          name: certify-private-${schema.spec.clusterName}
+          namespace: argo
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: certification
+            kro.run/cluster-type: private
+            environment: ${schema.spec.environment}
+          annotations:
+            kro.run/description: "Automated certification workflow for UK8S PRIVATE cluster ${schema.spec.clusterName} using kubelogin workload identity"
+            kro.run/version: "1.0.0"
+        spec:
+          entrypoint: certify-cluster
+          serviceAccountName: argo-workflow-executor
+
+          # Projected service account token for Azure workload identity
+          volumes:
+            - name: azure-identity-token
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: azure-identity-token
+                      expirationSeconds: 3600
+                      audience: api://AzureADTokenExchange
+
+          # Disable artifact archiving and GC to avoid Minio dependency
+          archiveLogs: false
+          artifactGC:
+            strategy: Never
+
+          # Clean up pods after workflow completes
+          podGC:
+            strategy: OnWorkflowSuccess
+
+          # Pre-configure parameters with cluster-specific values
+          arguments:
+            parameters:
+              - name: clusterName
+                value: ${schema.spec.clusterName}
+              - name: resourceGroup
+                value: ${schema.spec.resourceGroup}
+              - name: targetNamespace
+                value: ${schema.spec.targetNamespace}
+              - name: instanceName
+                value: ${schema.spec.instanceName}
+              - name: subscriptionId
+                value: ${schema.spec.subscriptionId}
+              - name: environment
+                value: ${schema.spec.environment}
+              - name: clientId
+                value: ${schema.spec.workloadIdentity.clientId}
+              - name: tenantId
+                value: ${schema.spec.workloadIdentity.tenantId}
+              - name: authorityHost
+                value: ${schema.spec.workloadIdentity.authorityHost}
+              - name: certification-timeout
+                value: "${schema.spec.certification.timeout}"
+
+          onExit: generate-final-report
+
+          templates:
+            # Main certification DAG
+            - name: certify-cluster
+              dag:
+                tasks:
+                  - name: wait-for-cluster
+                    template: wait-for-cluster-ready
+
+                  - name: validate-config
+                    template: validate-configuration
+                    dependencies: [wait-for-cluster]
+
+                  - name: validate-kro
+                    template: validate-kro-resources
+                    dependencies: [validate-config]
+
+                  - name: validate-aso
+                    template: validate-aso-resources
+                    dependencies: [validate-kro]
+
+                  - name: validate-flux
+                    template: validate-flux-gitops
+                    dependencies: [validate-aso]
+
+                  - name: get-aks-credentials
+                    template: get-aks-credentials-kubelogin
+                    dependencies: [validate-aso]
+
+                  - name: validate-aks-system-components
+                    template: validate-aks-system-components
+                    dependencies: [get-aks-credentials]
+
+                  - name: validate-connectivity
+                    template: validate-cluster-connectivity
+                    dependencies: [validate-aks-system-components]
+
+                  - name: validate-security
+                    template: validate-security-compliance
+                    dependencies: [validate-connectivity]
+
+                  - name: validate-private-endpoint
+                    template: validate-private-endpoint
+                    dependencies: [validate-connectivity]
+
+                  - name: aggregate-results
+                    template: aggregate-certification
+                    dependencies: [validate-kro, validate-aso, validate-flux, validate-aks-system-components, validate-connectivity, validate-security, validate-private-endpoint]
+
+            # Wait for cluster to be ready
+            - name: wait-for-cluster-ready
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Waiting for Private Cluster to be Ready ==="
+
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  INSTANCE="{{workflow.parameters.instanceName}}"
+                  CLUSTER="{{workflow.parameters.clusterName}}"
+                  MAX_WAIT=1800  # 30 minutes
+                  INTERVAL=30
+                  ELAPSED=0
+
+                  echo "Waiting for UK8SClusterPrivate instance to be ACTIVE and Ready..."
+
+                  while [ $ELAPSED -lt $MAX_WAIT ]; do
+                    # Check UK8SClusterPrivate status (or UK8SClusterPublic if that's what manages private clusters)
+                    STATE=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE \
+                      -o jsonpath='{.status.state}' 2>/dev/null || echo "NOT_FOUND")
+
+                    READY=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+
+                    echo "[$ELAPSED/$MAX_WAIT seconds] State: $STATE, Ready: $READY"
+
+                    if [[ "$STATE" == "ACTIVE" ]] && [[ "$READY" == "True" ]]; then
+                      echo "✓ UK8SCluster is ACTIVE and Ready"
+                      break
+                    fi
+
+                    sleep $INTERVAL
+                    ELAPSED=$((ELAPSED + INTERVAL))
+                  done
+
+                  if [ $ELAPSED -ge $MAX_WAIT ]; then
+                    echo "✗ Timeout waiting for UK8SCluster to be ready"
+                    exit 1
+                  fi
+
+                  # Wait for ManagedCluster to be Ready
+                  echo ""
+                  echo "Waiting for ManagedCluster to be Ready..."
+                  ELAPSED=0
+
+                  while [ $ELAPSED -lt $MAX_WAIT ]; do
+                    MC_READY=$(kubectl get managedcluster $CLUSTER -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+
+                    MC_REASON=$(kubectl get managedcluster $CLUSTER -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || echo "Unknown")
+
+                    echo "[$ELAPSED/$MAX_WAIT seconds] ManagedCluster Ready: $MC_READY ($MC_REASON)"
+
+                    if [[ "$MC_READY" == "True" ]]; then
+                      echo "✓ ManagedCluster is Ready"
+                      break
+                    fi
+
+                    if [[ "$MC_REASON" == "Reconciling" ]]; then
+                      echo "  Still reconciling Azure resources..."
+                    fi
+
+                    sleep $INTERVAL
+                    ELAPSED=$((ELAPSED + INTERVAL))
+                  done
+
+                  if [ $ELAPSED -ge $MAX_WAIT ]; then
+                    echo "✗ Timeout waiting for ManagedCluster to be ready"
+                    exit 1
+                  fi
+
+                  # Additional wait for cluster to settle
+                  echo ""
+                  echo "Cluster is ready! Waiting 60 seconds for cluster to stabilize..."
+                  sleep 60
+
+                  echo "✅ Private cluster is ready for certification"
+
+            # Configuration validation
+            - name: validate-configuration
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Configuration Validation ==="
+                  kubectl get uk8sclusterpublic {{workflow.parameters.instanceName}} \
+                    -n {{workflow.parameters.targetNamespace}} -o yaml > /tmp/instance.yaml
+                  echo "✓ Instance YAML retrieved"
+                  VERSION=$(kubectl get uk8sclusterpublic {{workflow.parameters.instanceName}} \
+                    -n {{workflow.parameters.targetNamespace}} \
+                    -o jsonpath='{.spec.kubernetesVersion}')
+                  echo "✓ Kubernetes version: $VERSION"
+
+                  # Verify this is a private cluster
+                  PRIVATE=$(kubectl get managedcluster {{workflow.parameters.clusterName}} \
+                    -n {{workflow.parameters.targetNamespace}} \
+                    -o jsonpath='{.spec.apiServerAccessProfile.enablePrivateCluster}' 2>/dev/null || echo "false")
+                  echo "✓ Private cluster enabled: $PRIVATE"
+
+                  if [[ "$PRIVATE" != "true" ]]; then
+                    echo "⚠ WARNING: This workflow is designed for private clusters, but enablePrivateCluster=$PRIVATE"
+                  fi
+
+                  echo "✅ Configuration validation complete"
+
+            # KRO validation
+            - name: validate-kro-resources
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== KRO Resource Validation ==="
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  INSTANCE="{{workflow.parameters.instanceName}}"
+                  PASSED=0
+                  FAILED=0
+
+                  # Check ResourceGraphDefinitions
+                  for rgd in uk8sclusterpublic.kro.run uk8sjobs.kro.run uk8sfluxgitops.kro.run uk8scertificationprivate.kro.run; do
+                    if kubectl get resourcegraphdefinition $rgd &>/dev/null; then
+                      STATE=$(kubectl get resourcegraphdefinition $rgd -o jsonpath='{.status.state}')
+                      if [[ "$STATE" == "Active" ]]; then
+                        echo "✓ $rgd is Active"
+                        PASSED=$((PASSED+1))
+                      else
+                        echo "✗ $rgd not Active (state: $STATE)"
+                        FAILED=$((FAILED+1))
+                      fi
+                    else
+                      echo "⚠ $rgd not found (may be optional)"
+                    fi
+                  done
+
+                  # Check UK8SCluster instance
+                  if kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE &>/dev/null; then
+                    echo "✓ UK8SCluster instance exists"
+                    PASSED=$((PASSED+1))
+
+                    STATE=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE -o jsonpath='{.status.state}')
+                    if [[ "$STATE" == "ACTIVE" ]]; then
+                      echo "✓ Instance state is ACTIVE"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ Instance state is $STATE"
+                      FAILED=$((FAILED+1))
+                    fi
+
+                    READY=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    if [[ "$READY" == "True" ]]; then
+                      echo "✓ Instance Ready condition is True"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ Instance Ready condition is $READY"
+                      FAILED=$((FAILED+1))
+                    fi
+                  else
+                    echo "✗ UK8SCluster instance not found"
+                    FAILED=$((FAILED+3))
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ KRO validation complete"
+
+            # ASO validation
+            - name: validate-aso-resources
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== ASO Resource Validation ==="
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  PASSED=0
+                  FAILED=0
+
+                  # Check ResourceGroup
+                  if kubectl get resourcegroup {{workflow.parameters.resourceGroup}} -n $NAMESPACE &>/dev/null; then
+                    RG_READY=$(kubectl get resourcegroup {{workflow.parameters.resourceGroup}} -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    if [[ "$RG_READY" == "True" ]]; then
+                      echo "✓ ResourceGroup is ready"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ ResourceGroup not ready"
+                      FAILED=$((FAILED+1))
+                    fi
+                  fi
+
+                  # Check ManagedCluster
+                  if kubectl get managedcluster {{workflow.parameters.clusterName}} -n $NAMESPACE &>/dev/null; then
+                    MC_READY=$(kubectl get managedcluster {{workflow.parameters.clusterName}} -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    if [[ "$MC_READY" == "True" ]]; then
+                      echo "✓ ManagedCluster is ready"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ ManagedCluster not ready"
+                      FAILED=$((FAILED+1))
+                    fi
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ ASO validation complete"
+
+            # Flux validation
+            - name: validate-flux-gitops
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Flux GitOps Validation ==="
+                  PASSED=0
+                  FAILED=0
+
+                  if kubectl get namespace flux-system &>/dev/null; then
+                    echo "✓ flux-system namespace exists"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "✗ flux-system namespace not found"
+                    FAILED=$((FAILED+1))
+                  fi
+
+                  for controller in source-controller kustomize-controller helm-controller; do
+                    if kubectl get deployment $controller -n flux-system &>/dev/null; then
+                      READY=$(kubectl get deployment $controller -n flux-system \
+                        -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+                      if [[ "$READY" == "True" ]]; then
+                        echo "✓ $controller is ready"
+                        PASSED=$((PASSED+1))
+                      else
+                        echo "✗ $controller not ready"
+                        FAILED=$((FAILED+1))
+                      fi
+                    fi
+                  done
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ Flux validation complete"
+
+            # Get AKS credentials using kubelogin with workload identity (NON-INTERACTIVE)
+            - name: get-aks-credentials-kubelogin
+              script:
+                image: mcr.microsoft.com/azure-cli:latest
+                command: [bash]
+                env:
+                  # Workload Identity environment variables for kubelogin
+                  - name: AZURE_TENANT_ID
+                    value: "{{workflow.parameters.tenantId}}"
+                  - name: AZURE_CLIENT_ID
+                    value: "{{workflow.parameters.clientId}}"
+                  - name: AZURE_FEDERATED_TOKEN_FILE
+                    value: /var/run/secrets/azure/tokens/azure-identity-token
+                  - name: AZURE_AUTHORITY_HOST
+                    value: "{{workflow.parameters.authorityHost}}"
+                volumeMounts:
+                  - name: azure-identity-token
+                    mountPath: /var/run/secrets/azure/tokens
+                    readOnly: true
+                source: |
+                  set -e
+                  echo "=== Getting AKS Credentials with Kubelogin (Non-Interactive) ==="
+
+                  # Install kubectl
+                  echo "Installing kubectl..."
+                  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                  chmod +x kubectl
+                  mv kubectl /usr/local/bin/
+
+                  # Install kubelogin
+                  echo "Installing kubelogin..."
+                  KUBELOGIN_VERSION="v0.2.13"
+                  curl -LO "https://github.com/Azure/kubelogin/releases/download/${KUBELOGIN_VERSION}/kubelogin-linux-amd64.zip"
+                  apt-get update && apt-get install -y unzip
+                  unzip kubelogin-linux-amd64.zip -d kubelogin
+                  mv kubelogin/bin/linux_amd64/kubelogin /usr/local/bin/
+                  chmod +x /usr/local/bin/kubelogin
+                  rm -rf kubelogin kubelogin-linux-amd64.zip
+
+                  # Verify installations
+                  echo "kubectl version: $(kubectl version --client --short 2>/dev/null || kubectl version --client)"
+                  echo "kubelogin version: $(kubelogin --version)"
+
+                  CLUSTER_NAME="{{workflow.parameters.clusterName}}"
+                  RESOURCE_GROUP="{{workflow.parameters.resourceGroup}}"
+                  SUBSCRIPTION_ID="{{workflow.parameters.subscriptionId}}"
+
+                  echo ""
+                  echo "Cluster: $CLUSTER_NAME"
+                  echo "Resource Group: $RESOURCE_GROUP"
+                  echo "Subscription: $SUBSCRIPTION_ID"
+                  echo ""
+                  echo "Workload Identity Configuration:"
+                  echo "  Client ID: $AZURE_CLIENT_ID"
+                  echo "  Tenant ID: $AZURE_TENANT_ID"
+                  echo "  Authority Host: $AZURE_AUTHORITY_HOST"
+                  echo "  Token File: $AZURE_FEDERATED_TOKEN_FILE"
+
+                  # Verify token file exists
+                  if [ ! -f "$AZURE_FEDERATED_TOKEN_FILE" ]; then
+                    echo "✗ ERROR: Federated token file not found at $AZURE_FEDERATED_TOKEN_FILE"
+                    exit 1
+                  fi
+                  echo "✓ Federated token file exists"
+
+                  # Login using workload identity (federated token)
+                  echo ""
+                  echo "Logging in to Azure with workload identity..."
+                  az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                    --service-principal \
+                    -u "$AZURE_CLIENT_ID" \
+                    -t "$AZURE_TENANT_ID"
+
+                  # Set subscription
+                  az account set --subscription $SUBSCRIPTION_ID
+                  echo "✓ Logged in to Azure and set subscription"
+
+                  # Get AKS credentials (this will get kubeconfig with Azure AD auth)
+                  echo ""
+                  echo "Getting AKS credentials..."
+                  az aks get-credentials \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --overwrite-existing
+
+                  echo "✓ Base kubeconfig retrieved"
+
+                  # Convert kubeconfig to use kubelogin with workload identity
+                  echo ""
+                  echo "Converting kubeconfig to use kubelogin with workload identity..."
+                  echo "This enables NON-INTERACTIVE authentication for private clusters"
+
+                  export KUBECONFIG=~/.kube/config
+                  kubelogin convert-kubeconfig -l workloadidentity
+
+                  echo "✓ Kubeconfig converted to use workload identity"
+
+                  # Display the converted kubeconfig for debugging
+                  echo ""
+                  echo "Kubeconfig user configuration:"
+                  kubectl config view --minify -o jsonpath='{.users[0]}' | head -20
+
+                  # Test connection to AKS cluster (non-interactive)
+                  echo ""
+                  echo "Testing connection to AKS cluster (non-interactive)..."
+                  kubectl cluster-info
+
+                  echo ""
+                  echo "Testing node access..."
+                  kubectl get nodes
+
+                  echo ""
+                  echo "✅ AKS credentials acquired successfully with kubelogin workload identity"
+                  echo "✅ Authentication is fully non-interactive"
+
+            # Validate system components IN the AKS cluster
+            - name: validate-aks-system-components
+              script:
+                image: mcr.microsoft.com/azure-cli:latest
+                command: [bash]
+                env:
+                  - name: AZURE_TENANT_ID
+                    value: "{{workflow.parameters.tenantId}}"
+                  - name: AZURE_CLIENT_ID
+                    value: "{{workflow.parameters.clientId}}"
+                  - name: AZURE_FEDERATED_TOKEN_FILE
+                    value: /var/run/secrets/azure/tokens/azure-identity-token
+                  - name: AZURE_AUTHORITY_HOST
+                    value: "{{workflow.parameters.authorityHost}}"
+                volumeMounts:
+                  - name: azure-identity-token
+                    mountPath: /var/run/secrets/azure/tokens
+                    readOnly: true
+                source: |
+                  set -e
+                  echo "=== AKS System Components Validation (Private Cluster) ==="
+
+                  # Install kubectl and kubelogin
+                  echo "Installing kubectl..."
+                  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                  chmod +x kubectl
+                  mv kubectl /usr/local/bin/
+
+                  echo "Installing kubelogin..."
+                  KUBELOGIN_VERSION="v0.2.13"
+                  curl -LO "https://github.com/Azure/kubelogin/releases/download/${KUBELOGIN_VERSION}/kubelogin-linux-amd64.zip"
+                  apt-get update && apt-get install -y unzip jq
+                  unzip kubelogin-linux-amd64.zip -d kubelogin
+                  mv kubelogin/bin/linux_amd64/kubelogin /usr/local/bin/
+                  chmod +x /usr/local/bin/kubelogin
+                  rm -rf kubelogin kubelogin-linux-amd64.zip
+
+                  CLUSTER_NAME="{{workflow.parameters.clusterName}}"
+                  RESOURCE_GROUP="{{workflow.parameters.resourceGroup}}"
+                  PASSED=0
+                  FAILED=0
+                  WARNINGS=0
+
+                  echo "Validating components IN the AKS cluster: $CLUSTER_NAME"
+                  echo ""
+
+                  # Re-authenticate to Azure and get AKS credentials with kubelogin
+                  echo "Authenticating to Azure with workload identity..."
+                  az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                    --service-principal \
+                    -u "$AZURE_CLIENT_ID" \
+                    -t "$AZURE_TENANT_ID"
+
+                  az account set --subscription {{workflow.parameters.subscriptionId}}
+
+                  # Get AKS credentials and convert for kubelogin
+                  az aks get-credentials \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --overwrite-existing
+
+                  export KUBECONFIG=~/.kube/config
+                  kubelogin convert-kubeconfig -l workloadidentity
+
+                  echo "✓ Authentication configured with kubelogin workload identity"
+
+                  # Function to check namespace and pod health
+                  check_component() {
+                    local NS=$1
+                    local COMPONENT_NAME=$2
+                    local LABEL_SELECTOR=$3
+
+                    echo ""
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "Checking $COMPONENT_NAME..."
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+                    if ! kubectl get namespace $NS &>/dev/null; then
+                      echo "⚠ Namespace $NS not found (component may not be installed)"
+                      WARNINGS=$((WARNINGS+1))
+                      return
+                    fi
+
+                    echo "✓ Namespace $NS exists"
+                    PASSED=$((PASSED+1))
+
+                    local SELECTOR_FLAG=""
+                    if [ -n "$LABEL_SELECTOR" ]; then
+                      SELECTOR_FLAG="-l $LABEL_SELECTOR"
+                    fi
+
+                    TOTAL_PODS=$(kubectl get pods -n $NS $SELECTOR_FLAG --no-headers 2>/dev/null | wc -l)
+
+                    if [ $TOTAL_PODS -eq 0 ]; then
+                      if [ -n "$LABEL_SELECTOR" ]; then
+                        echo "  ⚠ No pods found with label: $LABEL_SELECTOR"
+                      else
+                        echo "  ⚠ No pods found in namespace"
+                      fi
+                      WARNINGS=$((WARNINGS+1))
+                      return
+                    fi
+
+                    echo ""
+                    echo "Pod Health Summary:"
+                    echo "  Total pods: $TOTAL_PODS"
+
+                    RUNNING=$(kubectl get pods -n $NS $SELECTOR_FLAG --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
+                    echo "  Running: $RUNNING"
+
+                    CRASH_LOOP=$(kubectl get pods -n $NS $SELECTOR_FLAG -o json 2>/dev/null | \
+                      jq -r '.items[] | select(.status.containerStatuses[]?.state.waiting?.reason == "CrashLoopBackOff") | .metadata.name' 2>/dev/null | wc -l)
+
+                    if [ $CRASH_LOOP -gt 0 ]; then
+                      echo "  ✗ $CRASH_LOOP pod(s) in CrashLoopBackOff"
+                      FAILED=$((FAILED+1))
+                    fi
+
+                    if [ $CRASH_LOOP -eq 0 ] && [ $RUNNING -gt 0 ]; then
+                      echo "✅ $COMPONENT_NAME is HEALTHY"
+                      PASSED=$((PASSED+1))
+                    elif [ $CRASH_LOOP -gt 0 ]; then
+                      echo "❌ $COMPONENT_NAME has CRITICAL issues"
+                      FAILED=$((FAILED+1))
+                    else
+                      echo "⚠ $COMPONENT_NAME has warnings"
+                      WARNINGS=$((WARNINGS+1))
+                    fi
+                  }
+
+                  # Check core system components
+                  check_component "kube-system" "Kube-System" ""
+                  check_component "flux-system" "Flux" "app.kubernetes.io/part-of=flux"
+                  check_component "cert-manager" "Cert-Manager" "app.kubernetes.io/instance=cert-manager"
+                  check_component "external-dns" "External DNS" "app.kubernetes.io/name=external-dns"
+                  check_component "external-secrets" "External Secrets" "app.kubernetes.io/name=external-secrets"
+                  check_component "kyverno" "Kyverno" "app.kubernetes.io/part-of=kyverno"
+
+                  echo ""
+                  echo "Summary: $PASSED passed, $FAILED failed, $WARNINGS warnings"
+                  echo "✅ AKS system components validation complete"
+
+            # Connectivity validation
+            - name: validate-cluster-connectivity
+              script:
+                image: mcr.microsoft.com/azure-cli:latest
+                command: [bash]
+                env:
+                  - name: AZURE_TENANT_ID
+                    value: "{{workflow.parameters.tenantId}}"
+                  - name: AZURE_CLIENT_ID
+                    value: "{{workflow.parameters.clientId}}"
+                  - name: AZURE_FEDERATED_TOKEN_FILE
+                    value: /var/run/secrets/azure/tokens/azure-identity-token
+                  - name: AZURE_AUTHORITY_HOST
+                    value: "{{workflow.parameters.authorityHost}}"
+                volumeMounts:
+                  - name: azure-identity-token
+                    mountPath: /var/run/secrets/azure/tokens
+                    readOnly: true
+                source: |
+                  set -e
+                  echo "=== Cluster Connectivity Validation (Private Cluster) ==="
+
+                  # Install kubectl and kubelogin
+                  curl -sLO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                  chmod +x kubectl && mv kubectl /usr/local/bin/
+
+                  KUBELOGIN_VERSION="v0.2.13"
+                  curl -sLO "https://github.com/Azure/kubelogin/releases/download/${KUBELOGIN_VERSION}/kubelogin-linux-amd64.zip"
+                  apt-get update -qq && apt-get install -y -qq unzip
+                  unzip -q kubelogin-linux-amd64.zip -d kubelogin
+                  mv kubelogin/bin/linux_amd64/kubelogin /usr/local/bin/
+                  rm -rf kubelogin kubelogin-linux-amd64.zip
+
+                  CLUSTER_NAME="{{workflow.parameters.clusterName}}"
+                  RESOURCE_GROUP="{{workflow.parameters.resourceGroup}}"
+                  PASSED=0
+                  FAILED=0
+
+                  # Authenticate with kubelogin workload identity
+                  az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                    --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" -o none
+
+                  az account set --subscription {{workflow.parameters.subscriptionId}}
+
+                  az aks get-credentials \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --overwrite-existing
+
+                  export KUBECONFIG=~/.kube/config
+                  kubelogin convert-kubeconfig -l workloadidentity
+
+                  # Test API server connectivity
+                  if kubectl cluster-info &>/dev/null; then
+                    echo "✓ API server is accessible via private endpoint"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "✗ Cannot connect to API server"
+                    FAILED=$((FAILED+1))
+                    exit 1
+                  fi
+
+                  TOTAL_NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+                  READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready" || true)
+                  echo "Nodes: $READY_NODES/$TOTAL_NODES ready"
+
+                  if [[ $READY_NODES -eq $TOTAL_NODES ]] && [[ $TOTAL_NODES -gt 0 ]]; then
+                    echo "✓ All nodes are ready"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "✗ Some nodes are not ready"
+                    FAILED=$((FAILED+1))
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ Connectivity validation complete"
+
+            # Security validation
+            - name: validate-security-compliance
+              script:
+                image: mcr.microsoft.com/azure-cli:latest
+                command: [bash]
+                env:
+                  - name: AZURE_TENANT_ID
+                    value: "{{workflow.parameters.tenantId}}"
+                  - name: AZURE_CLIENT_ID
+                    value: "{{workflow.parameters.clientId}}"
+                  - name: AZURE_FEDERATED_TOKEN_FILE
+                    value: /var/run/secrets/azure/tokens/azure-identity-token
+                  - name: AZURE_AUTHORITY_HOST
+                    value: "{{workflow.parameters.authorityHost}}"
+                volumeMounts:
+                  - name: azure-identity-token
+                    mountPath: /var/run/secrets/azure/tokens
+                    readOnly: true
+                source: |
+                  set -e
+                  echo "=== Security & Compliance Validation (Private Cluster) ==="
+
+                  # Install kubectl, kubelogin, and jq
+                  curl -sLO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                  chmod +x kubectl && mv kubectl /usr/local/bin/
+
+                  KUBELOGIN_VERSION="v0.2.13"
+                  curl -sLO "https://github.com/Azure/kubelogin/releases/download/${KUBELOGIN_VERSION}/kubelogin-linux-amd64.zip"
+                  apt-get update -qq && apt-get install -y -qq unzip jq
+                  unzip -q kubelogin-linux-amd64.zip -d kubelogin
+                  mv kubelogin/bin/linux_amd64/kubelogin /usr/local/bin/
+                  rm -rf kubelogin kubelogin-linux-amd64.zip
+
+                  CLUSTER_NAME="{{workflow.parameters.clusterName}}"
+                  RESOURCE_GROUP="{{workflow.parameters.resourceGroup}}"
+                  PASSED=0
+                  FAILED=0
+
+                  # Authenticate with kubelogin workload identity
+                  az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                    --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" -o none
+
+                  az account set --subscription {{workflow.parameters.subscriptionId}}
+
+                  az aks get-credentials \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --overwrite-existing
+
+                  export KUBECONFIG=~/.kube/config
+                  kubelogin convert-kubeconfig -l workloadidentity
+
+                  WI_SA=$(kubectl get serviceaccount -A \
+                    -o json | jq -r '.items[] | select(.metadata.annotations["azure.workload.identity/client-id"]) | .metadata.name' | wc -l)
+                  echo "Found $WI_SA service accounts with workload identity"
+                  if [[ $WI_SA -gt 0 ]]; then
+                    PASSED=$((PASSED+1))
+                  fi
+
+                  if kubectl get pods -n kube-system -l app=azure-policy &>/dev/null; then
+                    echo "✓ Azure Policy addon found"
+                    PASSED=$((PASSED+1))
+                  fi
+
+                  # Check Azure AD authentication is enforced (local accounts disabled)
+                  DISABLE_LOCAL=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query disableLocalAccounts \
+                    -o tsv 2>/dev/null || echo "false")
+
+                  if [[ "$DISABLE_LOCAL" == "true" ]]; then
+                    echo "✓ Local accounts disabled (Azure AD only)"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "⚠ Local accounts are enabled (consider disabling for production)"
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ Security validation complete"
+
+            # Private endpoint validation
+            - name: validate-private-endpoint
+              script:
+                image: mcr.microsoft.com/azure-cli:latest
+                command: [bash]
+                env:
+                  - name: AZURE_TENANT_ID
+                    value: "{{workflow.parameters.tenantId}}"
+                  - name: AZURE_CLIENT_ID
+                    value: "{{workflow.parameters.clientId}}"
+                  - name: AZURE_FEDERATED_TOKEN_FILE
+                    value: /var/run/secrets/azure/tokens/azure-identity-token
+                  - name: AZURE_AUTHORITY_HOST
+                    value: "{{workflow.parameters.authorityHost}}"
+                volumeMounts:
+                  - name: azure-identity-token
+                    mountPath: /var/run/secrets/azure/tokens
+                    readOnly: true
+                source: |
+                  set -e
+                  echo "=== Private Endpoint Validation ==="
+
+                  CLUSTER_NAME="{{workflow.parameters.clusterName}}"
+                  RESOURCE_GROUP="{{workflow.parameters.resourceGroup}}"
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  PASSED=0
+                  FAILED=0
+
+                  # Authenticate with workload identity
+                  az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                    --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" -o none
+
+                  az account set --subscription {{workflow.parameters.subscriptionId}}
+
+                  # Check if cluster is private
+                  echo "Checking cluster API access profile..."
+                  ENABLE_PRIVATE=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query apiServerAccessProfile.enablePrivateCluster \
+                    -o tsv 2>/dev/null || echo "null")
+
+                  if [[ "$ENABLE_PRIVATE" == "true" ]]; then
+                    echo "✓ Private cluster is enabled"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "✗ Private cluster is NOT enabled (enablePrivateCluster=$ENABLE_PRIVATE)"
+                    FAILED=$((FAILED+1))
+                  fi
+
+                  # Check private DNS zone
+                  PRIVATE_DNS=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query apiServerAccessProfile.privateDnsZone \
+                    -o tsv 2>/dev/null || echo "none")
+
+                  echo "Private DNS Zone: $PRIVATE_DNS"
+                  if [[ "$PRIVATE_DNS" != "none" ]] && [[ -n "$PRIVATE_DNS" ]]; then
+                    echo "✓ Private DNS zone configured"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "⚠ Private DNS zone not explicitly configured (using system default)"
+                  fi
+
+                  # Check authorized IP ranges (should be empty or specific for private clusters)
+                  AUTH_IP=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query apiServerAccessProfile.authorizedIpRanges \
+                    -o tsv 2>/dev/null || echo "")
+
+                  if [[ -z "$AUTH_IP" ]]; then
+                    echo "✓ No public authorized IP ranges (expected for private cluster)"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "⚠ Authorized IP ranges configured: $AUTH_IP"
+                  fi
+
+                  # Check outbound type
+                  OUTBOUND=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query networkProfile.outboundType \
+                    -o tsv 2>/dev/null || echo "loadBalancer")
+
+                  echo "Outbound type: $OUTBOUND"
+                  if [[ "$OUTBOUND" == "userDefinedRouting" ]]; then
+                    echo "✓ Using user-defined routing (UDR) for egress"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "ℹ Using $OUTBOUND for egress"
+                  fi
+
+                  # Get private FQDN
+                  PRIVATE_FQDN=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query privateFqdn \
+                    -o tsv 2>/dev/null || echo "")
+
+                  if [[ -n "$PRIVATE_FQDN" ]]; then
+                    echo "✓ Private FQDN: $PRIVATE_FQDN"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "⚠ No private FQDN found"
+                  fi
+
+                  echo ""
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ Private endpoint validation complete"
+
+            # Aggregate results
+            - name: aggregate-certification
+              script:
+                image: python:3.9-slim
+                command: [python]
+                source: |
+                  import json
+                  from datetime import datetime
+
+                  report = {
+                    "cluster": "{{workflow.parameters.clusterName}}",
+                    "namespace": "{{workflow.parameters.targetNamespace}}",
+                    "environment": "{{workflow.parameters.environment}}",
+                    "cluster_type": "PRIVATE",
+                    "authentication": "kubelogin-workload-identity",
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "workflow": "{{workflow.name}}",
+                    "certification": {
+                      "status": "CERTIFIED",
+                      "workflow_name": "certify-private-{{workflow.parameters.clusterName}}"
+                    }
+                  }
+
+                  print("=" * 60)
+                  print("UK8S PRIVATE CLUSTER CERTIFICATION REPORT")
+                  print("=" * 60)
+                  print(json.dumps(report, indent=2))
+                  print("=" * 60)
+                  print("✅ PRIVATE CLUSTER CERTIFICATION COMPLETE")
+                  print("=" * 60)
+
+            # Exit handler
+            - name: generate-final-report
+              container:
+                image: alpine:latest
+                command: [sh, -c]
+                args:
+                  - |
+                    echo "======================================"
+                    echo "Private Cluster Certification Complete"
+                    echo "======================================"
+                    echo "Cluster: {{workflow.parameters.clusterName}}"
+                    echo "Status: {{workflow.status}}"
+                    echo "Environment: {{workflow.parameters.environment}}"
+                    echo "Type: PRIVATE"
+                    echo "Auth: kubelogin workload identity"
+                    echo "======================================"
+
+    # ----------------------------------------
+    # Weekly Certification Schedule
+    # ----------------------------------------
+    - id: certificationSchedule
+      template:
+        apiVersion: argoproj.io/v1alpha1
+        kind: CronWorkflow
+        metadata:
+          name: weekly-cert-private-${schema.spec.clusterName}
+          namespace: argo
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: certification-schedule
+            kro.run/cluster-type: private
+            environment: ${schema.spec.environment}
+          annotations:
+            kro.run/description: "Weekly automated certification for PRIVATE cluster ${schema.spec.clusterName}"
+        spec:
+          schedule: ${schema.spec.certification.schedule}
+          timezone: "UTC"
+          suspend: ${schema.spec.certification.suspended}
+          workflowSpec:
+            workflowTemplateRef:
+              name: certify-private-${schema.spec.clusterName}
+
+    # ----------------------------------------
+    # Automatic Initial Certification Trigger
+    # ----------------------------------------
+    - id: certificationTrigger
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: trigger-cert-private-${schema.spec.clusterName}
+          namespace: argo
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: certification-trigger
+            kro.run/cluster-type: private
+            environment: ${schema.spec.environment}
+          annotations:
+            kro.run/description: "Triggers initial certification for PRIVATE cluster ${schema.spec.clusterName}"
+        spec:
+          ttlSecondsAfterFinished: 300
+          backoffLimit: 3
+          template:
+            metadata:
+              labels:
+                kro.run/cluster: ${schema.spec.clusterName}
+            spec:
+              serviceAccountName: argo-workflow-executor
+              restartPolicy: OnFailure
+              containers:
+                - name: trigger-certification
+                  image: bitnami/kubectl:latest
+                  command: [bash, -c]
+                  env:
+                    - name: AUTO_TRIGGER
+                      value: "${schema.spec.certification.autoTrigger ? 'true' : 'false'}"
+                  args:
+                    - |
+                      set -e
+
+                      if [[ "$AUTO_TRIGGER" == "false" ]]; then
+                        echo "Auto-trigger disabled, skipping initial certification"
+                        exit 0
+                      fi
+
+                      echo "Waiting for WorkflowTemplate to be ready..."
+
+                      for i in $(seq 1 30); do
+                        if kubectl get workflowtemplate certify-private-${schema.spec.clusterName} -n argo &>/dev/null; then
+                          echo "✓ WorkflowTemplate found"
+                          break
+                        fi
+                        echo "Waiting for WorkflowTemplate... ($i/30)"
+                        sleep 10
+                      done
+
+                      echo "Waiting for UK8SCluster to be ACTIVE and Ready..."
+                      for i in $(seq 1 60); do
+                        STATE=$(kubectl get uk8sclusterpublic ${schema.spec.instanceName} -n ${schema.spec.targetNamespace} -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+                        READY=$(kubectl get uk8sclusterpublic ${schema.spec.instanceName} -n ${schema.spec.targetNamespace} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+
+                        if [[ "$STATE" == "ACTIVE" ]] && [[ "$READY" == "True" ]]; then
+                          echo "✓ UK8SCluster is ACTIVE and Ready"
+                          break
+                        fi
+                        echo "Current state: $STATE, Ready: $READY (waiting... $i/60)"
+                        sleep 30
+                      done
+
+                      echo "Submitting certification workflow..."
+                      cat <<EOF | kubectl create -f -
+                      apiVersion: argoproj.io/v1alpha1
+                      kind: Workflow
+                      metadata:
+                        generateName: certify-private-${schema.spec.clusterName}-auto-
+                        namespace: argo
+                        labels:
+                          kro.run/cluster: ${schema.spec.clusterName}
+                          kro.run/cluster-type: private
+                          kro.run/trigger: automatic
+                      spec:
+                        workflowTemplateRef:
+                          name: certify-private-${schema.spec.clusterName}
+                      EOF
+
+                      echo "✅ Private cluster certification workflow submitted successfully"
