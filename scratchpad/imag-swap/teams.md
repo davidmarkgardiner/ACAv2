@@ -65,3 +65,58 @@ Happy to jump on a call if helpful.
 ---
 
 How's that?
+
+
+---
+
+Got it - here's the updated version:
+
+---
+
+**🚨 Image Pull Failures in Dev - Root Cause Identified**
+
+Hi team,
+
+Quick explanation of why dev image pulls are failing:
+
+**The current flow (what's actually happening):**
+```
+┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│  Snapshot Nexus  │      │                  │      │                  │
+│  Release Nexus   │ ───? │  Main Nexus      │ ───? │  Dev ACR         │
+│                  │      │  (container-     │      │                  │
+│  (images pushed  │      │   registry)      │      │  (where they're  │
+│   here)          │      │                  │      │   trying to pull)│
+└──────────────────┘      └──────────────────┘      └──────────────────┘
+         │                        │                          │
+         │    mystery job         │      nobody copying      │
+         │    every ~30 mins?     │                          │
+         └────────────────────────┘                          │
+                                                             ▼
+                                                    ❌ Image not found
+```
+
+**The problem:**
+1. Users push to **Snapshot/Release Nexus**
+2. Golden Path / ACR team are telling users to hardcode **Main Nexus (container-registry)** as the pull location
+3. There's apparently some background job (every ~30 mins?) copying from Snapshot/Release → Main Nexus - but **nobody is owning this job or telling us about it**
+4. Users see delays because they're waiting for this mystery copy job
+5. Our job copies from **Main Nexus → ACR**, but if the image hasn't arrived in Main Nexus yet, there's nothing for us to copy
+
+**What would actually work:**
+```
+Main Nexus  ───── our job copies ─────→  Dev ACR  ───→  Dev cluster pulls
+(push here)        (we own this)                        ✅ Works immediately
+```
+
+**The ask:**
+- Who owns the Snapshot/Release → Main Nexus copy job?
+- Why are Golden Path / ACR telling users to point at Main Nexus when the image isn't there yet?
+
+If users push directly to Main Nexus, our tier 1 solution picks it up and copies to ACR. No delays, no mystery jobs.
+
+Happy to jump on a call to untangle this.
+
+---
+
+Does that capture it?
