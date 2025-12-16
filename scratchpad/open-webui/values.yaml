@@ -1,0 +1,126 @@
+# =============================================================================
+# Open WebUI Helm Values - Azure Workload Identity Configuration
+# =============================================================================
+#
+# Based on official chart: https://github.com/open-webui/helm-charts
+#
+# Prerequisites:
+#   1. Run azure-cli/setup-workload-identity.sh first
+#   2. Replace <YOUR_UAMI_CLIENT_ID> with the Client ID from the script output
+#
+# Install with:
+#   helm repo add open-webui https://helm.openwebui.com/
+#   helm repo update
+#   helm upgrade --install openwebui open-webui/open-webui \
+#     -f values.yaml \
+#     -n openwebui \
+#     --create-namespace
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Service Account - CRITICAL FOR WORKLOAD IDENTITY
+# -----------------------------------------------------------------------------
+serviceAccount:
+  # Enable service account
+  enable: true
+  # Create the service account
+  create: true
+  # Name must match the subject in Federated Identity Credential
+  name: "open-webui"
+  # Workload identity annotation - replace with your UAMI Client ID
+  annotations:
+    azure.workload.identity/client-id: "<YOUR_UAMI_CLIENT_ID>"
+  # Needed for workload identity token projection
+  automountServiceAccountToken: true
+
+# -----------------------------------------------------------------------------
+# Pod Labels - CRITICAL FOR WORKLOAD IDENTITY
+# -----------------------------------------------------------------------------
+podLabels:
+  azure.workload.identity/use: "true"
+
+# -----------------------------------------------------------------------------
+# Ollama - Disable if only using Azure OpenAI
+# -----------------------------------------------------------------------------
+ollama:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Pipelines - Disable if not using
+# -----------------------------------------------------------------------------
+pipelines:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# OpenAI API Configuration
+# -----------------------------------------------------------------------------
+# We enable the OpenAI API but configure Azure OpenAI in the UI after deployment
+enableOpenaiApi: true
+
+# Placeholder - actual Azure OpenAI connection configured in UI with Entra ID auth
+openaiBaseApiUrl: ""
+openaiApiKey: ""
+
+# -----------------------------------------------------------------------------
+# Environment Variables
+# -----------------------------------------------------------------------------
+extraEnvVars:
+  # Disable Ollama API since we're using Azure OpenAI
+  - name: ENABLE_OLLAMA_API
+    value: "false"
+  
+  # Optional: Set default model (configure in UI instead for flexibility)
+  # - name: DEFAULT_MODELS
+  #   value: "gpt-4o"
+
+# -----------------------------------------------------------------------------
+# Persistence
+# -----------------------------------------------------------------------------
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""  # Uses default, or specify "managed-csi" for AKS
+  accessModes:
+    - ReadWriteOnce
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+
+# -----------------------------------------------------------------------------
+# Service
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  containerPort: 8080
+
+# -----------------------------------------------------------------------------
+# Replicas
+# -----------------------------------------------------------------------------
+replicaCount: 1
+
+# -----------------------------------------------------------------------------
+# Ingress - Disabled (using Istio instead)
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Websocket - Disabled by default
+# -----------------------------------------------------------------------------
+websocket:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Tika - Disabled by default
+# -----------------------------------------------------------------------------
+tika:
+  enabled: false

@@ -1,0 +1,95 @@
+# =============================================================================
+# Istio Configuration for Open WebUI
+# =============================================================================
+#
+# This provides:
+#   - Gateway: Entry point for external traffic
+#   - VirtualService: Routing rules to Open WebUI service
+#
+# Prerequisites:
+#   - Istio installed on AKS (either add-on or manual)
+#   - Namespace labeled: kubectl label namespace openwebui istio-injection=enabled
+#
+# Apply with:
+#   kubectl apply -f istio.yaml
+# =============================================================================
+
+---
+# Gateway - External entry point
+# Uses the default Istio ingress gateway
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: openwebui-gateway
+  namespace: openwebui
+spec:
+  selector:
+    istio: ingressgateway  # Use Istio's default ingress gateway
+  servers:
+    # HTTPS (recommended for production)
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: openwebui-tls  # K8s secret with TLS cert
+      hosts:
+        - "openwebui.example.com"  # Replace with your hostname
+    
+    # HTTP (optional - redirects to HTTPS)
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "openwebui.example.com"  # Replace with your hostname
+      tls:
+        httpsRedirect: true
+
+---
+# VirtualService - Routing rules
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: openwebui
+  namespace: openwebui
+spec:
+  hosts:
+    - "openwebui.example.com"  # Replace with your hostname
+  gateways:
+    - openwebui-gateway
+  http:
+    - match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: open-webui  # Service name from Helm chart
+            port:
+              number: 80
+      timeout: 300s  # Longer timeout for LLM responses
+      retries:
+        attempts: 3
+        perTryTimeout: 120s
+        retryOn: connect-failure,refused-stream,unavailable,cancelled,retriable-4xx,reset
+
+---
+# DestinationRule - Traffic policies
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: openwebui
+  namespace: openwebui
+spec:
+  host: open-webui
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        h2UpgradePolicy: UPGRADE  # Enable HTTP/2
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+    loadBalancer:
+      simple: ROUND_ROBIN
