@@ -69,9 +69,41 @@ extraEnvVars:
   - name: ENABLE_OLLAMA_API
     value: "false"
   
+  # SSL/TLS CA Certificate - point to mounted CA bundle
+  - name: SSL_CERT_FILE
+    value: "/etc/ssl/certs/ca-certificates.crt"
+  
+  # Alternative: If using custom CA only
+  # - name: REQUESTS_CA_BUNDLE
+  #   value: "/etc/ssl/certs/custom-ca.crt"
+  
   # Optional: Set default model (configure in UI instead for flexibility)
   # - name: DEFAULT_MODELS
   #   value: "gpt-4o"
+
+# -----------------------------------------------------------------------------
+# Custom CA Certificate
+# -----------------------------------------------------------------------------
+# Mount your CA certificate from a ConfigMap or Secret
+# First create the ConfigMap:
+#   kubectl create configmap custom-ca --from-file=ca.crt=/path/to/your/ca.crt -n openwebui
+#
+# Or for multiple CAs, create a bundle:
+#   cat /path/to/ca1.crt /path/to/ca2.crt > ca-bundle.crt
+#   kubectl create configmap custom-ca --from-file=ca-bundle.crt -n openwebui
+
+volumes:
+  - name: custom-ca
+    configMap:
+      name: custom-ca
+      optional: true  # Won't fail if ConfigMap doesn't exist
+
+volumeMounts:
+  container:
+    - name: custom-ca
+      mountPath: /etc/ssl/certs/custom-ca.crt
+      subPath: ca.crt
+      readOnly: true
 
 # -----------------------------------------------------------------------------
 # Persistence
