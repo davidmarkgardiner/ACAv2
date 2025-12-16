@@ -54,12 +54,31 @@ pipelines:
 # -----------------------------------------------------------------------------
 # OpenAI API Configuration
 # -----------------------------------------------------------------------------
-# We enable the OpenAI API but configure Azure OpenAI in the UI after deployment
+# Enable OpenAI API (required for Azure OpenAI)
 enableOpenaiApi: true
 
-# Placeholder - actual Azure OpenAI connection configured in UI with Entra ID auth
-openaiBaseApiUrl: ""
-openaiApiKey: ""
+# Azure OpenAI base URL format - MUST include deployment name in the URL:
+# https://<resource-name>.openai.azure.com/openai/deployments/<deployment-name>/chat/completions?api-version=2024-10-21
+#
+# Example for a deployment named "gpt-4o":
+# https://myaoai.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21
+#
+# For multiple deployments, use semicolon-separated URLs:
+# openaiBaseApiUrls:
+#   - "https://myaoai.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+#   - "https://myaoai.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-10-21"
+
+# Single deployment example (uncomment and configure):
+# openaiBaseApiUrl: "https://<RESOURCE_NAME>.openai.azure.com/openai/deployments/<DEPLOYMENT_NAME>/chat/completions?api-version=2024-10-21"
+
+# Multiple deployments (uncomment and configure):
+openaiBaseApiUrls: []
+  # - "https://<RESOURCE_NAME>.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+  # - "https://<RESOURCE_NAME>.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-10-21"
+
+# For Entra ID / Workload Identity auth, set a placeholder (actual auth via managed identity)
+# The key is not used when using Entra ID auth, but the field may need a value
+openaiApiKey: "entra-id-auth"
 
 # -----------------------------------------------------------------------------
 # Environment Variables
