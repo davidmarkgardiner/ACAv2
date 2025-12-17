@@ -1,0 +1,4 @@
+Sathpal, you've been tasked with setting up observability and alerting for this pod and the wider platform. This was a clear deliverable and a critical part of our operational maturity.
+What I'm hearing is that you can deliver this, but only if all alerts go into a single shared inbox. That approach isn't sustainable — the volume of noise will mean alerts get ignored, which defeats the entire purpose of having alerting in the first place. We need targeted, actionable alerts routed to the right teams, not a dumping ground that everyone tunes out.
+If there are technical blockers or constraints I'm not aware of, I'm happy to discuss them. But if the solution being proposed doesn't meet the actual requirements, we need to acknowledge that.
+Amit, given the above, are we okay to reassign this to someone who can deliver what was originally committed to? I don't want this to drift any further.
