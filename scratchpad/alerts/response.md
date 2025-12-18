@@ -27,3 +27,21 @@ I'm happy to jump on a call if that helps, but I need to see tangible progress h
 
 ---
 
+Here's the updated Teams message:
+
+---
+
+**Observability & Alerting — Standup Discussion**
+
+We've invested millions of pounds and hired 5-6 engineers to deliver observability for this platform. After 12+ months, we still have no functional alerting. Engineers only find out things are broken when they manually stumble across issues while doing other work.
+
+**This morning's example:** I tried three clusters — two were down. No alerts. Nobody working on it. Just broken and ignored.
+
+The impact:
+- Engineering velocity takes a hit because we're wasting time discovering and diagnosing issues that should be flagged automatically
+- Broken code gets packaged up and promoted through dev into production because nobody knows it's broken
+- Users are reporting bugs back to us in both production and development — we should be finding these first and working on them before our users even notice. Right now, we're hearing about problems from the people we're supposed to be providing a platform to. It's unprofessional and it's damaging trust.
+
+This is a fundamental platform priority and it's blocking us. 
+
+---
