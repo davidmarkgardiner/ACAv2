@@ -30,6 +30,36 @@ openwebui-deployment/
 
 ---
 
+## Azure OpenAI URL Format
+
+**Important**: Azure OpenAI requires the deployment name in the URL, not just the endpoint.
+
+```
+https://<RESOURCE_NAME>.openai.azure.com/openai/deployments/<DEPLOYMENT_NAME>/chat/completions?api-version=2024-10-21
+```
+
+Example for a resource named `myaoai` with a deployment named `gpt-4o`:
+```
+https://myaoai.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21
+```
+
+For **multiple deployments**, configure in `values.yaml`:
+
+```yaml
+openaiBaseApiUrls:
+  - "https://myaoai.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+  - "https://myaoai.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-10-21"
+
+# Match with keys (placeholder value for Entra ID auth)
+openaiApiKeys:
+  - "entra-id-auth"
+  - "entra-id-auth"
+```
+
+See `helm/values-example.yaml` for a complete working example.
+
+---
+
 ## Deployment Steps
 
 ### Step 1: Create Azure Resources
@@ -210,3 +240,7 @@ spec:
 
 - [Open WebUI Workload Identity Docs](https://docs.openwebui.com/tutorials/integrations/azure-openai/workload-identity-auth/)
 - [Azure Workload Identity](https://azure.github.io/azure-workload-identity/)
+
+---
+
+https://github.com/open-webui/open-webui/compare/main...carhensi:open-webui:feature/azure-openai-support
