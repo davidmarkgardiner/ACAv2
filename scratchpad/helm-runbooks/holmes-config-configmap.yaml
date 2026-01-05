@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-config
+  # Update namespace to match your Holmes installation
+data:
+  config.yaml: |
+    # HolmesGPT configuration file
+    # This file is mounted at /root/.holmes/config.yaml
+
+    # Reference custom runbook catalogs
+    # These are mounted from the holmes-custom-runbooks ConfigMap
+    custom_runbook_catalogs:
+      - /etc/holmes/runbooks/catalog.json
+
+    # You can also add other config options here:
+    # model: "gpt-4o"
+    # fast_model: "gpt-4o-mini"
+    # max_steps: 40

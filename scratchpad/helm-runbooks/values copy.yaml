@@ -1,0 +1,92 @@
+# Holmes Helm values with custom runbooks and token optimization
+#
+# Usage:
+#   1. Apply the ConfigMaps first:
+#      kubectl apply -f runbooks-configmap.yaml -n <namespace>
+#      kubectl apply -f holmes-config-configmap.yaml -n <namespace>
+#
+#   2. Install/upgrade Holmes with these values:
+#      helm upgrade --install holmes robusta/holmes -n <namespace> -f values.yaml
+
+# ============================================================================
+# TOKEN OPTIMIZATION SETTINGS
+# ============================================================================
+# These settings help reduce token usage from ~60k to ~15-25k per request
+
+additionalEnvVars:
+  # Use a fast/cheap model to summarize large tool outputs before sending to main LLM
+  # This is the MOST effective optimization - can reduce tool outputs by 50-80%
+  - name: FAST_MODEL
+    value: "gpt-4o-mini"
+
+  # Limit each tool response to 10% of context window (default: 15%)
+  - name: TOOL_MAX_ALLOCATED_CONTEXT_WINDOW_PCT
+    value: "10"
+
+  # Cap tool responses at 15k tokens max (default: 25000)
+  - name: TOOL_MAX_ALLOCATED_CONTEXT_WINDOW_TOKENS
+    value: "15000"
+
+  # Trigger context compaction at 80% instead of 95% (default)
+  # Helps prevent hitting token limits on long investigations
+  - name: CONTEXT_WINDOW_COMPACTION_THRESHOLD_PCT
+    value: "80"
+
+# ============================================================================
+# CUSTOM RUNBOOKS & CONFIG
+# ============================================================================
+# Mount custom runbooks and a config.yaml that references them
+
+additionalVolumes:
+  # Custom runbooks (catalog.json + markdown files)
+  - name: custom-runbooks
+    configMap:
+      name: holmes-custom-runbooks
+
+  # Holmes config.yaml that references the custom runbooks
+  - name: holmes-config
+    configMap:
+      name: holmes-config
+
+additionalVolumeMounts:
+  # Mount runbooks at /etc/holmes/runbooks
+  - name: custom-runbooks
+    mountPath: /etc/holmes/runbooks
+    readOnly: true
+
+  # Mount config.yaml at ~/.holmes/config.yaml (Holmes default config location)
+  - name: holmes-config
+    mountPath: /root/.holmes/config.yaml
+    subPath: config.yaml
+    readOnly: true
+
+# ============================================================================
+# TOOLSETS
+# ============================================================================
+# Only enable toolsets you actually need - each adds to the system prompt size
+
+toolsets:
+  kubernetes/core:
+    enabled: true
+  kubernetes/logs:
+    enabled: true
+  robusta:
+    enabled: false      # Enable if using Robusta platform
+  internet:
+    enabled: false      # Enable if Holmes needs web access
+  prometheus/metrics:
+    enabled: false      # Enable if using Prometheus
+
+# ============================================================================
+# RESOURCES
+# ============================================================================
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 2048Mi
+  limits:
+    memory: 2048Mi
+
+# Logging level (DEBUG, INFO, WARNING, ERROR)
+logLevel: INFO
