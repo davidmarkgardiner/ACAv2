@@ -10,7 +10,178 @@ Custom runbooks allow you to:
 - Guide Holmes through your unique infrastructure patterns
 - Include company-specific fix recommendations
 
-## Quick Start
+## Runbook Formats
+
+Holmes supports **two runbook formats**:
+
+| Format | Best For | File Type |
+|--------|----------|-----------|
+| **YAML with Match Patterns** | Simple pattern-based matching | `.yaml` files |
+| **JSON Catalog + Markdown** | Rich documentation with detailed steps | `catalog.json` + `.md` files |
+
+---
+
+## Format 1: YAML with Match Patterns (Recommended)
+
+This format is simpler and works well for pattern-based matching. **Verified working on local Kubernetes.**
+
+### Step 1: Create YAML Runbook Files
+
+Create a directory for your runbooks:
+
+```bash
+mkdir -p runbooks/
+```
+
+Create a YAML runbook file (e.g., `runbooks/my-app.yaml`):
+
+```yaml
+# runbooks/my-app.yaml
+runbooks:
+  - match:
+      issue_name: "(MyApp)|(my-app)|(database.*connection)|(startup.*fail)"
+    instructions: >
+      Diagnose MyApp crashes and database connection failures.
+
+      1. Check application logs:
+         kubectl logs POD_NAME -n NAMESPACE --tail=100
+         kubectl logs POD_NAME -n NAMESPACE --previous
+         Look for: connection errors, missing config, startup failures
+
+      2. Verify ConfigMap values:
+         kubectl get configmap myapp-config -n NAMESPACE -o yaml
+         Ensure DATABASE_URL is set correctly
+         Verify API keys are present
+
+      3. Check secrets exist:
+         kubectl get secret myapp-secrets -n NAMESPACE
+         Confirm all required secrets are present
+
+      Common Fixes:
+      - Missing database connection: kubectl set env deployment/myapp DATABASE_URL=postgresql://db:5432/myapp
+      - Restart with fresh config: kubectl rollout restart deployment/myapp -n NAMESPACE
+
+      Expected Resolution: Pod transitions to Running state with successful database connection.
+
+  - match:
+      issue_name: "(Redis)|(redis)|(cache.*fail)|(connection.*timeout)"
+    instructions: >
+      Diagnose Redis connection timeouts and cache failures.
+
+      1. Check Redis pod status: kubectl get pods -l app=redis -n NAMESPACE
+      2. Test Redis connectivity: kubectl exec -it deploy/myapp -- redis-cli -h redis ping
+      3. Check Redis logs: kubectl logs -l app=redis -n NAMESPACE --tail=50
+
+      Common Fixes:
+      - Redis not running: kubectl rollout restart deployment/redis
+      - Connection string wrong: kubectl set env deployment/myapp REDIS_URL=redis://redis:6379
+```
+
+### Step 2: Create ConfigMap
+
+```bash
+kubectl create configmap holmes-custom-runbooks \
+  --from-file=my-app.yaml=runbooks/my-app.yaml \
+  --from-file=cert-manager.yaml=runbooks/cert-manager.yaml \
+  -n holmesgpt
+```
+
+Or use a manifest:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-custom-runbooks
+  namespace: holmesgpt
+data:
+  my-app.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(MyApp)|(database.*connection)"
+        instructions: >
+          Diagnose MyApp crashes...
+
+          1. Check logs: kubectl logs POD_NAME -n NAMESPACE
+          2. Verify config: kubectl get configmap myapp-config -o yaml
+
+          Fixes:
+          - Restart: kubectl rollout restart deployment/myapp
+```
+
+### Step 3: Create Holmes Config
+
+Create a config file that references your runbooks:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-config
+  namespace: holmesgpt
+data:
+  config.yaml: |
+    # Custom runbooks - explicit paths required (no auto-discovery)
+    custom_runbooks:
+      - /etc/holmes/runbooks/my-app.yaml
+      - /etc/holmes/runbooks/cert-manager.yaml
+```
+
+### Step 4: Configure Helm Values
+
+```yaml
+# helm-values.yaml
+
+# Mount runbooks ConfigMap
+additionalVolumes:
+  - name: custom-runbooks
+    configMap:
+      name: holmes-custom-runbooks
+
+additionalVolumeMounts:
+  - name: custom-runbooks
+    mountPath: /etc/holmes/runbooks
+    readOnly: true
+
+# Mount Holmes config
+# Note: The Helm chart may already mount config at /root/.holmes/config.yaml
+# Check your chart version for the correct approach
+```
+
+### Step 5: Deploy
+
+```bash
+kubectl apply -f holmes-custom-runbooks.yaml
+kubectl apply -f holmes-config.yaml
+helm upgrade --install holmesgpt holmesgpt/holmesgpt -n holmesgpt -f helm-values.yaml
+```
+
+### YAML Format Reference
+
+```yaml
+runbooks:
+  - match:
+      issue_name: "regex pattern to match issue titles"
+    instructions: >
+      Multi-line instructions for Holmes to follow.
+
+      Include:
+      1. Diagnostic commands with kubectl
+      2. What to look for in output
+      3. Common fixes with exact commands
+      4. Expected resolution
+```
+
+**Match patterns use regex** - common patterns:
+- `"(Pod)|(pod)|(container)"` - Match any of these words
+- `"CrashLoop.*BackOff"` - Match with wildcards
+- `"(OOM|OutOfMemory)"` - Match abbreviations
+
+---
+
+## Format 2: JSON Catalog + Markdown
+
+This format provides richer documentation with separate markdown files for each runbook.
 
 ### 1. Create Your Runbook Files
 
@@ -101,7 +272,7 @@ kubectl create configmap holmes-runbooks \
   --from-file=catalog.json=runbooks/catalog.json \
   --from-file=my-app-crash.md=runbooks/my-app-crash.md \
   --from-file=redis-connection.md=runbooks/redis-connection.md \
-  -n holmes
+  -n holmesgpt
 ```
 
 Or use a YAML manifest:
@@ -111,7 +282,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: holmes-runbooks
-  namespace: holmes
+  namespace: holmesgpt
 data:
   catalog.json: |
     {
@@ -176,7 +347,7 @@ kubectl apply -f holmes-runbooks-configmap.yaml
 
 # Install/upgrade Holmes with custom values
 helm upgrade --install holmes holmesgpt/holmesgpt \
-  -n holmes \
+  -n holmesgpt \
   -f helm-values.yaml
 ```
 
@@ -373,13 +544,13 @@ additionalVolumeMounts:
 ### 1. Check ConfigMap is created
 
 ```bash
-kubectl get configmap holmes-runbooks -n holmes -o yaml
+kubectl get configmap holmes-runbooks -n holmesgpt -o yaml
 ```
 
 ### 2. Verify volume mount
 
 ```bash
-kubectl exec -n holmes deploy/holmes-holmes -- ls -la /runbooks/
+kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- ls -la /etc/holmes/runbooks/
 ```
 
 Expected output:
@@ -392,13 +563,13 @@ redis-connection.md
 ### 3. Check Holmes loaded runbooks
 
 ```bash
-kubectl logs -n holmes deploy/holmes-holmes | grep -i "runbook\|catalog"
+kubectl logs -n holmesgpt deploy/holmesgpt-holmes | grep -i "runbook\|catalog"
 ```
 
 ### 4. Test runbook matching
 
 ```bash
-kubectl exec -n holmes deploy/holmes-holmes -- \
+kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- \
   curl -X POST http://localhost:5050/api/investigate \
   -H "Content-Type: application/json" \
   -d '{
@@ -419,11 +590,11 @@ kubectl exec -n holmes deploy/holmes-holmes -- \
 kubectl create configmap holmes-runbooks \
   --from-file=catalog.json=runbooks/catalog.json \
   --from-file=my-app-crash.md=runbooks/my-app-crash.md \
-  -n holmes \
+  -n holmesgpt \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # Restart Holmes to pick up changes
-kubectl rollout restart deployment/holmes-holmes -n holmes
+kubectl rollout restart deployment/holmesgpt-holmes -n holmesgpt
 ```
 
 ### Option 2: Use GitOps (recommended)
@@ -441,7 +612,7 @@ spec:
     repoURL: https://github.com/your-org/runbooks.git
     path: kubernetes/
   destination:
-    namespace: holmes
+    namespace: holmesgpt
 ```
 
 ## Troubleshooting
@@ -450,17 +621,21 @@ spec:
 
 1. Check volume mount:
    ```bash
-   kubectl exec -n holmes deploy/holmes-holmes -- cat /runbooks/catalog.json
+   # For YAML format (mounted at /etc/holmes/runbooks/)
+   kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- ls -la /etc/holmes/runbooks/
+
+   # For JSON catalog format (mounted at /runbooks/)
+   kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- cat /runbooks/catalog.json
    ```
 
-2. Verify catalog.json format (must be valid JSON):
+2. Verify runbook content is readable:
    ```bash
-   kubectl get cm holmes-runbooks -n holmes -o jsonpath='{.data.catalog\.json}' | jq .
+   kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- cat /etc/holmes/runbooks/cert-manager.yaml
    ```
 
-3. Check file paths in catalog match actual files:
+3. Check Holmes config references the runbooks:
    ```bash
-   kubectl exec -n holmes deploy/holmes-holmes -- ls /runbooks/
+   kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- cat /root/.holmes/config.yaml
    ```
 
 ### Holmes not matching runbooks
@@ -469,7 +644,7 @@ spec:
 2. Test with explicit issue description matching runbook
 3. Check Holmes logs for runbook selection:
    ```bash
-   kubectl logs -n holmes deploy/holmes-holmes | grep -i "runbook"
+   kubectl logs -n holmesgpt deploy/holmesgpt-holmes | grep -i "runbook"
    ```
 
 ## Best Practices
@@ -493,3 +668,111 @@ See the following example runbooks in the `references/runbook-examples.md` file:
 - Service Connectivity
 
 Use these as templates for creating your organization-specific runbooks.
+
+---
+
+## Verified Working Configuration
+
+This configuration has been tested and verified on a local Kubernetes cluster.
+
+### Namespace: `holmesgpt`
+
+**ConfigMap: holmes-custom-runbooks**
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-custom-runbooks
+  namespace: holmesgpt
+data:
+  cert-manager.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(Certificate)|(cert-manager)|(TLS)|(ACME)|(Let.*Encrypt)"
+        instructions: >
+          Diagnose why cert-manager is not issuing certificates.
+
+          1. Check cert-manager pods: kubectl get pods -n cert-manager
+          2. Get Certificate status: kubectl describe certificate <name> -n <namespace>
+          3. Find CertificateRequest: kubectl get certificaterequest -n <namespace>
+          4. Check Issuer/ClusterIssuer: kubectl describe clusterissuer <name>
+          5. For ACME, check Order: kubectl get order -n <namespace>
+          6. For ACME, check Challenge: kubectl get challenge -n <namespace>
+          7. Review cert-manager logs: kubectl logs -n cert-manager deploy/cert-manager
+
+  external-dns.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(ExternalDNS)|(external-dns)|(DNS.*not.*creat)|(DNS.*record)"
+        instructions: >
+          Diagnose why external-dns is not creating DNS records.
+
+          1. Check external-dns pod status: kubectl get pods -n external-dns
+          2. Review external-dns logs: kubectl logs -n external-dns deploy/external-dns --tail=200
+          3. Verify Services have annotation: external-dns.alpha.kubernetes.io/hostname
+          4. Check deployment args for --domain-filter restrictions
+```
+
+**ConfigMap: holmes-config**
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-config
+  namespace: holmesgpt
+data:
+  config.yaml: |
+    # IMPORTANT: HolmesGPT only loads runbooks listed here explicitly.
+    # No directory scanning or auto-discovery.
+    custom_runbooks:
+      - /etc/holmes/runbooks/external-dns.yaml
+      - /etc/holmes/runbooks/cert-manager.yaml
+```
+
+**Volume Mounts in Deployment:**
+```yaml
+volumes:
+  - name: custom-runbooks
+    configMap:
+      name: holmes-custom-runbooks
+  - name: holmes-config
+    configMap:
+      name: holmes-config
+
+volumeMounts:
+  - name: custom-runbooks
+    mountPath: /etc/holmes/runbooks
+    readOnly: true
+  - name: holmes-config
+    mountPath: /root/.holmes/config.yaml
+    subPath: config.yaml
+    readOnly: true
+```
+
+### Verification Commands
+
+```bash
+# Check runbooks are mounted
+kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- ls -la /etc/holmes/runbooks/
+
+# Verify config file
+kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- cat /root/.holmes/config.yaml
+
+# Test Holmes API with cert-manager query
+kubectl exec -n holmesgpt deploy/holmesgpt-holmes -- curl -s -X POST http://localhost:5050/api/investigate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "test",
+    "title": "Certificate not issuing",
+    "description": "cert-manager Certificate is stuck in pending",
+    "subject": {"name": "my-cert", "namespace": "default"},
+    "context": {}
+  }'
+```
+
+### Test Results
+
+- **Pod Status**: Running (holmesgpt-holmes-6978848555-qq9w5)
+- **Files Mounted**: cert-manager.yaml, external-dns.yaml
+- **Config Loaded**: /root/.holmes/config.yaml with custom_runbooks paths
+- **API Response**: Holmes successfully investigates and provides analysis
