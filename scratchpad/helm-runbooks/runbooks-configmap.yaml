@@ -1,0 +1,388 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-custom-runbooks
+  # Update namespace to match your Holmes installation
+data:
+  catalog.json: |
+    {
+      "catalog": [
+        {
+          "id": "external-dns-troubleshooting.md",
+          "update_date": "2026-01-05",
+          "description": "Troubleshoot external-dns not creating, updating, or syncing DNS records to providers like Route53, CloudFlare, Azure DNS, or Google Cloud DNS for Kubernetes Services and Ingresses",
+          "link": "external-dns-troubleshooting.md"
+        },
+        {
+          "id": "cert-manager-troubleshooting.md",
+          "update_date": "2026-01-05",
+          "description": "Troubleshoot cert-manager certificate issuance failures, ACME challenges (HTTP-01, DNS-01), Let's Encrypt rate limits, and TLS certificate renewal issues in Kubernetes",
+          "link": "cert-manager-troubleshooting.md"
+        }
+      ]
+    }
+
+  external-dns-troubleshooting.md: |
+    # External-DNS Troubleshooting Guidelines (Kubernetes)
+
+    ## Goal
+    Diagnose why external-dns is not creating, updating, or deleting DNS records in your DNS provider (Route53, CloudFlare, Azure DNS, Google Cloud DNS, etc.) for Kubernetes Services and Ingresses.
+
+    * Follow the workflow steps sequentially to identify the root cause
+    * Use available tools to gather logs, events, pod status, and configuration
+    * Clearly present key findings from tool outputs in your analysis
+    * When getting pod logs, filter out unnecessary noise to focus on errors and warnings
+
+    ## Workflow for External-DNS Diagnosis
+
+    1. **Check External-DNS Pod Status**
+       * Action: Verify the external-dns pod is running and healthy
+       * Function Description: Query the cluster for external-dns pods and their current state
+       * Parameters: namespace (typically `external-dns` or `kube-system`), label selector `app.kubernetes.io/name=external-dns`
+       * Expected Output: Pod status (Running, Pending, CrashLoopBackOff), ready status, restart count
+       * Success Criteria: Pod is Running with Ready 1/1 and no recent restarts
+       * Failure Indicators: CrashLoopBackOff, OOMKilled, ImagePullBackOff, or Pending state
+
+    2. **Review External-DNS Pod Events**
+       * Action: Check Kubernetes events for the external-dns pod
+       * Function Description: Retrieve recent events associated with the external-dns deployment/pod
+       * Parameters: namespace, pod name or deployment name
+       * Expected Output: Scheduling events, image pull status, liveness/readiness probe results
+       * Success Criteria: No warning events, successful scheduling and startup
+       * Failure Indicators: FailedScheduling, FailedMount (secrets), Unhealthy probe events
+
+    3. **Examine External-DNS Logs**
+       * Action: Retrieve and analyze external-dns application logs
+       * Function Description: Get recent logs from the external-dns container
+       * Parameters: namespace, pod/deployment name, tail lines (200-500), filter for errors
+       * Expected Output: Log entries showing DNS record operations, provider communication, errors
+       * Success Criteria: Logs show "CREATE", "UPDATE", or "DELETE" operations completing successfully
+       * Failure Indicators:
+         - `AccessDenied`, `Forbidden`, `401`, `403` - Authentication/authorization issues
+         - `Throttling`, `Rate exceeded` - API rate limiting
+         - `no endpoints could be found` - No matching Services/Ingresses
+         - `Skipping` - Resource filtered out by configuration
+         - `context deadline exceeded` - Network/timeout issues to DNS provider
+
+    4. **Verify Source Resources Have Required Annotations**
+       * Action: Check if Services and Ingresses have the hostname annotation
+       * Function Description: List Services (type LoadBalancer) and Ingresses, examine their annotations
+       * Parameters: namespace(s) to check, annotation key `external-dns.alpha.kubernetes.io/hostname`
+       * Expected Output: List of resources with their external-dns annotations
+       * Success Criteria: Target resources have `external-dns.alpha.kubernetes.io/hostname: <fqdn>` annotation
+       * Failure Indicators:
+         - Missing hostname annotation entirely
+         - Annotation typo (e.g., `external-dns.io/hostname` instead of `external-dns.alpha.kubernetes.io/hostname`)
+         - For Ingress: missing `spec.rules[].host` field
+
+    5. **Check Service External IP Assignment**
+       * Action: Verify LoadBalancer Services have an external IP assigned
+       * Function Description: Get Service details and check for external IP or hostname
+       * Parameters: namespace, service name
+       * Expected Output: Service type, external IP/hostname, cluster IP
+       * Success Criteria: LoadBalancer Service has non-pending external IP or hostname
+       * Failure Indicators: External IP shows `<pending>` - cloud controller or load balancer issue
+
+    6. **Review External-DNS Deployment Configuration**
+       * Action: Examine external-dns deployment args and environment variables
+       * Function Description: Get the deployment spec to review command-line arguments
+       * Parameters: namespace, deployment name
+       * Expected Output: Container args including --source, --provider, --domain-filter, --policy, --txt-owner-id
+       * Key Configuration to Check:
+         - `--source`: Should include `service` and/or `ingress`
+         - `--provider`: Must match your DNS provider (aws, azure, cloudflare, google, etc.)
+         - `--domain-filter`: May be filtering out your domain
+         - `--policy`: `sync` (full sync) vs `upsert-only` (won't delete)
+         - `--txt-owner-id`: Ownership identifier for multi-instance setups
+         - `--namespace`: If set, limits which namespaces are watched
+
+    7. **Verify DNS Provider Credentials**
+       * Action: Check that credentials for the DNS provider are properly configured
+       * Function Description: Verify the Secret or IAM configuration exists and is mounted
+       * Parameters: namespace, secret name, service account annotations
+       * Expected Output: Secret exists with required keys, or IAM role annotation present
+       * Provider-Specific Checks:
+         - **AWS Route53**: Check for `eks.amazonaws.com/role-arn` annotation on ServiceAccount, or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in Secret
+         - **Azure DNS**: Check for `azure.json` Secret or workload identity annotation
+         - **CloudFlare**: Check for `CF_API_TOKEN` or `CF_API_KEY`/`CF_API_EMAIL` in Secret
+         - **Google Cloud DNS**: Check for `credentials.json` Secret or workload identity
+       * Success Criteria: Credentials exist and are correctly referenced in deployment
+       * Failure Indicators: Secret not found, missing keys, incorrect mount path
+
+    8. **Check RBAC Permissions**
+       * Action: Verify ServiceAccount, ClusterRole, and ClusterRoleBinding are correctly configured
+       * Function Description: List RBAC resources for external-dns
+       * Parameters: service account name, cluster role name
+       * Expected Output: RBAC resources with appropriate permissions
+       * Required Permissions:
+         - services: get, list, watch
+         - ingresses: get, list, watch
+         - nodes: get, list, watch (for some providers)
+         - pods: get, list, watch (if using pod source)
+       * Success Criteria: All RBAC resources exist with correct permissions
+       * Failure Indicators: Missing ClusterRoleBinding, insufficient permissions
+
+    9. **Check for TXT Ownership Conflicts**
+       * Action: Query DNS provider for TXT ownership records
+       * Function Description: Use dig/nslookup to check TXT records for the target hostname
+       * Parameters: target hostname, DNS server (authoritative nameserver)
+       * Expected Output: TXT record with owner-id prefix (e.g., `heritage=external-dns,external-dns/owner=...`)
+       * Success Criteria: TXT record owner-id matches current external-dns --txt-owner-id, or no TXT record exists
+       * Failure Indicators: TXT record has different owner-id - another external-dns instance or manual creation conflict
+
+    10. **Verify DNS Record in Provider**
+        * Action: Query the actual DNS provider to confirm record state
+        * Function Description: Use dig against authoritative nameservers for the zone
+        * Parameters: target hostname, record type (A, CNAME), authoritative nameserver
+        * Expected Output: DNS record value (IP address or CNAME target)
+        * Success Criteria: Record exists and points to correct target (LoadBalancer IP or Ingress)
+        * Failure Indicators: NXDOMAIN (record doesn't exist), wrong IP, stale record
+
+    ## Synthesize Findings
+
+    Based on the outputs from the above steps, describe the issue clearly. Example findings:
+
+    * "External-DNS pod logs show 'AccessDenied: User is not authorized to perform route53:ChangeResourceRecordSets' - the IAM role lacks Route53 permissions"
+    * "Service 'my-app' in namespace 'production' is missing the `external-dns.alpha.kubernetes.io/hostname` annotation, so external-dns ignores it"
+    * "The --domain-filter is set to 'prod.example.com' but the requested hostname uses 'staging.example.com' - domain is filtered out"
+    * "TXT ownership record for 'api.example.com' shows owner-id 'cluster-a' but current external-dns uses 'cluster-b' - ownership conflict prevents updates"
+    * "LoadBalancer Service shows external IP as `<pending>` - external-dns cannot create record without a target IP"
+    * "External-DNS logs show 'Throttling: Rate exceeded' - too many API calls to Route53, need to increase --aws-batch-change-interval"
+
+    ## Recommended Remediation Steps
+
+    **For Authentication/Authorization Errors:**
+    * AWS: Update IAM role policy to include route53:ChangeResourceRecordSets, route53:ListHostedZones, route53:ListResourceRecordSets
+    * Azure: Ensure managed identity has "DNS Zone Contributor" role on the DNS zone
+    * CloudFlare: Verify API token has Zone:DNS:Edit permission for the target zone
+    * Google: Grant "DNS Administrator" role to the service account
+
+    **For Missing Annotations:**
+    * Add the required annotation to Services/Ingresses:
+      ```yaml
+      metadata:
+        annotations:
+          external-dns.alpha.kubernetes.io/hostname: myapp.example.com
+      ```
+
+    **For Domain Filter Issues:**
+    * Update external-dns deployment --domain-filter to include your domain
+    * Or remove --domain-filter to allow all domains (use with caution)
+
+    **For Ownership Conflicts:**
+    * Align --txt-owner-id across all external-dns instances managing the same zones
+    * Or manually delete stale TXT ownership records from the DNS provider
+    * Consider using --txt-prefix to avoid conflicts
+
+    **For Pending LoadBalancer IP:**
+    * Check cloud controller manager logs
+    * Verify cloud provider credentials and permissions
+    * Check for quota limits on load balancers
+
+    **For Rate Limiting:**
+    * Increase --aws-batch-change-interval (AWS) or equivalent batch settings
+    * Reduce sync frequency with --interval
+
+    **Documentation:**
+    * Official external-dns docs: https://kubernetes-sigs.github.io/external-dns/latest/
+    * Tutorials by provider: https://kubernetes-sigs.github.io/external-dns/latest/tutorials/
+    * FAQ and troubleshooting: https://kubernetes-sigs.github.io/external-dns/latest/faq/
+
+  cert-manager-troubleshooting.md: |
+    # Cert-Manager Troubleshooting Guidelines (Kubernetes)
+
+    ## Goal
+    Diagnose why cert-manager is not issuing, renewing, or managing TLS certificates for your Kubernetes workloads. This covers issues with Certificate, CertificateRequest, Order, and Challenge resources across ACME (Let's Encrypt) and other issuers.
+
+    * Follow the workflow steps sequentially to identify the root cause
+    * Use available tools to gather resource status, events, logs, and configuration
+    * Clearly present key findings from tool outputs in your analysis
+    * Check the entire certificate issuance chain: Certificate -> CertificateRequest -> Order -> Challenge
+
+    ## Workflow for Cert-Manager Diagnosis
+
+    1. **Check Cert-Manager Pod Status**
+       * Action: Verify all cert-manager pods are running and healthy
+       * Function Description: Query the cluster for cert-manager pods (controller, webhook, cainjector)
+       * Parameters: namespace `cert-manager`, label selector `app.kubernetes.io/instance=cert-manager`
+       * Expected Output: Pod status for controller, webhook, and cainjector
+       * Success Criteria: All three pods Running with Ready status and no recent restarts
+       * Failure Indicators: CrashLoopBackOff, Pending, or webhook pod not ready (causes Certificate creation to hang)
+
+    2. **Examine Certificate Resource Status**
+       * Action: Get the Certificate resource and check its status conditions
+       * Function Description: Retrieve Certificate resource with status details
+       * Parameters: namespace, certificate name
+       * Expected Output: Certificate spec (secretName, dnsNames, issuerRef) and status (conditions, notAfter, renewalTime)
+       * Success Criteria: Ready condition is True, notAfter is in the future
+       * Failure Indicators:
+         - Ready=False with message indicating the issue
+         - "Issuing" condition stuck for extended period
+         - notAfter in the past (expired certificate)
+
+    3. **Check CertificateRequest Status**
+       * Action: Find and examine the CertificateRequest created for this Certificate
+       * Function Description: List CertificateRequests in the namespace, find one owned by the Certificate
+       * Parameters: namespace, owner reference to Certificate
+       * Expected Output: CertificateRequest status conditions, failure messages
+       * Success Criteria: Ready=True, Approved=True
+       * Failure Indicators:
+         - Ready=False with error message
+         - Denied=True (policy or approval issue)
+         - Missing CertificateRequest (controller not processing)
+
+    4. **Review Issuer/ClusterIssuer Configuration**
+       * Action: Examine the referenced Issuer or ClusterIssuer
+       * Function Description: Get Issuer/ClusterIssuer resource and its status
+       * Parameters: issuer name, namespace (for Issuer) or cluster-scoped (for ClusterIssuer)
+       * Expected Output: Issuer spec (type, server, email, solvers) and Ready status
+       * Success Criteria: Ready=True condition on the Issuer
+       * Failure Indicators:
+         - Ready=False with error (invalid config, unreachable server)
+         - Missing Issuer (referenced issuer doesn't exist)
+         - Wrong issuerRef kind (Issuer vs ClusterIssuer mismatch)
+
+    5. **For ACME Issuers: Check Order Status**
+       * Action: Find and examine the Order resource for pending certificates
+       * Function Description: List Orders in namespace, find one for the CertificateRequest
+       * Parameters: namespace, certificate name label
+       * Expected Output: Order status (state, authorizations, URL)
+       * Success Criteria: Order state is "valid" or "ready"
+       * Failure Indicators:
+         - State "pending" for extended period
+         - State "invalid" or "errored" with failure message
+         - Missing Order (ACME flow not initiated)
+
+    6. **For ACME Issuers: Check Challenge Status**
+       * Action: Examine Challenge resources for domain validation
+       * Function Description: List Challenges in namespace, check their state and type
+       * Parameters: namespace, order name label
+       * Expected Output: Challenge type (HTTP-01, DNS-01), state, presented status, reason
+       * Success Criteria: Challenge state is "valid", presented=true
+       * Failure Indicators:
+         - State "pending" with presented=false (challenge not deployed)
+         - State "invalid" with reason (validation failed)
+         - State "errored" (solver configuration issue)
+
+    7. **For HTTP-01 Challenges: Verify Solver Resources**
+       * Action: Check that HTTP-01 solver Pod and Service are created
+       * Function Description: List pods/services with acme.cert-manager.io labels in namespace
+       * Parameters: namespace, label selector for ACME solver
+       * Expected Output: Solver pod status, service configuration, ingress/route
+       * Success Criteria: Solver pod running, service exposed, ingress routing to solver
+       * Failure Indicators:
+         - Solver pod not created or not running
+         - Ingress not created or misconfigured
+         - Service not reachable from internet (firewall, ingress controller issue)
+
+    8. **For DNS-01 Challenges: Verify DNS Record Creation**
+       * Action: Check if the _acme-challenge TXT record was created
+       * Function Description: Query DNS for _acme-challenge.<domain> TXT record
+       * Parameters: domain name from challenge
+       * Expected Output: TXT record value matching challenge token
+       * Success Criteria: TXT record exists with correct token value
+       * Failure Indicators:
+         - TXT record not found (DNS provider credentials or permissions issue)
+         - Wrong TXT value (stale record)
+         - DNS propagation delay
+
+    9. **Check Cert-Manager Controller Logs**
+       * Action: Retrieve logs from cert-manager controller for errors
+       * Function Description: Get logs from cert-manager controller pod, filter for certificate name
+       * Parameters: namespace cert-manager, deployment cert-manager, filter by certificate name
+       * Expected Output: Log entries showing certificate processing, errors, retries
+       * Success Criteria: Logs show successful issuance flow
+       * Failure Indicators:
+         - "error" level logs related to the certificate
+         - "failed to" messages
+         - Retry backoff messages indicating persistent failures
+         - Webhook connection errors
+
+    10. **Verify Secret Creation and Contents**
+        * Action: Check if the TLS secret was created with valid certificate
+        * Function Description: Get the Secret referenced by Certificate's secretName
+        * Parameters: namespace, secret name from Certificate spec
+        * Expected Output: Secret exists with tls.crt, tls.key, ca.crt (optional)
+        * Success Criteria: Secret exists with non-empty tls.crt and tls.key
+        * Failure Indicators:
+          - Secret doesn't exist
+          - Secret exists but tls.crt is empty or invalid
+          - Certificate in secret is expired
+
+    11. **Check Webhook Connectivity**
+        * Action: Verify cert-manager webhook is accessible
+        * Function Description: Check webhook pod status and service, test API server connectivity
+        * Parameters: namespace cert-manager
+        * Expected Output: Webhook pod ready, service endpoints populated
+        * Success Criteria: Webhook pod running, ValidatingWebhookConfiguration and MutatingWebhookConfiguration exist
+        * Failure Indicators:
+          - Webhook pod not ready
+          - "connection refused" or timeout errors when creating Certificate resources
+          - caBundle in webhook configuration is incorrect
+
+    ## Synthesize Findings
+
+    Based on the outputs from the above steps, describe the issue clearly. Example findings:
+
+    * "Certificate 'my-app-tls' is stuck in 'Issuing' state. The CertificateRequest shows Ready=False with message 'Waiting on certificate issuance from order namespace/order-name: order is in pending state'"
+
+    * "Order for 'api.example.com' is in 'invalid' state. The HTTP-01 Challenge failed with reason 'Waiting for HTTP-01 challenge propagation: failed to perform self check: 404 Not Found' - the ACME solver pod is not receiving traffic"
+
+    * "DNS-01 Challenge is stuck in 'pending' state with presented=false. Cert-manager logs show 'failed to create DNS01 challenge: AccessDenied: User is not authorized to perform route53:ChangeResourceRecordSets' - missing DNS provider permissions"
+
+    * "ClusterIssuer 'letsencrypt-prod' has Ready=False with message 'Failed to register ACME account: 429 Too Many Requests' - rate limited by Let's Encrypt"
+
+    * "Certificate shows Ready=False with 'Issuer staging-issuer not found' - the referenced Issuer doesn't exist in the namespace"
+
+    * "Cert-manager webhook pod is in CrashLoopBackOff with OOMKilled - webhook needs more memory, causing all Certificate operations to timeout"
+
+    ## Recommended Remediation Steps
+
+    **For Issuer Configuration Issues:**
+    * Verify issuerRef matches exactly (name, kind: Issuer vs ClusterIssuer)
+    * For ACME: ensure email is valid and server URL is correct
+      - Staging: `https://acme-staging-v02.api.letsencrypt.org/directory`
+      - Production: `https://acme-v02.api.letsencrypt.org/directory`
+    * Check Issuer status: `kubectl describe clusterissuer <name>`
+
+    **For HTTP-01 Challenge Failures:**
+    * Verify ingress controller is working and has external access
+    * Check that port 80 is open in firewalls/security groups
+    * Ensure the ingress class in solver config matches your ingress controller
+    * Test solver endpoint: `curl http://<domain>/.well-known/acme-challenge/<token>`
+
+    **For DNS-01 Challenge Failures:**
+    * Verify DNS provider credentials in Secret
+    * Check IAM/RBAC permissions for DNS zone modifications
+    * For Route53: needs route53:ChangeResourceRecordSets, route53:ListHostedZones
+    * For CloudFlare: needs Zone:DNS:Edit permission
+    * For Azure DNS: needs "DNS Zone Contributor" role
+    * Wait for DNS propagation (up to several minutes)
+
+    **For Rate Limiting (Let's Encrypt):**
+    * Use staging issuer for testing: `https://acme-staging-v02.api.letsencrypt.org/directory`
+    * Check rate limits: https://letsencrypt.org/docs/rate-limits/
+    * Wait for rate limit window to expire (typically 1 hour to 1 week)
+    * Consolidate certificates using SAN (multiple domains in one cert)
+
+    **For Webhook Issues:**
+    * Increase webhook memory/CPU limits if OOMKilled
+    * Check webhook service endpoints: `kubectl get endpoints -n cert-manager cert-manager-webhook`
+    * Restart cert-manager pods if webhook caBundle is stale
+    * Verify no NetworkPolicy blocking API server to webhook traffic
+
+    **For Expired Certificates:**
+    * Check why renewal didn't happen (renewBefore setting, issuer issues)
+    * Delete the Certificate and Secret to force re-issuance
+    * Check cert-manager controller logs around renewal time
+
+    **For Missing CertificateRequest:**
+    * Check cert-manager controller is running
+    * Look for errors in controller logs
+    * Verify Certificate resource is valid (kubectl describe certificate)
+
+    **Documentation:**
+    * Official cert-manager docs: https://cert-manager.io/docs/
+    * Troubleshooting guide: https://cert-manager.io/docs/troubleshooting/
+    * ACME troubleshooting: https://cert-manager.io/docs/troubleshooting/acme/
+    * FAQ: https://cert-manager.io/docs/faq/
