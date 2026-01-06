@@ -98,3 +98,41 @@ If you want, I can tailor exact commands for your Ubuntu version in WSL (e.g., 2
 
 [1]: https://docs.k8sgpt.ai/getting-started/installation/?utm_source=chatgpt.com "Installation"
 [2]: https://docs.k8sgpt.ai/getting-started/getting-started/?utm_source=chatgpt.com "Getting Started Guide"
+
+
+---
+
+Quick one-liner:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Then add to your PATH (the installer will show this, but for Ubuntu/Debian WSL):
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**Prerequisites** (if not already installed):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential curl file git
+```
+
+**Verify:**
+
+```bash
+brew --version
+```
+
+That said, for k8sgpt specifically, the `.deb` package is cleaner on WSL - no brew dependency, no gcc hassles:
+
+```bash
+./install-k8sgpt.sh  # defaults to deb method
+```
+
+Up to you which route you prefer. Brew is handy if you're already using it for other tools.
