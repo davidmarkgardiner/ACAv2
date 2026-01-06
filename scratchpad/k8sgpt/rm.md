@@ -35,19 +35,53 @@ chmod +x install-k8sgpt.sh
 ### 2. With Custom Options
 
 ```bash
+# Install via .deb package (default, recommended for WSL)
 ./install-k8sgpt.sh \
   --version 0.4.26 \
   --litellm-url http://localhost:4000/v1 \
   --model claude-sonnet
+
+# Install via Homebrew
+./install-k8sgpt.sh --method brew
 ```
 
 ### 3. Manual Installation
 
+**Option A: DEB Package (Recommended for WSL/Ubuntu)**
+
 ```bash
-# Install k8sgpt
+# Download and install
 curl -LO https://github.com/k8sgpt-ai/k8sgpt/releases/download/v0.4.26/k8sgpt_amd64.deb
 sudo dpkg -i k8sgpt_amd64.deb
 
+# Verify
+k8sgpt version
+```
+
+**Option B: Homebrew**
+
+> ⚠️ On WSL/Linux, you must install `build-essential` first to avoid gcc errors.
+> See: https://docs.k8sgpt.ai/getting-started/installation/#failing-installation-on-wsl-or-linux-missing-gcc
+
+```bash
+# WSL/Linux only: Install build-essential first
+sudo apt-get update
+sudo apt-get install build-essential
+
+# Install via brew
+brew tap k8sgpt-ai/k8sgpt
+brew install k8sgpt
+
+# Verify
+k8sgpt version
+
+# Upgrade later
+brew upgrade k8sgpt
+```
+
+### 4. Configure LiteLLM Backend
+
+```bash
 # Configure LiteLLM backend
 k8sgpt auth add --backend openai \
   --model gpt-4o \
@@ -56,7 +90,6 @@ k8sgpt auth add --backend openai \
 
 # Verify
 k8sgpt auth list
-k8sgpt version
 ```
 
 ## LiteLLM Setup
