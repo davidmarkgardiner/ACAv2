@@ -1,0 +1,242 @@
+# Tiered Spot NodePool Strategy for Large-Scale AKS
+# Uses sku-version to let NAP optimize SKU selection
+#
+# Priority Order:
+#   Tier 1 (weight 100): Spot v5/v6 - newest generations
+#   Tier 2 (weight 50):  Spot v4/v5/v6 - includes older gen for availability
+#   Tier 3 (weight 10):  On-demand safety net
+
+---
+# =============================================================================
+# TIER 1: Spot - Newest Generations (v5/v6)
+# =============================================================================
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: spot-newest-gen
+  annotations:
+    kubernetes.io/description: "Primary spot pool - v5/v6 generations only"
+spec:
+  weight: 100
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+    expireAfter: 168h
+
+  template:
+    metadata:
+      labels:
+        capacity-type: spot
+        sku-generation: newest
+        cost-tier: tier-1
+    spec:
+      requirements:
+        - key: karpenter.azure.com/sku-family
+          operator: In
+          values:
+            - D
+
+        - key: karpenter.azure.com/sku-version
+          operator: In
+          values:
+            - "5"
+            - "6"
+
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - spot
+
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+        - key: karpenter.azure.com/sku-storage-premium-capable
+          operator: In
+          values:
+            - "true"
+
+        - key: karpenter.azure.com/sku-networking-accelerated
+          operator: In
+          values:
+            - "true"
+
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: spot-nodeclass
+
+  limits:
+    cpu: "1000"
+    memory: 4000Gi
+
+---
+# =============================================================================
+# TIER 2: Spot - All Modern Generations (v4/v5/v6)
+# =============================================================================
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: spot-all-modern
+  annotations:
+    kubernetes.io/description: "Fallback spot pool - v4/v5/v6 for maximum availability"
+spec:
+  weight: 50
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+    expireAfter: 168h
+
+  template:
+    metadata:
+      labels:
+        capacity-type: spot
+        sku-generation: all-modern
+        cost-tier: tier-2
+    spec:
+      requirements:
+        - key: karpenter.azure.com/sku-family
+          operator: In
+          values:
+            - D
+            - E  # Include memory-optimized for availability
+
+        - key: karpenter.azure.com/sku-version
+          operator: In
+          values:
+            - "4"
+            - "5"
+            - "6"
+
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - spot
+
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+        - key: karpenter.azure.com/sku-storage-premium-capable
+          operator: In
+          values:
+            - "true"
+
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: spot-nodeclass
+
+  limits:
+    cpu: "2000"
+    memory: 8000Gi
+
+---
+# =============================================================================
+# TIER 3: On-Demand Safety Net
+# =============================================================================
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: ondemand-safety-net
+  annotations:
+    kubernetes.io/description: "On-demand safety net when spot unavailable"
+spec:
+  weight: 10
+
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 10m
+    expireAfter: Never
+
+  template:
+    metadata:
+      labels:
+        capacity-type: on-demand
+        sku-generation: any-modern
+        cost-tier: tier-3-safety
+    spec:
+      requirements:
+        - key: karpenter.azure.com/sku-family
+          operator: In
+          values:
+            - D
+            - E
+
+        - key: karpenter.azure.com/sku-version
+          operator: In
+          values:
+            - "4"
+            - "5"
+            - "6"
+
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand
+
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: ondemand-nodeclass
+
+  limits:
+    cpu: "3000"
+    memory: 12000Gi
+
+---
+# =============================================================================
+# AKSNodeClass Configurations
+# =============================================================================
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: spot-nodeclass
+spec:
+  imageFamily: AzureLinux
+  osDiskSizeGB: 128
+  maxPods: 110
+
+  tags:
+    Environment: production
+    CapacityType: spot
+    ManagedBy: NAP
+
+---
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: ondemand-nodeclass
+spec:
+  imageFamily: AzureLinux
+  osDiskSizeGB: 128
+  maxPods: 110
+
+  tags:
+    Environment: production
+    CapacityType: on-demand
+    ManagedBy: NAP
