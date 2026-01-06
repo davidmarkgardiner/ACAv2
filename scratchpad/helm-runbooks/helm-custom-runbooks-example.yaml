@@ -1,0 +1,93 @@
+# Example: Adding custom runbooks via Helm values.yaml
+#
+# This shows how to add custom runbooks without rebuilding the container.
+# Copy relevant sections into your values.yaml file.
+
+# Option 1: Using additionalVolumes to mount a ConfigMap containing runbooks
+# ---
+# First, create a ConfigMap with your runbook content:
+#
+# kubectl create configmap my-custom-runbooks \
+#   --from-file=runbooks.yaml=./my-runbooks.yaml \
+#   -n <namespace>
+#
+# Then in your values.yaml:
+
+additionalVolumes:
+  - name: custom-runbooks
+    configMap:
+      name: my-custom-runbooks
+
+additionalVolumeMounts:
+  - name: custom-runbooks
+    mountPath: /etc/holmes/runbooks
+
+additionalEnvVars:
+  - name: CUSTOM_RUNBOOKS
+    value: "/etc/holmes/runbooks/runbooks.yaml"
+
+# ---
+# Option 2: Inline runbook in a ConfigMap (defined in same Helm release)
+# You would need to add a custom template, or use a separate ConfigMap.
+#
+# Example runbook content (my-runbooks.yaml):
+# ---
+# runbooks:
+#   - name: "HighMemoryUsage"
+#     match:
+#       alertname: "HighMemoryUsage"
+#     instructions: |
+#       1. Check which pods are consuming the most memory
+#       2. Look for memory leaks in application logs
+#       3. Check if HPA is configured and working
+#       4. Review recent deployments that may have changed memory patterns
+#
+#   - name: "PodCrashLooping"
+#     match:
+#       alertname: "KubePodCrashLooping"
+#     instructions: |
+#       1. Get pod logs from the previous container instance
+#       2. Check for OOMKilled events
+#       3. Verify resource limits are appropriate
+#       4. Check for missing ConfigMaps or Secrets
+#
+#   - name: "DatabaseConnectionIssues"
+#     match:
+#       alertname: "DatabaseConnectionPoolExhausted"
+#     instructions: |
+#       1. Check database connection pool metrics
+#       2. Look for long-running queries
+#       3. Verify database server health
+#       4. Check network policies between app and database
+
+# ---
+# Option 3: Using a runbook catalog (for larger runbook collections)
+#
+# Create a catalog.json file:
+# {
+#   "runbooks": [
+#     {
+#       "alertname": "HighMemoryUsage",
+#       "runbook_url": "high-memory.md"
+#     },
+#     {
+#       "alertname": "KubePodCrashLooping",
+#       "runbook_url": "crashloop.md"
+#     }
+#   ]
+# }
+#
+# Then mount the directory containing catalog.json and .md files:
+
+# additionalVolumes:
+#   - name: runbook-catalog
+#     configMap:
+#       name: my-runbook-catalog
+
+# additionalVolumeMounts:
+#   - name: runbook-catalog
+#     mountPath: /etc/holmes/runbook-catalog
+
+# additionalEnvVars:
+#   - name: CUSTOM_RUNBOOK_CATALOGS
+#     value: "/etc/holmes/runbook-catalog/catalog.json"
