@@ -214,15 +214,16 @@ spec:
             # IMPORTANT: HolmesGPT only loads runbooks listed here explicitly.
             # No directory scanning or auto-discovery - each file must be listed.
 
-            # Custom runbooks - explicit paths required
+            # Custom runbooks for AKS troubleshooting
             custom_runbooks:
               - /etc/holmes/runbooks/external-dns.yaml
               - /etc/holmes/runbooks/cert-manager.yaml
+              - /etc/holmes/runbooks/external-secrets.yaml
+              - /etc/holmes/runbooks/kyverno.yaml
+              - /etc/holmes/runbooks/kro.yaml
 
-            # You can also add other config options here:
-            # model: "gpt-4o"
-            # fast_model: "gpt-4o-mini"
-            # max_steps: 40
+            # Configuration
+            max_steps: 40
 
     # ConfigMap for custom runbooks
     - id: runbooksconfigmap
@@ -236,73 +237,312 @@ spec:
           external-dns.yaml: |
             runbooks:
               - match:
-                  issue_name: "(ExternalDNS)|(external-dns)|(DNS.*not.*creat)|(DNS.*record)"
+                  issue_name: "(ExternalDNS)|(external-dns)|(DNS.*not.*creat)|(DNS.*record)|(Azure.*DNS)"
                 instructions: >
-                  Diagnose why external-dns is not creating DNS records for Services/Ingresses.
+                  Diagnose why external-dns is not creating DNS records in Azure DNS zones.
 
-                  1. Check external-dns pod status: kubectl get pods -n external-dns (or kube-system)
-                  2. Review external-dns logs for errors: kubectl logs -n external-dns deploy/external-dns --tail=200
-                     Look for: AccessDenied, Forbidden, 401, 403 (auth issues), Throttling (rate limits),
-                     "no endpoints" (no matching resources), "Skipping" (filtered out)
-                  3. Verify Services have annotation: external-dns.alpha.kubernetes.io/hostname
-                  4. For LoadBalancer Services, verify external IP is assigned (not <pending>)
-                  5. Check deployment args for --domain-filter restrictions
-                  6. Verify DNS provider credentials Secret exists and is correctly mounted
-                  7. Check for TXT ownership conflicts with other external-dns instances
+                  **Step 1: Check external-dns pod status**
+                  kubectl get pods -n external-dns
+                  kubectl logs -n external-dns deploy/external-dns --tail=200
 
-                  For auth errors:
-                  - AWS Route53: verify IAM role has route53:ChangeResourceRecordSets
-                  - Azure DNS: verify managed identity has "DNS Zone Contributor" role
-                  - CloudFlare: verify API token has Zone:DNS:Edit permission
+                  **Step 2: Look for Azure-specific errors in logs**
+                  - "AuthorizationFailed" or "AuthenticationFailed": Workload Identity not configured
+                  - "does not have authorization": UAMI missing "DNS Zone Contributor" role
+                  - "SubscriptionNotFound": Wrong subscription ID in deployment args
+                  - "ResourceGroupNotFound": Wrong resource group for DNS zone
+
+                  **Step 3: Verify Workload Identity setup**
+                  kubectl get serviceaccount -n external-dns external-dns -o yaml
+                  # Check for azure.workload.identity/client-id annotation
+                  # Check for azure.workload.identity/use: "true" label on pods
+
+                  **Step 4: Verify Azure DNS zone access**
+                  # Check UAMI has role assignment on DNS zone:
+                  az role assignment list --assignee <UAMI_CLIENT_ID> --scope /subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.Network/dnszones/<ZONE>
+
+                  **Step 5: Check external-dns configuration**
+                  kubectl get deploy -n external-dns external-dns -o yaml | grep -A 20 "args:"
+                  # Verify: --provider=azure, --azure-resource-group, --domain-filter
+
+                  **Step 6: Verify Services have correct annotations**
+                  kubectl get svc -A -o jsonpath='{range .items[?(@.metadata.annotations.external-dns\.alpha\.kubernetes\.io/hostname)]}{.metadata.namespace}/{.metadata.name}: {.metadata.annotations.external-dns\.alpha\.kubernetes\.io/hostname}{"\n"}{end}'
+
+                  **Common fixes:**
+                  - Add DNS Zone Contributor role: az role assignment create --assignee <UAMI_CLIENT_ID> --role "DNS Zone Contributor" --scope <DNS_ZONE_ID>
+                  - Restart external-dns after fixing: kubectl rollout restart deploy/external-dns -n external-dns
           cert-manager.yaml: |
             runbooks:
               - match:
-                  issue_name: "(Certificate)|(cert-manager)|(TLS)|(ACME)|(Let.*Encrypt)"
+                  issue_name: "(Certificate)|(cert-manager)|(TLS)|(ACME)|(Let.*Encrypt)|(Azure.*Key.*Vault)"
                 instructions: >
-                  Diagnose why cert-manager is not issuing certificates.
+                  Diagnose why cert-manager is not issuing certificates on AKS.
 
-                  1. Check cert-manager pods: kubectl get pods -n cert-manager
-                     All three should be Running: controller, webhook, cainjector
-                  2. Get Certificate status: kubectl describe certificate <name> -n <namespace>
-                     Check Ready condition and any error messages
-                  3. Find CertificateRequest: kubectl get certificaterequest -n <namespace>
-                     Check if it exists and its status
-                  4. Check Issuer/ClusterIssuer: kubectl describe clusterissuer <name>
-                     Verify Ready=True condition
-                  5. For ACME, check Order: kubectl get order -n <namespace>
-                     State should be "valid" or "ready"
-                  6. For ACME, check Challenge: kubectl get challenge -n <namespace>
-                     Look at state, type (HTTP-01/DNS-01), and reason
-                  7. Review cert-manager logs: kubectl logs -n cert-manager deploy/cert-manager
+                  **Step 1: Check cert-manager pods**
+                  kubectl get pods -n cert-manager
+                  # All three should be Running: controller, webhook, cainjector
 
-                  For HTTP-01 failures:
-                  - Verify solver pod is running and ingress created
-                  - Check port 80 is accessible from internet
-                  - Test: curl http://<domain>/.well-known/acme-challenge/<token>
+                  **Step 2: Check Certificate status**
+                  kubectl get certificate -A
+                  kubectl describe certificate <name> -n <namespace>
+                  # Look for Ready condition and error messages
 
-                  For DNS-01 failures:
-                  - Check _acme-challenge TXT record: dig _acme-challenge.<domain> TXT
-                  - Verify DNS provider credentials and permissions
+                  **Step 3: Follow the certificate chain**
+                  kubectl get certificaterequest -n <namespace>
+                  kubectl get order -n <namespace>
+                  kubectl get challenge -n <namespace>
 
-                  For rate limiting (429 errors):
-                  - Use staging issuer for testing
-                  - Check https://letsencrypt.org/docs/rate-limits/
-                  - Wait for rate limit window to expire
+                  **Step 4: For HTTP-01 challenges with Istio/AGIC**
+                  - Istio: Check VirtualService routes /.well-known/acme-challenge/* to solver
+                  - AGIC: Check Ingress annotations allow HTTP on port 80
+                  - Test: curl -v http://<domain>/.well-known/acme-challenge/test
+
+                  **Step 5: For DNS-01 challenges with Azure DNS**
+                  - Check Workload Identity on cert-manager ServiceAccount:
+                    kubectl get sa -n cert-manager cert-manager -o yaml
+                  - Verify UAMI has "DNS Zone Contributor" role on Azure DNS zone
+                  - Check ClusterIssuer config:
+                    kubectl get clusterissuer <name> -o yaml
+                  - Verify hostedZoneName, resourceGroupName, subscriptionID
+
+                  **Step 6: Check cert-manager logs**
+                  kubectl logs -n cert-manager deploy/cert-manager --tail=100
+                  # Look for: "error", "failed", "denied", "unauthorized"
+
+                  **Common AKS issues:**
+                  - Workload Identity not federated: az identity federated-credential create
+                  - Wrong DNS zone permissions: az role assignment create --role "DNS Zone Contributor"
+                  - Istio blocking HTTP-01: Create VirtualService for ACME path
+                  - Rate limited: Use staging issuer (acme-staging-v02)
+
+                  **Quick fix - restart cert-manager:**
+                  kubectl rollout restart deploy -n cert-manager
 
               - match:
-                  issue_name: "(webhook)|(cert-manager.*timeout)|(cert-manager.*connection)"
+                  issue_name: "(webhook)|(cert-manager.*timeout)|(cert-manager.*connection)|(admission.*webhook)"
                 instructions: >
-                  Diagnose cert-manager webhook connectivity issues.
+                  Diagnose cert-manager webhook issues on AKS.
 
-                  1. Check webhook pod: kubectl get pods -n cert-manager -l app=webhook
-                  2. Check webhook logs: kubectl logs -n cert-manager deploy/cert-manager-webhook
-                  3. Verify service has endpoints: kubectl get endpoints -n cert-manager cert-manager-webhook
-                  4. Check webhook configurations exist:
-                     kubectl get validatingwebhookconfiguration cert-manager-webhook
-                     kubectl get mutatingwebhookconfiguration cert-manager-webhook
-                  5. Check for NetworkPolicies blocking API server to webhook
-                  6. If OOMKilled, increase webhook memory limits
-                  7. If caBundle is stale, restart cert-manager pods
+                  **Step 1: Check webhook pod**
+                  kubectl get pods -n cert-manager -l app.kubernetes.io/component=webhook
+                  kubectl logs -n cert-manager deploy/cert-manager-webhook --tail=50
+
+                  **Step 2: Verify webhook service**
+                  kubectl get svc -n cert-manager cert-manager-webhook
+                  kubectl get endpoints -n cert-manager cert-manager-webhook
+                  # Endpoints should NOT be empty
+
+                  **Step 3: Check webhook configurations**
+                  kubectl get validatingwebhookconfiguration cert-manager-webhook
+                  kubectl get mutatingwebhookconfiguration cert-manager-webhook
+
+                  **Step 4: AKS-specific checks**
+                  - Check if API server can reach webhook (private cluster may need firewall rule)
+                  - Verify no NetworkPolicy blocking kube-system → cert-manager
+                  - Check if AKS egress firewall allows webhook traffic
+
+                  **Quick fix - restart webhook:**
+                  kubectl rollout restart deploy/cert-manager-webhook -n cert-manager
+                  kubectl rollout restart deploy/cert-manager-cainjector -n cert-manager
+          external-secrets.yaml: |
+            runbooks:
+              - match:
+                  issue_name: "(ExternalSecret)|(external-secrets)|(SecretStore)|(Azure.*Key.*Vault)|(secret.*sync)"
+                instructions: >
+                  Diagnose External Secrets Operator (ESO) issues with Azure Key Vault on AKS.
+
+                  **Step 1: Check ESO pods**
+                  kubectl get pods -n external-secrets
+                  kubectl logs -n external-secrets deploy/external-secrets --tail=100
+
+                  **Step 2: Check SecretStore/ClusterSecretStore status**
+                  kubectl get secretstore,clustersecretstore -A
+                  kubectl describe clustersecretstore <name>
+                  # Look for Ready condition and any error messages
+
+                  **Step 3: Check ExternalSecret status**
+                  kubectl get externalsecret -A
+                  kubectl describe externalsecret <name> -n <namespace>
+                  # Check: status.conditions, status.syncedResourceVersion
+
+                  **Step 4: Verify Workload Identity setup for ESO**
+                  kubectl get sa -n external-secrets external-secrets -o yaml
+                  # Must have: azure.workload.identity/client-id annotation
+                  # Pod must have: azure.workload.identity/use: "true" label
+
+                  **Step 5: Check Azure Key Vault access**
+                  # Verify UAMI has access policy or RBAC role on Key Vault:
+                  az keyvault show --name <VAULT_NAME> --query "properties.accessPolicies"
+                  # Or for RBAC:
+                  az role assignment list --scope /subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.KeyVault/vaults/<VAULT>
+
+                  **Step 6: Test Key Vault connectivity from pod**
+                  kubectl exec -n external-secrets deploy/external-secrets -- \
+                    curl -s -H "Metadata: true" "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net"
+
+                  **Common Azure issues:**
+                  - "AuthenticationFailed": Workload Identity not configured on SA
+                  - "ForbiddenByPolicy": Key Vault access policy missing
+                  - "SecretNotFound": Secret name doesn't exist in vault
+                  - "NetworkError": Key Vault firewall blocking AKS
+
+                  **Fixes:**
+                  - Add Key Vault access: az keyvault set-policy --name <VAULT> --object-id <UAMI_PRINCIPAL_ID> --secret-permissions get list
+                  - Or RBAC: az role assignment create --role "Key Vault Secrets User" --assignee <UAMI_CLIENT_ID> --scope <VAULT_ID>
+                  - Restart ESO: kubectl rollout restart deploy/external-secrets -n external-secrets
+          kyverno.yaml: |
+            runbooks:
+              - match:
+                  issue_name: "(Kyverno)|(policy)|(PolicyException)|(ClusterPolicy)|(admission.*denied)|(blocked.*policy)"
+                instructions: >
+                  Diagnose Kyverno policy enforcement issues on AKS.
+
+                  **Step 1: Check Kyverno pods**
+                  kubectl get pods -n kyverno
+                  # Should see: admission-controller, background-controller, cleanup-controller, reports-controller
+
+                  **Step 2: If pods are failing, check logs**
+                  kubectl logs -n kyverno deploy/kyverno-admission-controller --tail=100
+                  kubectl logs -n kyverno deploy/kyverno-background-controller --tail=100
+
+                  **Step 3: List policies and check status**
+                  kubectl get clusterpolicy,policy -A
+                  kubectl describe clusterpolicy <name>
+                  # Check: status.ready, status.conditions
+
+                  **Step 4: Check policy violations**
+                  kubectl get policyreport,clusterpolicyreport -A
+                  kubectl describe policyreport -n <namespace>
+                  # Shows which resources violate which policies
+
+                  **Step 5: Debug specific admission denial**
+                  kubectl get events -A --field-selector reason=PolicyViolation
+                  # Or check admission controller logs:
+                  kubectl logs -n kyverno deploy/kyverno-admission-controller | grep -i "denied\|blocked\|violation"
+
+                  **Step 6: Test policy in audit mode first**
+                  # Change policy from "Enforce" to "Audit":
+                  kubectl patch clusterpolicy <name> --type=merge -p '{"spec":{"validationFailureAction":"Audit"}}'
+
+                  **Common issues:**
+                  - "admission webhook denied": Policy blocking resource creation
+                  - "webhook timeout": Kyverno pods overloaded or not ready
+                  - "policy not ready": Policy has syntax errors
+                  - Background scan failing: Check background-controller logs
+
+                  **Fixes:**
+                  - Exempt namespace: Add label `kyverno.io/ignore: "true"` to namespace
+                  - Create PolicyException for specific resources
+                  - Restart Kyverno: kubectl rollout restart deploy -n kyverno -l app.kubernetes.io/instance=kyverno
+
+              - match:
+                  issue_name: "(PolicyException)|(exemption)|(exclude.*policy)"
+                instructions: >
+                  Create a Kyverno PolicyException to exempt a resource.
+
+                  **Step 1: Identify the policy blocking the resource**
+                  kubectl get events -n <namespace> --field-selector reason=PolicyViolation
+
+                  **Step 2: Create PolicyException**
+                  kubectl apply -f - <<EOF
+                  apiVersion: kyverno.io/v2
+                  kind: PolicyException
+                  metadata:
+                    name: allow-<resource>
+                    namespace: <namespace>
+                  spec:
+                    exceptions:
+                    - policyName: <policy-name>
+                      ruleNames:
+                      - <rule-name>
+                    match:
+                      any:
+                      - resources:
+                          kinds:
+                          - <Kind>
+                          names:
+                          - <resource-name>
+                          namespaces:
+                          - <namespace>
+                  EOF
+
+                  **Step 3: Verify exception is active**
+                  kubectl get policyexception -n <namespace>
+          kro.yaml: |
+            runbooks:
+              - match:
+                  issue_name: "(KRO)|(ResourceGraphDefinition)|(ResourceGraph)|(kro\\.run)|(instance.*not.*ready)"
+                instructions: >
+                  Diagnose Kubernetes Resource Orchestrator (KRO) issues.
+
+                  **Step 1: Check KRO controller**
+                  kubectl get pods -n kro
+                  kubectl logs -n kro deploy/kro-controller-manager --tail=100
+
+                  **Step 2: Check ResourceGraphDefinition status**
+                  kubectl get resourcegraphdefinition
+                  kubectl describe resourcegraphdefinition <name>
+                  # Check: status.state (should be "Active")
+                  # Look for schema validation errors
+
+                  **Step 3: Check instance status**
+                  kubectl get <kind> -n <namespace>  # e.g., kubectl get holmes -n kro
+                  kubectl describe <kind> <name> -n <namespace>
+                  # Check status.conditions:
+                  # - InstanceManaged: finalizers and labels set
+                  # - GraphResolved: all resources resolved
+                  # - ResourcesReady: all child resources ready
+
+                  **Step 4: Check child resources**
+                  # KRO creates resources with owner reference to instance
+                  kubectl get all -n <target-namespace> -l kro.run/instance=<instance-name>
+
+                  **Step 5: Debug resource creation failures**
+                  kubectl get events -n <target-namespace> --sort-by='.lastTimestamp'
+                  # Look for errors in Namespace, Deployment, Service, ConfigMap creation
+
+                  **Step 6: Common KRO expression errors**
+                  # Check RGD for CEL expression issues:
+                  kubectl get resourcegraphdefinition <name> -o yaml | grep -A 5 "readyWhen\|template"
+                  # Common: referencing .status fields before resource exists
+
+                  **Common issues:**
+                  - "schema validation failed": Invalid field types in RGD spec
+                  - "failed evaluating expression": CEL expression error (e.g., missing status field)
+                  - "resource not ready": Child resource hasn't reached ready state
+                  - "already exists": Resource name conflict with existing resource
+
+                  **Fixes:**
+                  - Delete and recreate instance: kubectl delete <kind> <name> -n kro && kubectl apply -f instance.yaml
+                  - Check RGD schema matches instance spec
+                  - Ensure readyWhen expressions handle missing fields: use `|| false` for safety
+                  - Restart KRO controller: kubectl rollout restart deploy/kro-controller-manager -n kro
+
+              - match:
+                  issue_name: "(RGD.*error)|(ResourceGraphDefinition.*failed)|(schema.*invalid)"
+                instructions: >
+                  Debug ResourceGraphDefinition schema and template errors.
+
+                  **Step 1: Get RGD status**
+                  kubectl get resourcegraphdefinition <name> -o jsonpath='{.status}'
+
+                  **Step 2: Check for schema errors**
+                  kubectl describe resourcegraphdefinition <name>
+                  # Look at status.conditions for schema validation errors
+
+                  **Step 3: Validate schema types**
+                  # Common schema type issues:
+                  # - Use "string" not "String"
+                  # - Use "integer" not "int"
+                  # - Use "boolean" not "bool"
+                  # - Default values must match type: `string | default="true"` not `default=true`
+
+                  **Step 4: Check template variable references**
+                  # Variables must use ${} syntax: ${schema.spec.name}
+                  # Nested references: ${schema.spec.config.setting}
+
+                  **Step 5: Fix and reapply**
+                  kubectl apply -f <rgd-file>.yaml
+                  # KRO will revalidate and update status
 
     # Deployment
     - id: deployment
