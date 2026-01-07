@@ -1,0 +1,125 @@
+---
+# Example Instance: AKS-MCP Server Deployment
+#
+# This deploys the AKS Model Context Protocol (MCP) server to enable
+# AI-assisted Kubernetes operations via Claude, GitHub Copilot, Cursor, etc.
+#
+# Prerequisites:
+# 1. Create User-Assigned Managed Identity (or use existing one):
+#    az identity create --name uami-aks-mcp --resource-group <rg> --location <location>
+#
+# 2. Get Client ID:
+#    CLIENT_ID=$(az identity show --name uami-aks-mcp -g <rg> --query clientId -o tsv)
+#
+# 3. Assign Contributor role (required for full functionality):
+#    PRINCIPAL_ID=$(az identity show --name uami-aks-mcp -g <rg> --query principalId -o tsv)
+#    az role assignment create --assignee-object-id $PRINCIPAL_ID \
+#      --assignee-principal-type ServicePrincipal \
+#      --role "Contributor" \
+#      --scope /subscriptions/<sub-id>/resourceGroups/<rg>
+#
+# 4. Ensure OIDC ConfigMap exists (created by cluster provisioning):
+#    The ConfigMap 'aks-oidc-config' should contain the OIDC issuer URL
+#    under the key 'issuer-url'
+#
+# Note: The federated credential is created automatically by this RGD via ASO,
+#       reading the OIDC issuer from the ConfigMap.
+#
+# Usage:
+#   kubectl apply -f example-aks-mcp.yaml
+#
+# Test:
+#   kubectl port-forward svc/aks-mcp 8000:8000 -n aks-mcp
+#   curl -X POST http://localhost:8000/mcp \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}'
+#
+apiVersion: kro.run/v1alpha1
+kind: UK8SAksMcp
+metadata:
+  name: aks-mcp-readonly
+  namespace: azure-system
+  labels:
+    kro.run/environment: dev
+spec:
+  # ========================================
+  # Required: Managed Identity Configuration
+  # ========================================
+  # Client ID of the User-Assigned Managed Identity
+  clientId: "00000000-0000-0000-0000-000000000000"
+
+  # Name of the existing UserAssignedIdentity ASO resource
+  identityName: "uami-aks-mcp"
+
+  # Namespace where the identity ASO resource exists
+  identityNamespace: "azure-system"
+
+  # OIDC Issuer from ConfigMap (defaults shown)
+  # oidcConfigMapName: "aks-oidc-config"
+  # oidcConfigMapKey: "issuer-url"
+
+  # ========================================
+  # Access Level
+  # ========================================
+  # readonly  - View cluster info, logs, events, metrics (no changes)
+  # readwrite - Above + scale, restart, apply, cordon, drain
+  # admin     - Above + get cluster credentials
+  accessLevel: "readonly"
+
+  # ========================================
+  # Deployment Configuration
+  # ========================================
+  namespace: "aks-mcp"
+  replicas: 2
+  imageTag: "v0.0.12"
+
+  # ========================================
+  # Networking (optional)
+  # ========================================
+  # Leave domain empty to skip Istio VirtualService creation
+  domain: ""
+
+  # ========================================
+  # Resource Limits
+  # ========================================
+  cpuRequest: "100m"
+  cpuLimit: "500m"
+  memoryRequest: "128Mi"
+  memoryLimit: "512Mi"
+
+  # ========================================
+  # Advanced Configuration
+  # ========================================
+  additionalTools: ""        # helm,cilium,hubble
+  allowNamespaces: ""        # Restrict to specific namespaces
+  logLevel: "info"           # debug, info, warn, error
+  timeout: 600               # Request timeout in seconds
+
+---
+# Example with Istio HTTPS exposure
+apiVersion: kro.run/v1alpha1
+kind: UK8SAksMcp
+metadata:
+  name: aks-mcp-with-istio
+  namespace: azure-system
+  labels:
+    kro.run/environment: prod
+spec:
+  # Required fields
+  clientId: "00000000-0000-0000-0000-000000000000"
+  identityName: "uami-aks-mcp-prod"
+  identityNamespace: "azure-system"
+  # Uses default ConfigMap: aks-oidc-config with key: issuer-url
+
+  accessLevel: "readonly"
+  namespace: "aks-mcp"
+  replicas: 3
+  imageTag: "v0.0.12"
+
+  # Expose via Istio external gateway
+  domain: "aks-mcp.yourdomain.com"
+
+  cpuRequest: "200m"
+  cpuLimit: "1000m"
+  memoryRequest: "256Mi"
+  memoryLimit: "1Gi"

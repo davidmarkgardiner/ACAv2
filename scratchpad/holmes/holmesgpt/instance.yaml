@@ -1,0 +1,41 @@
+apiVersion: kro.run/v1alpha1
+kind: Holmes
+metadata:
+  name: holmes-test
+  namespace: kro
+spec:
+  name: holmes
+  namespace: holmes-test
+  # Azure Workload Identity - Replace with your UAMI client ID
+  azure:
+    clientId: ""
+  # LLM Configuration - Set your API key
+  llm:
+    provider: anthropic
+    openaiApiKey: ""
+    anthropicApiKey: ""
+  # Deployment Configuration
+  deployment:
+    image: robustadev/holmes:0.18.2
+    replicas: 1
+    resources:
+      cpuRequest: "100m"
+      memoryRequest: "2048Mi"
+      memoryLimit: "2048Mi"
+  # Feature Toggles
+  toolsets:
+    kubernetes:
+      enabled: "true"
+    logs:
+      enabled: "true"
+    robusta:
+      enabled: "true"
+    internet:
+      enabled: "true"
+    prometheus:
+      enabled: "true"
+  # MCP Server (disabled by default)
+  mcp:
+    enabled: false
+    url: "http://localhost:8000/sse"
+    description: "Azure Kubernetes Service MCP server"

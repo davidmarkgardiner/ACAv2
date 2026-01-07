@@ -1,0 +1,422 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: holmes
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Holmes
+    spec:
+      name: string | default=holmes
+      namespace: string | default=holmesgpt
+      # Azure Workload Identity
+      azure:
+        clientId: string | default=""
+      # LLM Configuration (via LiteLLM gateway to Azure OpenAI)
+      llm:
+        model: string | default=gpt-4o
+        litellmBaseUrl: string | default=http://litellm.litellm.svc.cluster.local:4000
+      # Deployment Configuration
+      deployment:
+        image: string | default=robustadev/holmes:0.18.2
+        replicas: integer | default=1
+        resources:
+          cpuRequest: string | default=100m
+          memoryRequest: string | default=1Gi
+          memoryLimit: string | default=2Gi
+      # Feature Toggles (use "true" or "false" strings for ConfigMap compatibility)
+      toolsets:
+        kubernetes:
+          enabled: string | default="true"
+        logs:
+          enabled: string | default="true"
+        robusta:
+          enabled: string | default="false"
+        internet:
+          enabled: string | default="true"
+        prometheus:
+          enabled: string | default="false"
+      # MCP Server Configuration
+      mcp:
+        enabled: boolean | default=false
+        url: string | default=http://localhost:8000/sse
+        description: string | default=MCP server for cluster operations
+    status:
+      availableReplicas: ${deployment.status.availableReplicas}
+      deploymentConditions: ${deployment.status.conditions}
+  resources:
+    # Namespace
+    - id: holmesNamespace
+      template:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ${schema.spec.namespace}
+
+    # ServiceAccount with Azure Workload Identity
+    - id: serviceaccount
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: ${schema.spec.namespace}-${schema.spec.name}-service-account
+          namespace: ${schema.spec.namespace}
+          annotations:
+            azure.workload.identity/client-id: ${schema.spec.azure.clientId}
+          labels:
+            azure.workload.identity/use: "true"
+
+    # ClusterRole - Read-only access for Kubernetes troubleshooting
+    - id: clusterrole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: ${schema.spec.name}-cluster-role
+        rules:
+          - apiGroups: ["storage.k8s.io"]
+            resources: [storageclasses]
+            verbs: [list, get, watch]
+          - apiGroups: ["metrics.k8s.io"]
+            resources: [pods, nodes]
+            verbs: [get, list]
+          - apiGroups: [""]
+            resources:
+              - configmaps
+              - daemonsets
+              - deployments
+              - events
+              - namespaces
+              - persistentvolumes
+              - persistentvolumeclaims
+              - pods
+              - pods/status
+              - pods/log
+              - replicasets
+              - replicationcontrollers
+              - services
+              - serviceaccounts
+              - endpoints
+              - nodes
+            verbs: [get, list, watch]
+          - apiGroups: ["apiregistration.k8s.io"]
+            resources: [apiservices]
+            verbs: [get, list]
+          - apiGroups: ["rbac.authorization.k8s.io"]
+            resources: [clusterroles, clusterrolebindings, roles, rolebindings]
+            verbs: [get, list, watch]
+          - apiGroups: ["autoscaling"]
+            resources: [horizontalpodautoscalers]
+            verbs: [get, list, watch]
+          - apiGroups: ["apps"]
+            resources:
+              - daemonsets
+              - deployments
+              - deployments/scale
+              - replicasets
+              - replicasets/scale
+              - statefulsets
+            verbs: [get, list, watch]
+          - apiGroups: ["extensions"]
+            resources:
+              - daemonsets
+              - deployments
+              - deployments/scale
+              - ingresses
+              - replicasets
+              - replicasets/scale
+              - replicationcontrollers/scale
+            verbs: [get, list, watch]
+          - apiGroups: ["batch"]
+            resources: [cronjobs, jobs]
+            verbs: [get, list, watch]
+          - apiGroups: ["events.k8s.io"]
+            resources: [events]
+            verbs: [get, list]
+          - apiGroups: ["apiextensions.k8s.io"]
+            resources: [customresourcedefinitions]
+            verbs: [list, get]
+          - apiGroups: ["networking.k8s.io"]
+            resources: [ingresses, networkpolicies]
+            verbs: [get, list, watch]
+          - apiGroups: ["policy"]
+            resources: [poddisruptionbudgets, podsecuritypolicies]
+            verbs: [get, list]
+          - apiGroups: ["monitoring.coreos.com"]
+            resources:
+              - alertmanagers
+              - alertmanagerconfigs
+              - prometheuses
+              - prometheusagents
+              - thanosrulers
+              - scrapeconfigs
+              - servicemonitors
+              - podmonitors
+              - probes
+              - prometheusrules
+            verbs: [get, list, watch]
+
+    # ClusterRoleBinding
+    - id: clusterrolebinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: ${schema.spec.name}-cluster-role-binding
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: ${schema.spec.name}-cluster-role
+        subjects:
+          - kind: ServiceAccount
+            name: ${schema.spec.namespace}-${schema.spec.name}-service-account
+            namespace: ${schema.spec.namespace}
+
+    # ConfigMap for toolset configuration (matches Helm chart naming)
+    - id: toolsetsconfigmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: custom-toolsets-configmap
+          namespace: ${schema.spec.namespace}
+        data:
+          custom_toolset.yaml: |
+            toolsets:
+              internet:
+                enabled: ${schema.spec.toolsets.internet.enabled}
+              kubernetes/core:
+                enabled: ${schema.spec.toolsets.kubernetes.enabled}
+              kubernetes/logs:
+                enabled: ${schema.spec.toolsets.logs.enabled}
+              prometheus/metrics:
+                enabled: ${schema.spec.toolsets.prometheus.enabled}
+              robusta:
+                enabled: ${schema.spec.toolsets.robusta.enabled}
+            mcp_servers:
+              {}
+          model_list.yaml: |
+            {}
+
+    # ConfigMap for Holmes configuration
+    - id: configconfigmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: holmes-config
+          namespace: ${schema.spec.namespace}
+        data:
+          config.yaml: |
+            # HolmesGPT configuration file
+            # This file is mounted at /root/.holmes/config.yaml
+            #
+            # IMPORTANT: HolmesGPT only loads runbooks listed here explicitly.
+            # No directory scanning or auto-discovery - each file must be listed.
+
+            # Custom runbooks - explicit paths required
+            custom_runbooks:
+              - /etc/holmes/runbooks/external-dns.yaml
+              - /etc/holmes/runbooks/cert-manager.yaml
+
+            # You can also add other config options here:
+            # model: "gpt-4o"
+            # fast_model: "gpt-4o-mini"
+            # max_steps: 40
+
+    # ConfigMap for custom runbooks
+    - id: runbooksconfigmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: holmes-custom-runbooks
+          namespace: ${schema.spec.namespace}
+        data:
+          external-dns.yaml: |
+            runbooks:
+              - match:
+                  issue_name: "(ExternalDNS)|(external-dns)|(DNS.*not.*creat)|(DNS.*record)"
+                instructions: >
+                  Diagnose why external-dns is not creating DNS records for Services/Ingresses.
+
+                  1. Check external-dns pod status: kubectl get pods -n external-dns (or kube-system)
+                  2. Review external-dns logs for errors: kubectl logs -n external-dns deploy/external-dns --tail=200
+                     Look for: AccessDenied, Forbidden, 401, 403 (auth issues), Throttling (rate limits),
+                     "no endpoints" (no matching resources), "Skipping" (filtered out)
+                  3. Verify Services have annotation: external-dns.alpha.kubernetes.io/hostname
+                  4. For LoadBalancer Services, verify external IP is assigned (not <pending>)
+                  5. Check deployment args for --domain-filter restrictions
+                  6. Verify DNS provider credentials Secret exists and is correctly mounted
+                  7. Check for TXT ownership conflicts with other external-dns instances
+
+                  For auth errors:
+                  - AWS Route53: verify IAM role has route53:ChangeResourceRecordSets
+                  - Azure DNS: verify managed identity has "DNS Zone Contributor" role
+                  - CloudFlare: verify API token has Zone:DNS:Edit permission
+          cert-manager.yaml: |
+            runbooks:
+              - match:
+                  issue_name: "(Certificate)|(cert-manager)|(TLS)|(ACME)|(Let.*Encrypt)"
+                instructions: >
+                  Diagnose why cert-manager is not issuing certificates.
+
+                  1. Check cert-manager pods: kubectl get pods -n cert-manager
+                     All three should be Running: controller, webhook, cainjector
+                  2. Get Certificate status: kubectl describe certificate <name> -n <namespace>
+                     Check Ready condition and any error messages
+                  3. Find CertificateRequest: kubectl get certificaterequest -n <namespace>
+                     Check if it exists and its status
+                  4. Check Issuer/ClusterIssuer: kubectl describe clusterissuer <name>
+                     Verify Ready=True condition
+                  5. For ACME, check Order: kubectl get order -n <namespace>
+                     State should be "valid" or "ready"
+                  6. For ACME, check Challenge: kubectl get challenge -n <namespace>
+                     Look at state, type (HTTP-01/DNS-01), and reason
+                  7. Review cert-manager logs: kubectl logs -n cert-manager deploy/cert-manager
+
+                  For HTTP-01 failures:
+                  - Verify solver pod is running and ingress created
+                  - Check port 80 is accessible from internet
+                  - Test: curl http://<domain>/.well-known/acme-challenge/<token>
+
+                  For DNS-01 failures:
+                  - Check _acme-challenge TXT record: dig _acme-challenge.<domain> TXT
+                  - Verify DNS provider credentials and permissions
+
+                  For rate limiting (429 errors):
+                  - Use staging issuer for testing
+                  - Check https://letsencrypt.org/docs/rate-limits/
+                  - Wait for rate limit window to expire
+
+              - match:
+                  issue_name: "(webhook)|(cert-manager.*timeout)|(cert-manager.*connection)"
+                instructions: >
+                  Diagnose cert-manager webhook connectivity issues.
+
+                  1. Check webhook pod: kubectl get pods -n cert-manager -l app=webhook
+                  2. Check webhook logs: kubectl logs -n cert-manager deploy/cert-manager-webhook
+                  3. Verify service has endpoints: kubectl get endpoints -n cert-manager cert-manager-webhook
+                  4. Check webhook configurations exist:
+                     kubectl get validatingwebhookconfiguration cert-manager-webhook
+                     kubectl get mutatingwebhookconfiguration cert-manager-webhook
+                  5. Check for NetworkPolicies blocking API server to webhook
+                  6. If OOMKilled, increase webhook memory limits
+                  7. If caBundle is stale, restart cert-manager pods
+
+    # Deployment
+    - id: deployment
+      readyWhen:
+        - ${deployment.status.availableReplicas == deployment.spec.replicas}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${schema.spec.namespace}-${schema.spec.name}
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: ${schema.spec.name}
+        spec:
+          replicas: ${schema.spec.deployment.replicas}
+          revisionHistoryLimit: 10
+          selector:
+            matchLabels:
+              app: ${schema.spec.name}
+          template:
+            metadata:
+              labels:
+                app: ${schema.spec.name}
+                azure.workload.identity/use: "true"
+            spec:
+              serviceAccountName: ${schema.spec.namespace}-${schema.spec.name}-service-account
+              containers:
+                - name: holmes
+                  image: ${schema.spec.deployment.image}
+                  imagePullPolicy: Always
+                  command: ["python3", "-u", "server.py"]
+                  ports:
+                    - containerPort: 5050
+                      name: http
+                  livenessProbe:
+                    tcpSocket:
+                      port: 5050
+                    initialDelaySeconds: 60
+                    periodSeconds: 30
+                    timeoutSeconds: 5
+                    failureThreshold: 5
+                  readinessProbe:
+                    tcpSocket:
+                      port: 5050
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 5
+                  env:
+                    - name: LOG_LEVEL
+                      value: INFO
+                    - name: ENABLE_TELEMETRY
+                      value: "false"
+                    - name: OPENAI_API_KEY
+                      value: "sk-litellm-proxy"
+                    - name: OPENAI_API_BASE
+                      value: ${schema.spec.llm.litellmBaseUrl}
+                    - name: MODEL
+                      value: ${schema.spec.llm.model}
+                    - name: LITELLM_BASE_URL
+                      value: ${schema.spec.llm.litellmBaseUrl}
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["bash", "-c", "kill -SIGINT 1"]
+                  volumeMounts:
+                    - name: playbooks-config-secret
+                      mountPath: /etc/robusta/config
+                    - name: custom-toolsets-configmap
+                      mountPath: /etc/holmes/config
+                    - name: custom-runbooks
+                      mountPath: /etc/holmes/runbooks
+                      readOnly: true
+                    - name: holmes-config
+                      mountPath: /root/.holmes/config.yaml
+                      subPath: config.yaml
+                      readOnly: true
+                  resources:
+                    requests:
+                      cpu: ${schema.spec.deployment.resources.cpuRequest}
+                      memory: ${schema.spec.deployment.resources.memoryRequest}
+                    limits:
+                      memory: ${schema.spec.deployment.resources.memoryLimit}
+              volumes:
+                - name: playbooks-config-secret
+                  secret:
+                    secretName: robusta-playbooks-config-secret
+                    optional: true
+                - name: custom-toolsets-configmap
+                  configMap:
+                    name: custom-toolsets-configmap
+                    optional: true
+                - name: custom-runbooks
+                  configMap:
+                    name: holmes-custom-runbooks
+                - name: holmes-config
+                  configMap:
+                    name: holmes-config
+
+    # Service
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${schema.spec.namespace}-${schema.spec.name}
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: ${schema.spec.name}
+        spec:
+          selector:
+            app: ${schema.spec.name}
+          ports:
+            - name: http
+              protocol: TCP
+              port: 80
+              targetPort: 5050

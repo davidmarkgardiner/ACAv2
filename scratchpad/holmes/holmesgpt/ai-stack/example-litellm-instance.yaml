@@ -1,0 +1,53 @@
+---
+# Example LiteLLM Instance using KRO
+# Deploy this after the ResourceGraphDefinition is applied
+apiVersion: kro.run/v1alpha1
+kind: UK8sLiteLLM
+metadata:
+  name: litellm-prod
+  namespace: default
+spec:
+  # Azure OpenAI Configuration
+  clientId: "00000000-0000-0000-0000-000000000000"  # Replace with your UAMI Client ID
+  azureOpenAIEndpoint: "https://your-aoai.openai.azure.com"
+  azureOpenAIDeployment: "gpt-4o-mini"
+  azureOpenAIApiVersion: "2024-10-21"
+
+  # Workload Identity Configuration
+  identityName: "uami-litellm"
+  identityNamespace: "azure-system"
+
+  # LiteLLM Configuration
+  namespace: "litellm"
+  replicas: 2
+  imageTag: "v1.55.1-stable"
+  masterKeySecretName: "litellm-master-key"
+
+  # MCP Server Integration - Connect to AKS-MCP
+  # Format: name:url,name2:url2
+  mcpServers: "aks_mcp:http://aks-mcp.aks-mcp.svc.cluster.local:8000/mcp"
+  # Aliases for natural language references
+  mcpAliases: "aks:aks_mcp,k8s:aks_mcp,kubectl:aks_mcp"
+
+  # Resource Configuration
+  cpuRequest: "100m"
+  cpuLimit: "1000m"
+  memoryRequest: "256Mi"
+  memoryLimit: "1Gi"
+
+  # Networking (optional - for Istio ingress)
+  domain: "litellm.example.com"
+  port: 4000
+
+  # Logging
+  logLevel: "INFO"
+---
+# Secret for LiteLLM Master Key (create before applying instance)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-master-key
+  namespace: litellm
+type: Opaque
+stringData:
+  master-key: "sk-your-secure-master-key-here"

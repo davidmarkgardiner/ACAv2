@@ -1,0 +1,40 @@
+apiVersion: kro.run/v1alpha1
+kind: Holmes
+metadata:
+  name: holmes-test
+  namespace: kro
+spec:
+  name: holmes
+  namespace: holmes-test
+  # Azure Workload Identity
+  azure:
+    clientId: ""
+  # LLM Configuration - via LiteLLM gateway
+  llm:
+    model: gpt-4o
+    litellmBaseUrl: http://litellm.litellm.svc.cluster.local:4000
+  # Deployment Configuration
+  deployment:
+    image: robustadev/holmes:0.18.2
+    replicas: 1
+    resources:
+      cpuRequest: "100m"
+      memoryRequest: "1Gi"
+      memoryLimit: "2Gi"
+  # Feature Toggles
+  toolsets:
+    kubernetes:
+      enabled: "true"
+    logs:
+      enabled: "true"
+    robusta:
+      enabled: "false"
+    internet:
+      enabled: "true"
+    prometheus:
+      enabled: "false"
+  # MCP Server (disabled)
+  mcp:
+    enabled: false
+    url: "http://localhost:8000/sse"
+    description: "MCP server"

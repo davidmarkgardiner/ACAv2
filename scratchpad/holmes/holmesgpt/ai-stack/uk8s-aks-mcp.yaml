@@ -1,0 +1,253 @@
+---
+# ResourceGraphDefinition for AKS-MCP Server Deployment
+# Deploys the Azure Kubernetes Service Model Context Protocol (MCP) server
+# for AI-assisted Kubernetes operations via Claude, GitHub Copilot, etc.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: uk8saksmcp.kro.run
+  labels:
+    kro.run/type: infrastructure
+    kro.run/category: ai-operations
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: UK8SAksMcp
+    spec:
+      clientId: string | required=true
+      accessLevel: string | default="readonly"
+      domain: string | default=""
+      namespace: string | default="aks-mcp"
+      replicas: integer | default=2 minimum=1 maximum=10
+      imageTag: string | default="v0.0.12"
+      # Workload Identity / Federated Credential
+      identityName: string | required=true
+      identityNamespace: string | default="azure-system"
+      oidcConfigMapName: string | default="aks-oidc-config"
+      oidcConfigMapKey: string | default="issuer-url"
+      cpuRequest: string | default="100m"
+      cpuLimit: string | default="500m"
+      memoryRequest: string | default="128Mi"
+      memoryLimit: string | default="512Mi"
+      additionalTools: string | default=""
+      allowNamespaces: string | default=""
+      logLevel: string | default="info"
+      timeout: integer | default=600
+
+  resources:
+    - id: mcpNamespace
+      template:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ${schema.spec.namespace}
+          labels:
+            kro.run/component: aks-mcp-namespace
+
+    - id: serviceAccount
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: aks-mcp
+          namespace: ${schema.spec.namespace}
+          labels:
+            azure.workload.identity/use: "true"
+          annotations:
+            azure.workload.identity/client-id: ${schema.spec.clientId}
+
+    - id: federatedCredential
+      template:
+        apiVersion: managedidentity.azure.com/v1api20230131
+        kind: FederatedIdentityCredential
+        metadata:
+          name: aks-mcp-fedcred
+          namespace: ${schema.spec.identityNamespace}
+          labels:
+            kro.run/component: aks-mcp-fedcred
+        spec:
+          azureName: federated_workload_identity_aks_mcp
+          owner:
+            name: ${schema.spec.identityName}
+          audiences:
+            - api://AzureADTokenExchange
+          issuerFromConfig:
+            name: ${schema.spec.oidcConfigMapName}
+            key: ${schema.spec.oidcConfigMapKey}
+          subject: system:serviceaccount:${schema.spec.namespace}:aks-mcp
+
+    - id: clusterRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: aks-mcp
+        rules:
+          - apiGroups: [""]
+            resources: ["pods", "pods/log", "services", "endpoints", "configmaps", "secrets", "namespaces", "nodes", "events", "persistentvolumeclaims", "persistentvolumes", "serviceaccounts"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["apps"]
+            resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["batch"]
+            resources: ["jobs", "cronjobs"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["networking.k8s.io"]
+            resources: ["ingresses", "networkpolicies"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["autoscaling"]
+            resources: ["horizontalpodautoscalers"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["policy"]
+            resources: ["poddisruptionbudgets"]
+            verbs: ["get", "list", "watch"]
+
+    - id: clusterRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: aks-mcp
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: aks-mcp
+        subjects:
+          - kind: ServiceAccount
+            name: aks-mcp
+            namespace: ${schema.spec.namespace}
+
+    - id: configMap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: aks-mcp-config
+          namespace: ${schema.spec.namespace}
+        data:
+          ACCESS_LEVEL: ${schema.spec.accessLevel}
+          TRANSPORT: "streamable-http"
+          HOST: "0.0.0.0"
+          PORT: "8000"
+          TIMEOUT: "600"
+          LOG_LEVEL: ${schema.spec.logLevel}
+          ADDITIONAL_TOOLS: ${schema.spec.additionalTools}
+          ALLOW_NAMESPACES: ${schema.spec.allowNamespaces}
+
+    - id: deployment
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: aks-mcp
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: aks-mcp
+        spec:
+          replicas: ${schema.spec.replicas}
+          selector:
+            matchLabels:
+              app: aks-mcp
+          template:
+            metadata:
+              labels:
+                app: aks-mcp
+                azure.workload.identity/use: "true"
+            spec:
+              serviceAccountName: aks-mcp
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65532
+                runAsGroup: 65532
+                fsGroup: 65532
+              containers:
+                - name: aks-mcp
+                  image: ghcr.io/azure/aks-mcp:${schema.spec.imageTag}
+                  imagePullPolicy: IfNotPresent
+                  args:
+                    - --access-level=$(ACCESS_LEVEL)
+                    - --transport=$(TRANSPORT)
+                    - --host=$(HOST)
+                    - --port=$(PORT)
+                    - --timeout=$(TIMEOUT)
+                    - --log-level=$(LOG_LEVEL)
+                  envFrom:
+                    - configMapRef:
+                        name: aks-mcp-config
+                  ports:
+                    - name: http
+                      containerPort: 8000
+                      protocol: TCP
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    runAsNonRoot: true
+                    capabilities:
+                      drop:
+                        - ALL
+                  resources:
+                    requests:
+                      cpu: ${schema.spec.cpuRequest}
+                      memory: ${schema.spec.memoryRequest}
+                    limits:
+                      cpu: ${schema.spec.cpuLimit}
+                      memory: ${schema.spec.memoryLimit}
+                  livenessProbe:
+                    tcpSocket:
+                      port: 8000
+                    initialDelaySeconds: 10
+                    periodSeconds: 30
+                  readinessProbe:
+                    tcpSocket:
+                      port: 8000
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                  volumeMounts:
+                    - name: tmp
+                      mountPath: /tmp
+                    - name: azure-cli-cache
+                      mountPath: /home/mcp/.azure
+                    - name: kube-cache
+                      mountPath: /home/mcp/.kube
+              volumes:
+                - name: tmp
+                  emptyDir: {}
+                - name: azure-cli-cache
+                  emptyDir: {}
+                - name: kube-cache
+                  emptyDir: {}
+
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: aks-mcp
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: aks-mcp
+        spec:
+          type: ClusterIP
+          ports:
+            - name: http
+              port: 8000
+              targetPort: http
+              protocol: TCP
+          selector:
+            app: aks-mcp
+
+    - id: pdb
+      template:
+        apiVersion: policy/v1
+        kind: PodDisruptionBudget
+        metadata:
+          name: aks-mcp
+          namespace: ${schema.spec.namespace}
+        spec:
+          minAvailable: 1
+          selector:
+            matchLabels:
+              app: aks-mcp

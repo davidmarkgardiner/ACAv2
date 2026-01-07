@@ -1,0 +1,40 @@
+apiVersion: kro.run/v1alpha1
+kind: Holmes
+metadata:
+  name: holmesgpt
+  namespace: kro
+spec:
+  name: holmes
+  namespace: holmesgpt
+  # Azure Workload Identity - Replace with your UAMI client ID if needed
+  azure:
+    clientId: ""
+  # LLM Configuration - via LiteLLM gateway (handles Azure OpenAI auth via UAMI)
+  llm:
+    model: gpt-4o
+    litellmBaseUrl: http://litellm.litellm.svc.cluster.local:4000
+  # Deployment Configuration
+  deployment:
+    image: robustadev/holmes:0.18.2
+    replicas: 1
+    resources:
+      cpuRequest: "100m"
+      memoryRequest: "1Gi"
+      memoryLimit: "2Gi"
+  # Feature Toggles - matches live deployment
+  toolsets:
+    kubernetes:
+      enabled: "true"
+    logs:
+      enabled: "true"
+    robusta:
+      enabled: "false"
+    internet:
+      enabled: "true"
+    prometheus:
+      enabled: "false"
+  # MCP Server (disabled by default)
+  mcp:
+    enabled: false
+    url: "http://localhost:8000/sse"
+    description: "Azure Kubernetes Service MCP server"
