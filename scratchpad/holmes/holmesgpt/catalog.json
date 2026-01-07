@@ -1,0 +1,75 @@
+{
+  "catalog": [
+    {
+      "id": "external-dns",
+      "update_date": "2026-01-07",
+      "description": "Diagnose External DNS issues with Azure DNS zones, Workload Identity, and UAMI role assignments",
+      "link": "runbooks/external-dns.yaml",
+      "tags": ["azure", "dns", "workload-identity", "external-dns"],
+      "severity": "medium"
+    },
+    {
+      "id": "cert-manager",
+      "update_date": "2026-01-07",
+      "description": "Troubleshoot cert-manager certificate issuance on AKS with Istio/AGIC and DNS-01 challenges",
+      "link": "runbooks/cert-manager.yaml",
+      "tags": ["azure", "tls", "certificates", "acme", "istio", "cert-manager"],
+      "severity": "high"
+    },
+    {
+      "id": "cert-manager-webhook",
+      "update_date": "2026-01-07",
+      "description": "Diagnose cert-manager webhook connectivity and admission issues on AKS",
+      "link": "runbooks/cert-manager.yaml",
+      "tags": ["webhook", "admission", "cert-manager"],
+      "severity": "high"
+    },
+    {
+      "id": "external-secrets",
+      "update_date": "2026-01-07",
+      "description": "Troubleshoot External Secrets Operator with Azure Key Vault and Workload Identity",
+      "link": "runbooks/external-secrets.yaml",
+      "tags": ["azure", "keyvault", "secrets", "workload-identity", "eso"],
+      "severity": "high"
+    },
+    {
+      "id": "kyverno-policy",
+      "update_date": "2026-01-07",
+      "description": "Debug Kyverno policy enforcement, admission denials, and policy violations",
+      "link": "runbooks/kyverno.yaml",
+      "tags": ["kyverno", "policy", "admission", "security"],
+      "severity": "medium"
+    },
+    {
+      "id": "kyverno-exception",
+      "update_date": "2026-01-07",
+      "description": "Create PolicyExceptions to exempt resources from Kyverno policies",
+      "link": "runbooks/kyverno.yaml",
+      "tags": ["kyverno", "exception", "policy"],
+      "severity": "low"
+    },
+    {
+      "id": "kro-instance",
+      "update_date": "2026-01-07",
+      "description": "Diagnose Kubernetes Resource Orchestrator (KRO) instance and child resource issues",
+      "link": "runbooks/kro.yaml",
+      "tags": ["kro", "resourcegraph", "orchestration"],
+      "severity": "medium"
+    },
+    {
+      "id": "kro-schema",
+      "update_date": "2026-01-07",
+      "description": "Debug ResourceGraphDefinition schema validation and template errors",
+      "link": "runbooks/kro.yaml",
+      "tags": ["kro", "schema", "validation"],
+      "severity": "medium"
+    }
+  ],
+  "metadata": {
+    "name": "AKS Troubleshooting Runbooks",
+    "version": "1.0.0",
+    "description": "Custom runbooks for Azure Kubernetes Service (AKS) troubleshooting with Holmes",
+    "maintainer": "platform-team",
+    "last_updated": "2026-01-07"
+  }
+}
