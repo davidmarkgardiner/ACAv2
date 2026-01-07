@@ -1,14 +1,35 @@
-# Holmes + AKS-MCP Demo Scenarios
+# Holmes + AKS-MCP Auto-Remediation Demo Scenarios
 
-Interactive demos where you break something and Holmes/AKS-MCP diagnoses and fixes it.
+Interactive demos where you break something and Holmes/AKS-MCP **automatically diagnoses AND fixes it**.
+
+## How Auto-Remediation Works
+
+Holmes is configured with:
+1. **MCP Integration**: Connected to AKS-MCP server for kubectl/helm/az CLI tools
+2. **Built-in toolsets disabled**: Forces Holmes to use AKS-MCP for all operations
+3. **llm_instructions**: Tells Holmes to EXECUTE fixes, not just diagnose
+4. **Custom runbooks**: Step-by-step remediation guidance with fix commands
+
+When you ask Holmes to investigate, it will:
+1. **Diagnose** using `kubectl_get`, `kubectl_describe`, `kubectl_logs`
+2. **Identify** the root cause
+3. **EXECUTE** the fix using `kubectl_patch`, `kubectl_set`, `kubectl_rollout`
+4. **Verify** the fix worked
 
 ## Prerequisites
 
-- Holmes deployed and running
-- AKS-MCP deployed (optional, for az CLI commands)
+- Holmes deployed with MCP enabled (`instance-updated.yaml`)
+- AKS-MCP deployed and accessible
 - LiteLLM gateway running
 
-## Scenario 1: OOMKilled Pod (Easy)
+```bash
+# Port-forward to Holmes
+kubectl port-forward -n holmesgpt svc/holmesgpt-holmes 5050:80
+```
+
+---
+
+## Scenario 1: OOMKilled Pod (Easy) - AUTO-FIX
 
 **Break it:**
 ```bash
@@ -44,26 +65,38 @@ EOF
 
 # Wait for it to crash
 kubectl get pods -n demo -w
+# Should show OOMKilled or CrashLoopBackOff
 ```
 
-**Ask Holmes:**
+**Ask Holmes to AUTO-FIX:**
 ```bash
 curl -X POST http://localhost:5050/api/investigate \
   -H "Content-Type: application/json" \
   -d '{
     "source": "demo",
-    "title": "Pod keeps restarting",
-    "description": "The memory-hog pod in demo namespace keeps crashing with OOMKilled",
+    "title": "Pod keeps restarting - please fix it",
+    "description": "The memory-hog pod in demo namespace keeps crashing with OOMKilled. Diagnose and fix the issue.",
     "subject": {"name": "memory-hog", "namespace": "demo", "kind": "Deployment"},
     "context": {}
   }'
 ```
 
-**Expected diagnosis:** Pod is being OOMKilled because memory limit (128Mi) is too low for workload (500M).
+**Expected Holmes Actions:**
+1. `kubectl_get pods -n demo` - See OOMKilled status
+2. `kubectl_describe pod memory-hog-xxx -n demo` - See memory limit 128Mi
+3. `kubectl_logs memory-hog-xxx -n demo` - See stress trying to use 500M
+4. **AUTO-FIX**: `kubectl_set resources deployment/memory-hog -n demo --limits=memory=1Gi`
+5. `kubectl_rollout status deployment/memory-hog -n demo` - Verify fix
 
-**Fix:**
+**Verify Auto-Remediation:**
 ```bash
-kubectl set resources deployment/memory-hog -n demo --limits=memory=1Gi
+# Check if Holmes increased the memory limit
+kubectl get deployment memory-hog -n demo -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}'
+# Should now show "1Gi" instead of "128Mi"
+
+# Check pod is running
+kubectl get pods -n demo
+# Should show Running, not OOMKilled
 ```
 
 **Cleanup:**
@@ -73,7 +106,7 @@ kubectl delete namespace demo
 
 ---
 
-## Scenario 2: ImagePullBackOff (Medium)
+## Scenario 2: ImagePullBackOff (Medium) - AUTO-FIX
 
 **Break it:**
 ```bash
@@ -103,26 +136,38 @@ EOF
 
 # Watch it fail
 kubectl get pods -n demo -w
+# Should show ImagePullBackOff
 ```
 
-**Ask Holmes:**
+**Ask Holmes to AUTO-FIX:**
 ```bash
 curl -X POST http://localhost:5050/api/investigate \
   -H "Content-Type: application/json" \
   -d '{
     "source": "demo",
-    "title": "Pod stuck in ImagePullBackOff",
-    "description": "Deployment bad-image in demo namespace cannot start",
+    "title": "Pod stuck in ImagePullBackOff - fix it",
+    "description": "Deployment bad-image in demo namespace cannot start. Diagnose and fix the issue.",
     "subject": {"name": "bad-image", "namespace": "demo", "kind": "Deployment"},
     "context": {}
   }'
 ```
 
-**Expected diagnosis:** Image tag `this-tag-does-not-exist-12345` does not exist in registry.
+**Expected Holmes Actions:**
+1. `kubectl_get pods -n demo` - See ImagePullBackOff
+2. `kubectl_describe pod bad-image-xxx -n demo` - See image pull error
+3. `kubectl_events -n demo` - See "manifest unknown" error
+4. **AUTO-FIX**: `kubectl_set image deployment/bad-image -n demo app=nginx:latest`
+5. `kubectl_rollout status deployment/bad-image -n demo` - Verify fix
 
-**Fix:**
+**Verify Auto-Remediation:**
 ```bash
-kubectl set image deployment/bad-image -n demo app=nginx:latest
+# Check if Holmes updated the image
+kubectl get deployment bad-image -n demo -o jsonpath='{.spec.template.spec.containers[0].image}'
+# Should now show "nginx:latest"
+
+# Check pod is running
+kubectl get pods -n demo
+# Should show Running, not ImagePullBackOff
 ```
 
 **Cleanup:**
@@ -132,13 +177,13 @@ kubectl delete namespace demo
 
 ---
 
-## Scenario 3: Service Misconfiguration (Medium)
+## Scenario 3: Service Misconfiguration (Medium) - AUTO-FIX
 
 **Break it:**
 ```bash
 kubectl create namespace demo
 
-# Deploy nginx
+# Deploy nginx with WRONG service selector
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -174,28 +219,43 @@ spec:
     targetPort: 80
 EOF
 
-# Test - this will fail
-kubectl run curl --rm -it --image=curlimages/curl --restart=Never -n demo -- curl -s --max-time 5 http://web
+# Test - this will fail/timeout
+kubectl run curl --rm -it --image=curlimages/curl --restart=Never -n demo -- curl -s --max-time 5 http://web || echo "Connection failed as expected"
 ```
 
-**Ask Holmes:**
+**Ask Holmes to AUTO-FIX:**
 ```bash
 curl -X POST http://localhost:5050/api/investigate \
   -H "Content-Type: application/json" \
   -d '{
     "source": "demo",
-    "title": "Service not working",
-    "description": "Cannot connect to web service in demo namespace, curl times out",
+    "title": "Service not working - fix it",
+    "description": "Cannot connect to web service in demo namespace, curl times out. Diagnose and fix.",
     "subject": {"name": "web", "namespace": "demo", "kind": "Service"},
     "context": {}
   }'
 ```
 
-**Expected diagnosis:** Service selector `app: wrong-label` doesn't match any pods. Pods have label `app: web`.
+**Expected Holmes Actions:**
+1. `kubectl_get svc web -n demo -o yaml` - See selector `app: wrong-label`
+2. `kubectl_get pods -n demo --show-labels` - See pods have `app: web`
+3. `kubectl_get endpoints web -n demo` - See no endpoints
+4. **AUTO-FIX**: `kubectl_patch svc web -n demo -p '{"spec":{"selector":{"app":"web"}}}'`
+5. `kubectl_get endpoints web -n demo` - Verify endpoints populated
 
-**Fix:**
+**Verify Auto-Remediation:**
 ```bash
-kubectl patch svc web -n demo -p '{"spec":{"selector":{"app":"web"}}}'
+# Check if Holmes fixed the selector
+kubectl get svc web -n demo -o jsonpath='{.spec.selector.app}'
+# Should now show "web" instead of "wrong-label"
+
+# Check endpoints are populated
+kubectl get endpoints web -n demo
+# Should show pod IPs
+
+# Test connectivity
+kubectl run curl --rm -it --image=curlimages/curl --restart=Never -n demo -- curl -s http://web
+# Should return nginx welcome page
 ```
 
 **Cleanup:**
@@ -205,13 +265,13 @@ kubectl delete namespace demo
 
 ---
 
-## Scenario 4: CrashLoopBackOff - Missing ConfigMap (Hard)
+## Scenario 4: CrashLoopBackOff - Missing ConfigMap (Hard) - AUTO-FIX
 
 **Break it:**
 ```bash
 kubectl create namespace demo
 
-# Deploy app that requires a ConfigMap
+# Deploy app that requires a ConfigMap that doesn't exist
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -243,27 +303,39 @@ EOF
 
 # Watch it fail
 kubectl get pods -n demo -w
+# Should show CreateContainerConfigError or similar
 ```
 
-**Ask Holmes:**
+**Ask Holmes to AUTO-FIX:**
 ```bash
 curl -X POST http://localhost:5050/api/investigate \
   -H "Content-Type: application/json" \
   -d '{
     "source": "demo",
-    "title": "Pod cannot start",
-    "description": "config-app deployment pods are stuck and cannot start",
+    "title": "Pod cannot start - fix it",
+    "description": "config-app deployment pods are stuck and cannot start. Diagnose and fix the issue.",
     "subject": {"name": "config-app", "namespace": "demo", "kind": "Deployment"},
     "context": {}
   }'
 ```
 
-**Expected diagnosis:** Pod references ConfigMap `app-settings` which doesn't exist.
+**Expected Holmes Actions:**
+1. `kubectl_get pods -n demo` - See CreateContainerConfigError
+2. `kubectl_describe pod config-app-xxx -n demo` - See ConfigMap not found
+3. `kubectl_get configmap -n demo` - Confirm app-settings missing
+4. **AUTO-FIX**: `kubectl_create configmap app-settings -n demo --from-literal=settings.conf="# Default config"`
+5. `kubectl_rollout restart deployment/config-app -n demo` - Trigger new pod
+6. `kubectl_rollout status deployment/config-app -n demo` - Verify running
 
-**Fix:**
+**Verify Auto-Remediation:**
 ```bash
-kubectl create configmap app-settings -n demo --from-literal=settings.conf="debug=true"
-kubectl rollout restart deployment/config-app -n demo
+# Check if Holmes created the ConfigMap
+kubectl get configmap app-settings -n demo
+# Should exist
+
+# Check pod is running
+kubectl get pods -n demo
+# Should show Running
 ```
 
 **Cleanup:**
@@ -273,7 +345,85 @@ kubectl delete namespace demo
 
 ---
 
-## Scenario 5: ResourceQuota Exceeded (Hard)
+## Scenario 5: Stuck Deployment - Rollback (Medium) - AUTO-FIX
+
+**Break it:**
+```bash
+kubectl create namespace demo
+
+# Deploy working version first
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.21
+EOF
+
+# Wait for it to be ready
+kubectl rollout status deployment/myapp -n demo
+
+# Now deploy bad version
+kubectl set image deployment/myapp -n demo app=nginx:nonexistent-bad-tag
+
+# Watch it get stuck
+kubectl rollout status deployment/myapp -n demo --timeout=30s || echo "Rollout stuck as expected"
+```
+
+**Ask Holmes to AUTO-FIX:**
+```bash
+curl -X POST http://localhost:5050/api/investigate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "demo",
+    "title": "Deployment stuck during rollout - fix it",
+    "description": "myapp deployment is stuck and not progressing. Rollback if needed.",
+    "subject": {"name": "myapp", "namespace": "demo", "kind": "Deployment"},
+    "context": {}
+  }'
+```
+
+**Expected Holmes Actions:**
+1. `kubectl_rollout status deployment/myapp -n demo` - See stuck
+2. `kubectl_get pods -n demo` - See new pods in ImagePullBackOff
+3. `kubectl_rollout history deployment/myapp -n demo` - See previous versions
+4. **AUTO-FIX**: `kubectl_rollout undo deployment/myapp -n demo`
+5. `kubectl_rollout status deployment/myapp -n demo` - Verify rollback complete
+
+**Verify Auto-Remediation:**
+```bash
+# Check if Holmes rolled back
+kubectl get deployment myapp -n demo -o jsonpath='{.spec.template.spec.containers[0].image}'
+# Should show "nginx:1.21" (rolled back)
+
+# Check deployment is healthy
+kubectl rollout status deployment/myapp -n demo
+# Should complete successfully
+```
+
+**Cleanup:**
+```bash
+kubectl delete namespace demo
+```
+
+---
+
+## Scenario 6: ResourceQuota Exceeded (Hard) - DIAGNOSIS ONLY
+
+**Note:** This scenario requires human decision - Holmes will diagnose but suggest options.
 
 **Break it:**
 ```bash
@@ -337,9 +487,13 @@ curl -X POST http://localhost:5050/api/investigate \
   }'
 ```
 
-**Expected diagnosis:** ResourceQuota limits pods to 2 and CPU to 500m. Cannot create more pods.
+**Expected Holmes Response:**
+- Diagnoses ResourceQuota blocking new pods
+- **Suggests options** (requires human decision):
+  - Option 1: Increase quota `kubectl patch resourcequota demo-quota...`
+  - Option 2: Reduce resource requests
 
-**Fix options:**
+**Manual Fix (choose one):**
 ```bash
 # Option 1: Increase quota
 kubectl patch resourcequota demo-quota -n demo -p '{"spec":{"hard":{"pods":"10","requests.cpu":"2"}}}'
@@ -357,25 +511,21 @@ kubectl delete namespace demo
 
 ## Testing Holmes API
 
-### Port-forward to Holmes:
-```bash
-kubectl port-forward -n holmesgpt svc/holmesgpt-holmes 5050:80
-```
-
-### Simple health check:
+### Health check:
 ```bash
 curl http://localhost:5050/healthz
+# {"status":"healthy"}
 ```
 
-### Interactive investigation:
+### Check MCP tools available:
 ```bash
 curl -X POST http://localhost:5050/api/investigate \
   -H "Content-Type: application/json" \
   -d '{
-    "source": "manual",
-    "title": "What pods are unhealthy?",
-    "description": "Find any pods that are not running correctly in the cluster",
-    "subject": {"name": "cluster", "namespace": "default", "kind": "Cluster"},
+    "source": "test",
+    "title": "List available tools",
+    "description": "What kubectl commands can you run?",
+    "subject": {"name": "cluster", "namespace": "default"},
     "context": {}
   }'
 ```
@@ -386,8 +536,8 @@ curl -N -X POST http://localhost:5050/api/stream/investigate \
   -H "Content-Type: application/json" \
   -d '{
     "source": "manual",
-    "title": "Cluster health check",
-    "description": "Check overall cluster health and report any issues",
+    "title": "Cluster health check - fix any issues",
+    "description": "Check overall cluster health and automatically fix any issues found",
     "subject": {"name": "cluster", "namespace": "default"},
     "context": {}
   }'
@@ -395,7 +545,9 @@ curl -N -X POST http://localhost:5050/api/stream/investigate \
 
 ---
 
-## Scenario 6: Kyverno Policy Blocking Deployment (Medium)
+## Scenario 7: Kyverno Policy Blocking (Medium) - DIAGNOSIS ONLY
+
+**Note:** Policy violations require human decision on proper labels.
 
 **Break it:**
 ```bash
@@ -426,7 +578,7 @@ spec:
             team: "?*"
 EOF
 
-# Try to deploy without the required label
+# Try to deploy without the required label - will be DENIED
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -447,7 +599,7 @@ spec:
       - name: nginx
         image: nginx:latest
 EOF
-# This will be DENIED by Kyverno!
+# Error: admission webhook denied the request
 ```
 
 **Ask Holmes:**
@@ -457,15 +609,18 @@ curl -X POST http://localhost:5050/api/investigate \
   -d '{
     "source": "demo",
     "title": "Deployment blocked by admission webhook",
-    "description": "Cannot create deployment no-label-app in demo namespace, admission webhook denied",
+    "description": "Cannot create deployment no-label-app in demo namespace",
     "subject": {"name": "no-label-app", "namespace": "demo", "kind": "Deployment"},
     "context": {}
   }'
 ```
 
-**Expected diagnosis:** Kyverno policy `require-team-label` is blocking deployment due to missing `team` label.
+**Expected Holmes Response:**
+- Identifies Kyverno policy `require-team-label` blocking deployment
+- Explains required `team` label
+- Suggests adding label to deployment
 
-**Fix:**
+**Manual Fix:**
 ```bash
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
@@ -500,11 +655,11 @@ kubectl delete namespace demo
 
 ---
 
-## Scenario 7: KRO Instance Stuck (Hard)
+## Scenario 8: KRO Instance Stuck (Hard) - AUTO-FIX
 
 **Break it:**
 ```bash
-# Apply a ResourceGraphDefinition with a bad readyWhen expression
+# Apply a ResourceGraphDefinition with a bad image
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
 kind: ResourceGraphDefinition
@@ -527,9 +682,6 @@ spec:
         metadata:
           name: \${schema.spec.namespace}
     - id: deployment
-      readyWhen:
-        # This will fail because status.availableReplicas doesn't exist initially
-        - \${deployment.status.availableReplicas == 1}
       template:
         apiVersion: apps/v1
         kind: Deployment
@@ -551,6 +703,9 @@ spec:
                 image: nginx:nonexistent-tag-12345  # Bad image!
 EOF
 
+# Wait for RGD to be ready
+sleep 5
+
 # Create an instance
 kubectl apply -f - <<EOF
 apiVersion: kro.run/v1alpha1
@@ -563,32 +718,40 @@ spec:
   namespace: demo
 EOF
 
-# Check status - will be stuck
-kubectl get demoapp -n kro
-kubectl get holmes my-demo -n kro -o jsonpath='{.status.conditions}' | jq .
+# Check status - deployment will be stuck
+sleep 10
+kubectl get pods -n demo
 ```
 
-**Ask Holmes:**
+**Ask Holmes to AUTO-FIX:**
 ```bash
 curl -X POST http://localhost:5050/api/investigate \
   -H "Content-Type: application/json" \
   -d '{
     "source": "demo",
-    "title": "KRO instance not ready",
-    "description": "DemoApp my-demo in kro namespace is stuck in ERROR state",
+    "title": "KRO instance not ready - fix it",
+    "description": "DemoApp my-demo in kro namespace is stuck. Fix the underlying issue.",
     "subject": {"name": "my-demo", "namespace": "kro", "kind": "DemoApp"},
     "context": {}
   }'
 ```
 
-**Expected diagnosis:**
-1. readyWhen expression fails because deployment status fields don't exist yet
-2. Deployment pod has ImagePullBackOff due to bad image tag
+**Expected Holmes Actions:**
+1. `kubectl_get demoapp my-demo -n kro` - See not ready
+2. `kubectl_get pods -n demo` - See ImagePullBackOff
+3. `kubectl_describe pod -n demo` - See image pull error
+4. **AUTO-FIX**: `kubectl_set image deployment/demo -n demo nginx=nginx:latest`
+5. `kubectl_rollout status deployment/demo -n demo` - Verify running
 
-**Fix:**
+**Verify Auto-Remediation:**
 ```bash
-# Fix the deployment image
-kubectl set image deployment/demo -n demo nginx=nginx:latest
+# Check if Holmes fixed the image
+kubectl get deployment demo -n demo -o jsonpath='{.spec.template.spec.containers[0].image}'
+# Should show "nginx:latest"
+
+# Check KRO instance status
+kubectl get demoapp my-demo -n kro
+# Should show ready
 ```
 
 **Cleanup:**
@@ -600,76 +763,22 @@ kubectl delete namespace demo
 
 ---
 
-## Scenario 8: External Secrets Not Syncing (Hard - requires Key Vault)
+## Auto-Remediation Summary
 
-**Note:** This requires an Azure Key Vault and Workload Identity setup.
+| Scenario | Auto-Fix? | Holmes Action |
+|----------|-----------|---------------|
+| OOMKilled | ✅ Yes | `kubectl set resources --limits=memory=1Gi` |
+| ImagePullBackOff | ✅ Yes | `kubectl set image ... nginx:latest` |
+| Service Selector | ✅ Yes | `kubectl patch svc -p '{"spec":{"selector":...}}'` |
+| Missing ConfigMap | ✅ Yes | `kubectl create configmap ...` |
+| Stuck Rollout | ✅ Yes | `kubectl rollout undo` |
+| ResourceQuota | ❌ No | Suggests options (human decides) |
+| Kyverno Policy | ❌ No | Explains policy (human adds labels) |
+| KRO Instance | ✅ Yes | Fixes underlying deployment issue |
 
-**Break it:**
-```bash
-kubectl create namespace demo
-
-# Create ClusterSecretStore pointing to wrong vault
-kubectl apply -f - <<EOF
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: demo-vault
-spec:
-  provider:
-    azurekv:
-      authType: WorkloadIdentity
-      vaultUrl: "https://nonexistent-vault-12345.vault.azure.net"
-      serviceAccountRef:
-        name: external-secrets
-        namespace: external-secrets
-EOF
-
-# Create ExternalSecret
-kubectl apply -f - <<EOF
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: demo-secret
-  namespace: demo
-spec:
-  refreshInterval: 1m
-  secretStoreRef:
-    name: demo-vault
-    kind: ClusterSecretStore
-  target:
-    name: my-secret
-  data:
-  - secretKey: password
-    remoteRef:
-      key: my-password
-EOF
-
-# Check - will show SecretSyncedError
-kubectl get externalsecret -n demo
-kubectl describe externalsecret demo-secret -n demo
-```
-
-**Ask Holmes:**
-```bash
-curl -X POST http://localhost:5050/api/investigate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source": "demo",
-    "title": "ExternalSecret not syncing",
-    "description": "ExternalSecret demo-secret in demo namespace shows SecretSyncedError",
-    "subject": {"name": "demo-secret", "namespace": "demo", "kind": "ExternalSecret"},
-    "context": {}
-  }'
-```
-
-**Expected diagnosis:**
-- ClusterSecretStore references non-existent Key Vault
-- Or Workload Identity not configured for ESO ServiceAccount
-- Or UAMI missing Key Vault access policy
-
-**Cleanup:**
-```bash
-kubectl delete externalsecret demo-secret -n demo
-kubectl delete clustersecretstore demo-vault
-kubectl delete namespace demo
-```
+**Key Phrases to Trigger Auto-Fix:**
+- "fix it"
+- "fix the issue"
+- "diagnose and fix"
+- "please fix"
+- "automatically fix"

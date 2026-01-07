@@ -33,8 +33,8 @@ spec:
       enabled: "true"
     prometheus:
       enabled: "false"
-  # MCP Server (disabled by default)
+  # MCP Server - enables auto-remediation via AKS-MCP
   mcp:
-    enabled: false
-    url: "http://localhost:8000/sse"
-    description: "Azure Kubernetes Service MCP server"
+    enabled: true
+    url: "http://aks-mcp.aks-mcp.svc.cluster.local:8000/mcp"
+    mode: "streamable-http"

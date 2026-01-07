@@ -1,6 +1,60 @@
 {
   "catalog": [
     {
+      "id": "auto-remediation-oomkilled",
+      "update_date": "2026-01-07",
+      "description": "AUTO-FIX: Pod OOMKilled - automatically increase memory limits via AKS-MCP",
+      "link": "runbooks/auto-remediation.yaml",
+      "tags": ["auto-fix", "oomkilled", "memory", "mcp"],
+      "severity": "high",
+      "action": "remediate"
+    },
+    {
+      "id": "auto-remediation-imagepull",
+      "update_date": "2026-01-07",
+      "description": "AUTO-FIX: ImagePullBackOff - automatically update image tag via AKS-MCP",
+      "link": "runbooks/auto-remediation.yaml",
+      "tags": ["auto-fix", "imagepull", "container", "mcp"],
+      "severity": "high",
+      "action": "remediate"
+    },
+    {
+      "id": "auto-remediation-crashloop",
+      "update_date": "2026-01-07",
+      "description": "AUTO-FIX: CrashLoopBackOff - diagnose and restart deployment via AKS-MCP",
+      "link": "runbooks/auto-remediation.yaml",
+      "tags": ["auto-fix", "crashloop", "restart", "mcp"],
+      "severity": "high",
+      "action": "remediate"
+    },
+    {
+      "id": "auto-remediation-pending",
+      "update_date": "2026-01-07",
+      "description": "AUTO-FIX: Pending pods - fix scheduling issues via AKS-MCP",
+      "link": "runbooks/auto-remediation.yaml",
+      "tags": ["auto-fix", "pending", "scheduling", "mcp"],
+      "severity": "medium",
+      "action": "remediate"
+    },
+    {
+      "id": "auto-remediation-service",
+      "update_date": "2026-01-07",
+      "description": "AUTO-FIX: Service not working - fix selector mismatch via AKS-MCP",
+      "link": "runbooks/auto-remediation.yaml",
+      "tags": ["auto-fix", "service", "selector", "mcp"],
+      "severity": "medium",
+      "action": "remediate"
+    },
+    {
+      "id": "auto-remediation-rollout",
+      "update_date": "2026-01-07",
+      "description": "AUTO-FIX: Deployment stuck - rollback or restart via AKS-MCP",
+      "link": "runbooks/auto-remediation.yaml",
+      "tags": ["auto-fix", "deployment", "rollout", "mcp"],
+      "severity": "medium",
+      "action": "remediate"
+    },
+    {
       "id": "external-dns",
       "update_date": "2026-01-07",
       "description": "Diagnose External DNS issues with Azure DNS zones, Workload Identity, and UAMI role assignments",

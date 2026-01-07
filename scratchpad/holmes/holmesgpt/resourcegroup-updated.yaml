@@ -38,9 +38,9 @@ spec:
           enabled: string | default="false"
       # MCP Server Configuration
       mcp:
-        enabled: boolean | default=false
-        url: string | default=http://localhost:8000/sse
-        description: string | default=MCP server for cluster operations
+        enabled: boolean | default=true
+        url: string | default=http://aks-mcp.aks-mcp.svc.cluster.local:8000/mcp
+        mode: string | default=streamable-http
     status:
       availableReplicas: ${deployment.status.availableReplicas}
       deploymentConditions: ${deployment.status.conditions}
@@ -186,15 +186,53 @@ spec:
               internet:
                 enabled: ${schema.spec.toolsets.internet.enabled}
               kubernetes/core:
-                enabled: ${schema.spec.toolsets.kubernetes.enabled}
+                enabled: false
               kubernetes/logs:
-                enabled: ${schema.spec.toolsets.logs.enabled}
+                enabled: false
               prometheus/metrics:
                 enabled: ${schema.spec.toolsets.prometheus.enabled}
               robusta:
                 enabled: ${schema.spec.toolsets.robusta.enabled}
             mcp_servers:
-              {}
+              aks-mcp:
+                config:
+                  mode: ${schema.spec.mcp.mode}
+                  url: ${schema.spec.mcp.url}
+                description: "AKS MCP server with kubectl, helm, and az CLI for cluster operations and remediation"
+                llm_instructions: |
+                  You have access to AKS-MCP which provides kubectl, helm, and az CLI tools.
+
+                  IMPORTANT: You are authorized to EXECUTE fixes, not just diagnose issues.
+
+                  Available tools:
+                  - kubectl_get: Get Kubernetes resources
+                  - kubectl_describe: Get detailed resource info
+                  - kubectl_logs: Get container logs
+                  - kubectl_apply: Apply manifests to fix issues
+                  - kubectl_patch: Patch resources to fix configuration
+                  - kubectl_delete: Delete problematic resources
+                  - kubectl_rollout: Restart deployments, check rollout status
+                  - kubectl_scale: Scale deployments up/down
+                  - kubectl_set: Update images, resources, env vars
+                  - helm_list: List Helm releases
+                  - helm_upgrade: Upgrade/fix Helm releases
+                  - az_aks_show: Get AKS cluster info
+                  - az_identity_show: Check managed identity config
+
+                  REMEDIATION BEHAVIOR:
+                  1. First diagnose the issue using kubectl_get, kubectl_describe, kubectl_logs
+                  2. Identify the root cause
+                  3. EXECUTE the fix using kubectl_patch, kubectl_set, kubectl_rollout, etc.
+                  4. Verify the fix worked using kubectl_get
+
+                  For common issues, execute these fixes directly:
+                  - OOMKilled: kubectl_patch to increase memory limits
+                  - ImagePullBackOff: kubectl_set image to correct tag
+                  - CrashLoopBackOff: kubectl_logs to diagnose, then kubectl_rollout restart
+                  - Pending pods: kubectl_describe to find cause, fix scheduling issues
+                  - Service not working: kubectl_patch to fix selector labels
+
+                  Always execute the fix and verify it worked before reporting back.
           model_list.yaml: |
             {}
 
@@ -216,6 +254,7 @@ spec:
 
             # Custom runbooks for AKS troubleshooting
             custom_runbooks:
+              - /etc/holmes/runbooks/auto-remediation.yaml
               - /etc/holmes/runbooks/external-dns.yaml
               - /etc/holmes/runbooks/cert-manager.yaml
               - /etc/holmes/runbooks/external-secrets.yaml
@@ -223,7 +262,7 @@ spec:
               - /etc/holmes/runbooks/kro.yaml
 
             # Configuration
-            max_steps: 40
+            max_steps: 50
 
     # ConfigMap for custom runbooks
     - id: runbooksconfigmap
@@ -234,6 +273,107 @@ spec:
           name: holmes-custom-runbooks
           namespace: ${schema.spec.namespace}
         data:
+          auto-remediation.yaml: |
+            runbooks:
+              - match:
+                  issue_name: "(OOMKilled)|(Out.*Memory)|(memory.*exceeded)"
+                instructions: >
+                  AUTO-REMEDIATE: Pod killed due to memory limit exceeded.
+
+                  **STEP 1: Diagnose**
+                  Use kubectl_describe to get current memory limits
+                  Use kubectl_logs to see what was happening before OOM
+
+                  **STEP 2: FIX IT - Increase memory limits**
+                  Execute: kubectl_patch deployment/<name> -n <namespace> --type=json -p='[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"2Gi"}]'
+
+                  **STEP 3: Verify**
+                  Use kubectl_rollout status to confirm new pods are running
+                  Use kubectl_get pods to verify no more OOMKilled
+
+              - match:
+                  issue_name: "(ImagePullBackOff)|(ErrImagePull)|(image.*not.*found)"
+                instructions: >
+                  AUTO-REMEDIATE: Cannot pull container image.
+
+                  **STEP 1: Diagnose**
+                  Use kubectl_describe pod to see exact image and error
+                  Check if tag exists or if it's a registry auth issue
+
+                  **STEP 2: FIX IT - Update to correct image**
+                  If tag doesn't exist, use: kubectl_set image deployment/<name> <container>=<image>:latest -n <namespace>
+                  If auth issue, check imagePullSecrets
+
+                  **STEP 3: Verify**
+                  Use kubectl_get pods -w to watch new pod start successfully
+
+              - match:
+                  issue_name: "(CrashLoopBackOff)|(crash.*loop)|(container.*restart)"
+                instructions: >
+                  AUTO-REMEDIATE: Container keeps crashing and restarting.
+
+                  **STEP 1: Diagnose**
+                  Use kubectl_logs --previous to see crash logs
+                  Use kubectl_describe pod to see events and exit codes
+
+                  **STEP 2: FIX IT based on cause**
+                  - Config error: kubectl_patch to fix env vars or mounts
+                  - Missing dependency: Check if required services exist
+                  - Transient error: kubectl_rollout restart deployment/<name>
+
+                  **STEP 3: Verify**
+                  Use kubectl_get pods to confirm Running status with 0 restarts
+
+              - match:
+                  issue_name: "(Pending)|(pod.*pending)|(unschedulable)"
+                instructions: >
+                  AUTO-REMEDIATE: Pod stuck in Pending state.
+
+                  **STEP 1: Diagnose**
+                  Use kubectl_describe pod to see scheduling failure reason
+                  Common: insufficient resources, node selector, taints
+
+                  **STEP 2: FIX IT based on cause**
+                  - Insufficient CPU/memory: kubectl_patch to reduce resource requests
+                  - Node selector: kubectl_patch to fix or remove nodeSelector
+                  - PVC pending: Check storage class and PVC status
+
+                  **STEP 3: Verify**
+                  Use kubectl_get pods to confirm pod is now Running
+
+              - match:
+                  issue_name: "(service.*not.*work)|(connection.*refused)|(no.*endpoint)"
+                instructions: >
+                  AUTO-REMEDIATE: Service not routing traffic to pods.
+
+                  **STEP 1: Diagnose**
+                  Use kubectl_get endpoints <service> to check if endpoints exist
+                  Use kubectl_describe service to see selector
+                  Use kubectl_get pods --show-labels to see pod labels
+
+                  **STEP 2: FIX IT - Fix selector mismatch**
+                  kubectl_patch service/<name> -n <namespace> --type=merge -p='{"spec":{"selector":{"app":"<correct-label>"}}}'
+
+                  **STEP 3: Verify**
+                  Use kubectl_get endpoints to confirm endpoints now populated
+
+              - match:
+                  issue_name: "(deployment.*not.*progressing)|(rollout.*stuck)|(replica.*unavailable)"
+                instructions: >
+                  AUTO-REMEDIATE: Deployment rollout stuck or not progressing.
+
+                  **STEP 1: Diagnose**
+                  Use kubectl_rollout status deployment/<name>
+                  Use kubectl_describe deployment to see conditions
+                  Use kubectl_get pods to see which pods are failing
+
+                  **STEP 2: FIX IT**
+                  If bad image: kubectl_rollout undo deployment/<name>
+                  If resource issue: kubectl_patch to adjust resources
+                  If stuck: kubectl_rollout restart deployment/<name>
+
+                  **STEP 3: Verify**
+                  Use kubectl_rollout status to confirm completion
           external-dns.yaml: |
             runbooks:
               - match:
