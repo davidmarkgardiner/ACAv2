@@ -1,0 +1,107 @@
+# Holmes Auto-Remediation Configuration
+# This ConfigMap configures Holmes to EXECUTE fixes via AKS-MCP, not just diagnose
+#
+# REQUIREMENTS:
+# 1. AKS-MCP deployed with --access-level=admin
+# 2. Holmes has this ConfigMap mounted
+# 3. API calls include "fix" in the description
+#
+# Apply: kubectl apply -f holmes-auto-remediation-config.yaml
+# Then restart Holmes: kubectl rollout restart deployment/holmes -n holmesgpt
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-toolsets-configmap
+  namespace: holmesgpt  # Change to your Holmes namespace
+data:
+  # Toolsets config - DISABLE built-in kubernetes to force MCP usage
+  custom_toolset.yaml: |
+    toolsets:
+      # DISABLED - Force Holmes to use AKS-MCP for all kubectl operations
+      kubernetes/core:
+        enabled: false
+      kubernetes/logs:
+        enabled: false
+
+      # Keep these enabled
+      internet:
+        enabled: true
+
+      # Disabled - not needed
+      prometheus/metrics:
+        enabled: false
+      robusta:
+        enabled: false
+
+    # AKS-MCP with ADMIN access for auto-remediation
+    mcp_servers:
+      aks-mcp:
+        description: "AKS MCP server with ADMIN access - can read AND write cluster resources"
+        config:
+          mode: streamable-http
+          url: http://aks-mcp.aks-mcp.svc.cluster.local:8000/mcp
+        llm_instructions: |
+          YOU ARE AUTHORIZED TO EXECUTE FIXES. Do not just diagnose - APPLY THE FIX.
+
+          === MANDATORY WORKFLOW ===
+          1. DIAGNOSE: Use kubectl_get, kubectl_describe, kubectl_logs, kubectl_events
+          2. IDENTIFY: Determine the root cause from the output
+          3. FIX: Execute the repair command (kubectl_patch, kubectl_set, kubectl_create, etc.)
+          4. VERIFY: Confirm the fix worked (kubectl_get, kubectl_rollout status)
+
+          === AVAILABLE TOOLS ===
+          READ TOOLS:
+          - kubectl_get: Get resources (pods, deployments, services, configmaps, etc.)
+          - kubectl_describe: Detailed resource information
+          - kubectl_logs: Container logs
+          - kubectl_events: Cluster events
+
+          WRITE TOOLS (USE THESE TO FIX):
+          - kubectl_create: Create new resources
+            Example: kubectl_create("configmap", "my-config", namespace="demo", from_literal={"key": "value"})
+          - kubectl_apply: Apply YAML manifests
+          - kubectl_patch: Patch existing resources
+            Example: kubectl_patch("deployment", "myapp", namespace="demo", patch='{"spec":{"replicas":3}}')
+          - kubectl_set: Set image, resources, env
+            Example: kubectl_set("image", "deployment/myapp", container="app", image="nginx:latest", namespace="demo")
+          - kubectl_delete: Delete resources
+          - kubectl_rollout: Manage rollouts
+            Example: kubectl_rollout("restart", "deployment/myapp", namespace="demo")
+            Example: kubectl_rollout("undo", "deployment/myapp", namespace="demo")
+          - kubectl_scale: Scale resources
+            Example: kubectl_scale("deployment", "myapp", replicas=3, namespace="demo")
+
+          === COMMON FIXES ===
+
+          OOMKilled:
+          → kubectl_set resources deployment/NAME -n NAMESPACE --limits=memory=1Gi
+
+          ImagePullBackOff:
+          → kubectl_set image deployment/NAME -n NAMESPACE container=image:valid-tag
+
+          CrashLoopBackOff (missing ConfigMap):
+          → kubectl_create configmap NAME -n NAMESPACE --from-literal=key=value
+          → kubectl_rollout restart deployment/NAME -n NAMESPACE
+
+          Service not working (selector mismatch):
+          → kubectl_patch svc NAME -n NAMESPACE -p '{"spec":{"selector":{"app":"correct-label"}}}'
+
+          Stuck rollout:
+          → kubectl_rollout undo deployment/NAME -n NAMESPACE
+
+          === CRITICAL RULES ===
+          1. ALWAYS execute the fix - do NOT just print the command
+          2. After fixing, VERIFY the fix worked
+          3. If the first fix doesn't work, try an alternative approach
+          4. Report what you did and the outcome
+
+  # Model list - empty when using LiteLLM
+  model_list.yaml: |
+    {}
+
+---
+# Example: Patching an existing Holmes deployment to use this config
+# kubectl patch deployment holmes-holmes -n holmesgpt --type='json' -p='[
+#   {"op": "replace", "path": "/spec/template/spec/volumes/0/configMap/name", "value": "custom-toolsets-configmap"}
+# ]'
