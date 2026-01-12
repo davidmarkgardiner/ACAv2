@@ -1,0 +1,226 @@
+# Argo Events Sensor for Rocket.Chat Notifications
+# Sends K8s cluster alerts to Rocket.Chat via incoming webhook
+#
+# Prerequisites:
+#   - Argo Events installed in argo-events namespace
+#   - EventBus configured
+#   - K8s EventSource configured to watch pod events
+#   - Rocket.Chat incoming webhook configured
+#
+# Usage:
+#   1. Create incoming webhook in Rocket.Chat (Administration > Integrations)
+#   2. Update ROCKETCHAT_WEBHOOK_URL secret with the webhook URL
+#   3. kubectl apply -f argo-sensor-rocketchat.yaml
+
+---
+# Secret for Rocket.Chat webhook URL
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rocketchat-incoming-webhook
+  namespace: argo-events
+  labels:
+    app: argo-events
+    integration: rocketchat
+type: Opaque
+stringData:
+  # UPDATE: Replace with your Rocket.Chat incoming webhook URL
+  # Get this from Administration > Integrations > Incoming WebHook
+  webhook-url: "https://YOUR_DOMAIN/rocketchat/hooks/WEBHOOK_ID/WEBHOOK_TOKEN"
+
+---
+# EventSource for Kubernetes Events
+# Watches for pod failures, OOM events, etc.
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: k8s-events-rocketchat
+  namespace: argo-events
+  labels:
+    app: argo-events
+    integration: rocketchat
+spec:
+  resource:
+    # Watch for Pod events
+    pod-events:
+      namespace: ""  # All namespaces
+      version: v1
+      resource: pods
+      eventTypes:
+        - ADD
+        - UPDATE
+      # Filter for problematic pod states
+      filter:
+        # Only pods with issues
+        afterStart: false
+        createdBy: ""
+        prefix: ""
+
+---
+# Sensor to process events and send to Rocket.Chat
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: rocketchat-notifier
+  namespace: argo-events
+  labels:
+    app: argo-events
+    integration: rocketchat
+spec:
+  dependencies:
+    - name: pod-events
+      eventSourceName: k8s-events-rocketchat
+      eventName: pod-events
+      # Filter for specific conditions
+      filters:
+        # Only process when pod has issues
+        script: |
+          -- Lua filter for problematic pod events
+          local json = require("json")
+          local event = json.decode(event.body)
+
+          -- Get pod status
+          local phase = event.status and event.status.phase or ""
+          local containerStatuses = event.status and event.status.containerStatuses or {}
+
+          -- Check for CrashLoopBackOff
+          for _, cs in ipairs(containerStatuses) do
+            if cs.state and cs.state.waiting then
+              local reason = cs.state.waiting.reason or ""
+              if reason == "CrashLoopBackOff" or reason == "OOMKilled" or
+                 reason == "Error" or reason == "ImagePullBackOff" then
+                return true
+              end
+            end
+            if cs.state and cs.state.terminated then
+              local reason = cs.state.terminated.reason or ""
+              if reason == "OOMKilled" or reason == "Error" then
+                return true
+              end
+            end
+          end
+
+          -- Check for Failed phase
+          if phase == "Failed" then
+            return true
+          end
+
+          return false
+
+  triggers:
+    - template:
+        name: rocketchat-alert
+        http:
+          url: "URL_FROM_SECRET"  # Replaced by sensor
+          method: POST
+          headers:
+            Content-Type: application/json
+          payload:
+            - src:
+                dependencyName: pod-events
+                dataTemplate: |
+                  {
+                    "text": ":warning: **Kubernetes Alert**",
+                    "attachments": [
+                      {
+                        "title": "Pod Issue Detected",
+                        "title_link": "",
+                        "text": "**Pod:** {{ .Input.metadata.name }}\n**Namespace:** {{ .Input.metadata.namespace }}\n**Phase:** {{ .Input.status.phase }}",
+                        "color": "#FF0000",
+                        "fields": [
+                          {
+                            "title": "Reason",
+                            "value": "{{ range .Input.status.containerStatuses }}{{ if .state.waiting }}{{ .state.waiting.reason }}{{ end }}{{ if .state.terminated }}{{ .state.terminated.reason }}{{ end }}{{ end }}",
+                            "short": true
+                          },
+                          {
+                            "title": "Restarts",
+                            "value": "{{ range .Input.status.containerStatuses }}{{ .restartCount }}{{ end }}",
+                            "short": true
+                          },
+                          {
+                            "title": "Node",
+                            "value": "{{ .Input.spec.nodeName }}",
+                            "short": true
+                          },
+                          {
+                            "title": "Time",
+                            "value": "{{ now | date \"2006-01-02 15:04:05\" }}",
+                            "short": true
+                          }
+                        ]
+                      }
+                    ]
+                  }
+              dest: body
+          secureHeaders: false
+          # Use secret for webhook URL
+          # Note: Uncomment and configure when using secret
+          # urlSecret:
+          #   name: rocketchat-incoming-webhook
+          #   key: webhook-url
+
+    # Trigger Holmes investigation automatically
+    - template:
+        name: holmes-investigate
+        http:
+          url: http://holmes-holmes.holmes.svc.cluster.local:80/api/investigate
+          method: POST
+          headers:
+            Content-Type: application/json
+          payload:
+            - src:
+                dependencyName: pod-events
+                dataTemplate: |
+                  {
+                    "source": "argo-events",
+                    "title": "Auto-investigation: {{ .Input.metadata.name }}",
+                    "description": "Investigate pod {{ .Input.metadata.name }} in namespace {{ .Input.metadata.namespace }} which is experiencing issues ({{ range .Input.status.containerStatuses }}{{ if .state.waiting }}{{ .state.waiting.reason }}{{ end }}{{ if .state.terminated }}{{ .state.terminated.reason }}{{ end }}{{ end }})",
+                    "subject": {
+                      "name": "{{ .Input.metadata.name }}",
+                      "namespace": "{{ .Input.metadata.namespace }}",
+                      "kind": "Pod"
+                    },
+                    "context": {
+                      "source": "argo-events-auto",
+                      "pod_name": "{{ .Input.metadata.name }}",
+                      "namespace": "{{ .Input.metadata.namespace }}",
+                      "node": "{{ .Input.spec.nodeName }}",
+                      "triggered_at": "{{ now | date \"2006-01-02T15:04:05Z07:00\" }}"
+                    }
+                  }
+              dest: body
+
+---
+# RBAC for watching pods across namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-events-pod-watcher
+  labels:
+    app: argo-events
+    integration: rocketchat
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-events-pod-watcher-binding
+  labels:
+    app: argo-events
+    integration: rocketchat
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-events-pod-watcher
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa  # UPDATE: Use your Argo Events service account
+    namespace: argo-events

@@ -1,0 +1,211 @@
+# Holmes Webhook Integration for Rocket.Chat
+# Provides configuration for bidirectional integration between Rocket.Chat and Holmes
+#
+# This file contains:
+#   1. ConfigMap with webhook script for outgoing webhooks
+#   2. Secret for incoming webhook authentication
+#   3. Documentation for manual configuration in Rocket.Chat UI
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rocketchat-holmes-integration
+  namespace: rocketchat
+  labels:
+    app: rocketchat
+    integration: holmes
+data:
+  # Outgoing Webhook Script - Copy this into Rocket.Chat
+  # Administration > Integrations > New Integration > Outgoing WebHook
+  outgoing-webhook-script.js: |
+    /**
+     * Holmes Outgoing Webhook Script
+     *
+     * Trigger: @holmes investigate: <question>
+     * Target URL: http://holmesgpt-holmes.holmesgpt.svc.cluster.local:80/api/chat
+     *
+     * Configuration in Rocket.Chat:
+     *   Event Trigger: Message Sent
+     *   Channel: #general (or all)
+     *   Trigger Words: @holmes, /investigate
+     *   Target URL: http://holmesgpt-holmes.holmesgpt.svc.cluster.local:80/api/chat
+     *   Post as: Holmes Bot
+     *   Script Enabled: Yes
+     */
+    class Script {
+      /**
+       * Process outgoing request to Holmes
+       */
+      prepare_outgoing_request({ request }) {
+        // Extract message text
+        const text = request.data.text || '';
+
+        // Parse the question - remove trigger words
+        let question = text
+          .replace(/@holmes/gi, '')
+          .replace(/\/investigate/gi, '')
+          .replace(/investigate:/gi, '')
+          .trim();
+
+        // Default question if empty
+        if (!question) {
+          question = 'What is the current cluster status?';
+        }
+
+        // Build Holmes /api/chat request format
+        request.data = {
+          ask: question,
+          conversation_history: [],
+          stream: false
+        };
+
+        request.headers['Content-Type'] = 'application/json';
+
+        return { request };
+      }
+
+      /**
+       * Process response from Holmes /api/chat
+       */
+      process_outgoing_response({ request, response }) {
+        if (response.status_code !== 200) {
+          return {
+            content: {
+              text: ':warning: Holmes analysis failed (HTTP ' + response.status_code + ')'
+            }
+          };
+        }
+
+        try {
+          const data = JSON.parse(response.content);
+          let text = '';
+
+          // HolmesGPT /api/chat returns 'analysis' field with markdown
+          if (data.analysis) {
+            text = data.analysis;
+          } else if (typeof data === 'string') {
+            text = data;
+          } else {
+            text = '```json\n' + JSON.stringify(data, null, 2) + '\n```';
+          }
+
+          // Add tool calls info if available
+          const attachments = [];
+          if (data.tool_calls && data.tool_calls.length > 0) {
+            attachments.push({
+              title: 'Tools Used',
+              text: data.tool_calls.map(function(t) { return '• ' + t.tool_name; }).join('\n'),
+              color: '#36a64f'
+            });
+          }
+
+          return {
+            content: {
+              text: text,
+              attachments: attachments,
+              parseUrls: true
+            }
+          };
+        } catch (error) {
+          return {
+            content: {
+              text: response.content
+            }
+          };
+        }
+      }
+    }
+
+  # Incoming Webhook URL format - For Argo Events to post alerts
+  # This URL is generated when you create an Incoming Webhook in Rocket.Chat
+  # Administration > Integrations > New Integration > Incoming WebHook
+  incoming-webhook-readme.md: |
+    # Incoming Webhook Configuration
+
+    ## Setup in Rocket.Chat
+    1. Go to Administration > Integrations
+    2. Click "New Integration" > "Incoming WebHook"
+    3. Configure:
+       - Enabled: Yes
+       - Name: K8s Alerts
+       - Post to Channel: #k8s-alerts
+       - Post as: Alert Bot
+       - Alias: K8s Alert
+    4. Save and copy the Webhook URL
+
+    ## Webhook URL Format
+    The URL will look like:
+    `https://YOUR_DOMAIN/rocketchat/hooks/WEBHOOK_ID/WEBHOOK_TOKEN`
+
+    ## Update Argo Events Sensor
+    Add the webhook URL to the argo-sensor-rocketchat.yaml file
+
+    ## Test the webhook
+    ```bash
+    curl -X POST \
+      https://YOUR_DOMAIN/rocketchat/hooks/WEBHOOK_ID/WEBHOOK_TOKEN \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "text": "Test alert from K8s",
+        "attachments": [{
+          "title": "Pod CrashLoopBackOff",
+          "text": "Pod my-app-xyz in namespace production is in CrashLoopBackOff",
+          "color": "#FF0000"
+        }]
+      }'
+    ```
+
+---
+# Secret for webhook authentication (if needed)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rocketchat-webhook-auth
+  namespace: rocketchat
+  labels:
+    app: rocketchat
+    integration: holmes
+type: Opaque
+stringData:
+  # Generate a secure token for webhook authentication
+  # This is used if you configure token-based auth on webhooks
+  webhook-token: "change-me-to-secure-token"
+
+---
+# NetworkPolicy to allow Holmes to Rocket.Chat communication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-holmes-to-rocketchat
+  namespace: rocketchat
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rocketchat
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from Holmes namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: holmesgpt
+      ports:
+        - protocol: TCP
+          port: 3000
+    # Allow from Argo Events namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argo-events
+      ports:
+        - protocol: TCP
+          port: 3000
+    # Allow from Istio ingress
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 3000

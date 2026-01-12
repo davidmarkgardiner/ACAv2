@@ -1,0 +1,100 @@
+# Istio VirtualService for Rocket.Chat
+# Routes traffic from shared domain /rocketchat path to Rocket.Chat service
+#
+# Prerequisites:
+#   - Istio installed with Gateway configured
+#   - Rocket.Chat deployed in rocketchat namespace
+#   - TLS certificate configured on Gateway
+#
+# Usage:
+#   kubectl apply -f rocketchat-virtualservice.yaml
+
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: rocketchat
+  namespace: rocketchat
+  labels:
+    app: rocketchat
+    component: istio-routing
+spec:
+  hosts:
+    - YOUR_DOMAIN  # UPDATE: Replace with your domain (e.g., chat.example.com)
+  gateways:
+    - istio-system/main-gateway  # UPDATE: Replace with your Istio Gateway name
+  http:
+    # Route for Rocket.Chat main application
+    - match:
+        - uri:
+            prefix: /rocketchat
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: rocketchat.rocketchat.svc.cluster.local
+            port:
+              number: 80
+      timeout: 300s  # Extended timeout for large file uploads
+      retries:
+        attempts: 3
+        perTryTimeout: 30s
+        retryOn: connect-failure,refused-stream,unavailable,cancelled,retriable-4xx
+      corsPolicy:
+        allowOrigins:
+          - exact: "*"
+        allowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        allowHeaders:
+          - authorization
+          - content-type
+          - x-requested-with
+          - x-auth-token
+          - x-user-id
+        exposeHeaders:
+          - x-auth-token
+          - x-user-id
+        maxAge: "24h"
+        allowCredentials: true
+
+    # Route for Rocket.Chat WebSocket (realtime)
+    - match:
+        - uri:
+            prefix: /rocketchat/sockjs
+        - uri:
+            prefix: /rocketchat/websocket
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: rocketchat.rocketchat.svc.cluster.local
+            port:
+              number: 80
+      timeout: 0s  # No timeout for WebSocket
+
+---
+# DestinationRule for Rocket.Chat
+# Configures traffic policy including connection pool settings
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: rocketchat
+  namespace: rocketchat
+spec:
+  host: rocketchat.rocketchat.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 30s
+      http:
+        h2UpgradePolicy: UPGRADE  # Allow HTTP/2 upgrade for WebSockets
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+        maxRequestsPerConnection: 100
+        maxRetries: 3
+    loadBalancer:
+      simple: ROUND_ROBIN

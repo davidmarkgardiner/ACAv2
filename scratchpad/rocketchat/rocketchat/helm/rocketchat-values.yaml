@@ -1,0 +1,155 @@
+# Rocket.Chat Helm Values for AKS Deployment with Istio Service Mesh
+# Integrates with HolmesGPT AI-powered K8s troubleshooting platform
+#
+# Usage:
+#   helm repo add rocketchat https://rocketchat.github.io/helm-charts
+#   helm install rocketchat rocketchat/rocketchat -n rocketchat -f rocketchat-values.yaml
+#
+# Prerequisites:
+#   - Istio Service Mesh installed with a Gateway
+#   - Apply VirtualService from k8s/rocketchat/rocketchat-virtualservice.yaml
+#   - Namespace labeled: kubectl label namespace rocketchat istio-injection=enabled
+
+# Image Configuration
+image:
+  pullPolicy: IfNotPresent
+  repository: docker.io/rocketchat/rocket.chat
+  tag: "7.13.2"  # Update to desired version - check releases
+
+# Replicas (set to 1 for Community, increase with microservices for Enterprise)
+replicaCount: 1
+
+# Host Configuration - Used for internal configuration
+# NOTE: External access is via Istio VirtualService at /rocketchat path
+host: YOUR_DOMAIN  # Replace with your domain (without /rocketchat)
+
+# MongoDB Configuration (bundled)
+mongodb:
+  enabled: true
+  auth:
+    passwords:
+      - rocketchat  # Change in production
+    rootPassword: rocketchatroot  # Change in production
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""  # Uses default storage class
+
+# Microservices (disable for Community, enable for Enterprise)
+microservices:
+  enabled: false
+
+# Ingress Configuration
+# DISABLED: Using Istio VirtualService instead for /rocketchat path routing
+# Apply k8s/rocketchat/rocketchat-virtualservice.yaml for external access
+ingress:
+  enabled: false
+  # ingressClassName: nginx  # Not used with Istio
+  # annotations: {}
+  # tls: []
+
+# Resource Configuration
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Persistence for file uploads (if not using object storage)
+persistence:
+  enabled: false  # Disable if using external object storage
+
+# SMTP Configuration (optional)
+smtp:
+  enabled: false
+  # existingSecret: rocketchat-smtp-secret
+  # host: smtp.mailgun.org
+  # port: 587
+  # username: ""
+  # password: ""
+
+# Environment Variables for Holmes Integration
+extraEnv:
+  # ROOT_URL - Critical for path-based routing with Istio
+  # Must include the /rocketchat path prefix
+  - name: ROOT_URL
+    value: "https://YOUR_DOMAIN/rocketchat"  # UPDATE: Replace YOUR_DOMAIN
+
+  # Webhook Configuration for Holmes Integration
+  - name: OVERWRITE_SETTING_WebhooksIntegration
+    value: "true"
+  - name: OVERWRITE_SETTING_API_Enable_Integration_Webhooks
+    value: "true"
+  - name: OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_Enabled
+    value: "false"  # Simplify for testing, enable in production
+
+  # File Storage - Use object storage in production
+  - name: OVERWRITE_SETTING_FileUpload_Storage_Type
+    value: "GridFS"  # Change to AmazonS3 or GoogleCloudStorage for production
+
+  # Site Settings
+  - name: OVERWRITE_SETTING_Site_Name
+    value: "K8s Ops Chat"
+  - name: OVERWRITE_SETTING_Language
+    value: "en"
+
+  # Registration Token (optional - for Rocket.Chat Cloud)
+  # - name: REG_TOKEN
+  #   value: ""
+
+# Security Context
+securityContext:
+  enabled: true
+  runAsUser: 999
+  fsGroup: 999
+
+# Service Account
+serviceAccount:
+  create: true
+  name: ""
+
+# Node Selector for AKS
+nodeSelector:
+  kubernetes.io/os: linux
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+
+# Liveness Probe
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 60
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# Readiness Probe
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# Prometheus Scraping (for monitoring)
+prometheusScraping:
+  enabled: true
+  port: 9458
+
+# Service Configuration
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+  labels: {}

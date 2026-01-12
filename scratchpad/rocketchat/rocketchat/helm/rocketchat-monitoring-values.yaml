@@ -1,0 +1,117 @@
+# Rocket.Chat Monitoring Values
+# Deploys Grafana dashboard for Rocket.Chat metrics
+#
+# Usage:
+#   helm install monitoring -n rocketchat \
+#     -f rocketchat-monitoring-values.yaml \
+#     rocketchat/monitoring
+
+# Ingress Configuration
+# DISABLED: Using Istio VirtualService for /rocketchat/grafana path
+ingress:
+  enabled: false
+  tls: false
+  grafana:
+    enabled: true
+    # Exposed via Istio VirtualService at /rocketchat/grafana
+
+# Grafana Configuration
+grafana:
+  enabled: true
+  adminUser: admin
+  adminPassword: admin  # Change in production - use secret
+
+  # Persistence for dashboards
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""  # Uses default
+
+  # Datasources
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          url: http://prometheus-server.monitoring.svc.cluster.local
+          access: proxy
+          isDefault: true
+
+  # Dashboards
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'default'
+          orgId: 1
+          folder: ''
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+  # Sidecar for auto-loading dashboards
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      folder: /var/lib/grafana/dashboards/default
+    datasources:
+      enabled: true
+      label: grafana_datasource
+
+# Prometheus Configuration
+prometheus:
+  enabled: true
+
+  # Server Configuration
+  server:
+    retention: 15d
+    persistentVolume:
+      enabled: true
+      size: 8Gi
+      storageClass: ""
+
+    # Service Monitor for Rocket.Chat metrics
+    extraScrapeConfigs:
+      - job_name: 'rocketchat'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - rocketchat
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: rocketchat
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+  # AlertManager (optional)
+  alertmanager:
+    enabled: false
+
+# Resources
+resources:
+  grafana:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  prometheus:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi

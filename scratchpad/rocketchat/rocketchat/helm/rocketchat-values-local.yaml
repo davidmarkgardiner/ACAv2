@@ -1,0 +1,94 @@
+# Rocket.Chat Helm Values for Local Kind/Minikube Testing
+# No Istio required - uses port-forward for access
+
+image:
+  pullPolicy: IfNotPresent
+  repository: docker.io/rocketchat/rocket.chat
+  tag: "7.13.2"
+
+replicaCount: 1
+
+# For local testing, host doesn't matter much
+host: localhost
+
+# MongoDB Configuration (bundled)
+mongodb:
+  enabled: true
+  auth:
+    passwords:
+      - rocketchat
+    rootPassword: rocketchatroot
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: "standard"  # kind default
+
+# No microservices for local testing
+microservices:
+  enabled: false
+
+# Disable ingress - use port-forward instead
+ingress:
+  enabled: false
+
+# Lighter resources for local testing
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Persistence disabled for local testing
+persistence:
+  enabled: false
+
+# Environment Variables
+extraEnv:
+  - name: ROOT_URL
+    value: "http://localhost:3000"
+  - name: OVERWRITE_SETTING_WebhooksIntegration
+    value: "true"
+  - name: OVERWRITE_SETTING_API_Enable_Integration_Webhooks
+    value: "true"
+  - name: OVERWRITE_SETTING_Site_Name
+    value: "K8s Ops Chat (Local)"
+
+# Security Context
+securityContext:
+  enabled: true
+  runAsUser: 999
+  fsGroup: 999
+
+# Service Account
+serviceAccount:
+  create: true
+
+# Service - ClusterIP for port-forward
+service:
+  type: ClusterIP
+  port: 80
+
+# Probes with longer delays for slower local environments
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 120
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 5
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 15
+  timeoutSeconds: 10
+  failureThreshold: 5
+
+# Disable PDB for single replica
+podDisruptionBudget:
+  enabled: false
+
+# Prometheus scraping
+prometheusScraping:
+  enabled: false
