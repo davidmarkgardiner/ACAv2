@@ -1,0 +1,97 @@
+# Fluent Bit Deployment for Production
+# Uses Workload Identity - NO SAS TOKENS
+#
+# Prerequisites: Run 00-setup-workload-identity.sh first
+#
+
+---
+# ClusterRole for reading Kubernetes events
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-events
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit-events
+    namespace: monitoring
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: fluent-bit-events
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3.2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2020
+          env:
+            - name: CLUSTER_NAME
+              value: "aks-prod-cluster"
+            # Event Hub Config
+            - name: EVENTHUB_FQDN
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_FQDN
+            - name: EVENTHUB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_NAME
+            # Workload Identity Variables (Updated by Setup Script)
+            - name: AZURE_CLIENT_ID
+              value: "REPLACE_WITH_CLIENT_ID" # TODO: Update this
+            - name: AZURE_TENANT_ID
+              value: "REPLACE_WITH_TENANT_ID" # TODO: Update this
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-config

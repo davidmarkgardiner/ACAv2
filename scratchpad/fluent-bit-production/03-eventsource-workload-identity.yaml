@@ -1,0 +1,49 @@
+# Argo Events EventSource for Azure Event Hub - PRODUCTION
+# Uses Workload Identity (AAD) - NO SAS TOKENS OR SHARED ACCESS KEYS
+#
+# Prerequisites: Run 00-setup-workload-identity.sh first
+#
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    environment: production
+spec:
+  eventBusName: default
+  template:
+    # Service account created by setup script with Workload Identity annotation
+    serviceAccountName: eventhub-eventsource-sa
+    metadata:
+      labels:
+        azure.workload.identity/use: "true"
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+  azureEventsHub:
+    k8s-warnings:
+      # Event Hub FQDN - Set by setup script via ConfigMap
+      # Format: <namespace>.servicebus.windows.net
+      fqdn: "REPLACE_WITH_EVENTHUB_FQDN"  # TODO: Update after running setup script
+
+      # Event Hub name
+      hubName: "kube-events"
+
+      # Consumer group (created by setup script)
+      consumerGroup: "argo-events"
+
+      # Workload Identity authentication (AAD)
+      # No shared access keys or SAS tokens required!
+      aad:
+        tenantId:
+          name: azure-eventhub-aad-config
+          key: tenant-id
