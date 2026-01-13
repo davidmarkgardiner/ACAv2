@@ -1,0 +1,101 @@
+# Fluent Bit ConfigMap - Kubernetes Events to Azure Event Hub
+# Uses Kafka protocol with SASL_PLAIN authentication (SAS token/connection string)
+#
+# Authentication: Connection string from Key Vault stored as K8s Secret
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+    component: k8s-events
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         5
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+        Health_Check  On
+
+    @INCLUDE inputs.conf
+    @INCLUDE filters.conf
+    @INCLUDE outputs.conf
+
+  inputs.conf: |
+    # Kubernetes Events Input
+    # Watches K8s API for cluster events (not pod logs)
+    [INPUT]
+        Name              kubernetes_events
+        Tag               kube.events.*
+        DB                /var/log/flb_kube_events.db
+        Interval_Sec      1
+        Kube_URL          https://kubernetes.default.svc:443
+        Kube_CA_File      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File   /var/run/secrets/kubernetes.io/serviceaccount/token
+
+  filters.conf: |
+    # Filter: Warning and Error events only (reduce noise)
+    # This significantly reduces event volume in production
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        Regex         type (Warning|Error)
+
+    # Filter: Exclude noisy events (optional)
+    # Uncomment to reduce further
+    # [FILTER]
+    #     Name          grep
+    #     Match         kube.events.*
+    #     Exclude       reason (Scheduled|Pulled|Created|Started|Normal)
+
+    # Add cluster identifier for multi-cluster support
+    [FILTER]
+        Name          modify
+        Match         kube.events.*
+        Add           cluster ${CLUSTER_NAME}
+
+    # Restructure involvedObject for downstream processing
+    [FILTER]
+        Name          nest
+        Match         kube.events.*
+        Operation     nest
+        Wildcard      involvedObject.*
+        Nest_under    involvedObject
+        Remove_prefix involvedObject.
+
+  outputs.conf: |
+    # Debug output (comment out in production)
+    # [OUTPUT]
+    #     Name          stdout
+    #     Match         kube.events.*
+    #     Format        json_lines
+
+    # Azure Event Hub via Kafka protocol
+    # Uses SASL_PLAIN with connection string from Key Vault
+    [OUTPUT]
+        Name                          kafka
+        Match                         kube.events.*
+        Brokers                       ${EVENTHUB_FQDN}:9093
+        Topics                        ${EVENTHUB_NAME}
+        rdkafka.security.protocol     SASL_SSL
+        rdkafka.sasl.mechanism        PLAIN
+        rdkafka.sasl.username         $ConnectionString
+        rdkafka.sasl.password         ${EVENTHUB_CONNECTION_STRING}
+        # Retry settings for reliability
+        rdkafka.request.required.acks 1
+        rdkafka.message.timeout.ms    30000
+        rdkafka.retry.backoff.ms      500
+        rdkafka.retries               5
+
+  parsers.conf: |
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    lastTimestamp
+        Time_Format %Y-%m-%dT%H:%M:%SZ

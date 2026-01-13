@@ -1,0 +1,331 @@
+# Multi-Cluster Triage WorkflowTemplate
+# Investigates issues across multiple clusters using Holmes + AKS-MCP
+# Creates GitLab issues with cluster context
+#
+# Prerequisites:
+# 1. HolmesGPT deployed with AKS-MCP integration
+# 2. Multi-cluster kubeconfig or AKS-MCP with cluster access
+# 3. GitLab PAT secret
+#
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: multi-cluster-triage
+  namespace: argo-events
+  labels:
+    app: multi-cluster-remediation
+spec:
+  # Auto-cleanup: delete completed workflows after 5 minutes
+  ttlStrategy:
+    secondsAfterCompletion: 300
+    secondsAfterSuccess: 300
+    secondsAfterFailure: 600
+  # Clean up pods immediately after workflow completes
+  podGC:
+    strategy: OnWorkflowCompletion
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: cluster-name
+        description: Source cluster name
+      - name: namespace
+        description: Kubernetes namespace
+      - name: resource-name
+        description: Resource name (pod, deployment, etc.)
+      - name: resource-kind
+        description: Resource kind
+        default: "Pod"
+      - name: event-reason
+        description: Event reason (BackOff, OOMKilled, etc.)
+      - name: event-message
+        description: Full event message
+      - name: gitlab-project
+        description: GitLab project for issue creation
+        default: "davidmarkgardiner/mcp-test-repo"
+
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: investigate
+            template: holmes-investigate
+          - name: create-issue
+            template: create-gitlab-issue
+            dependencies: [investigate]
+            arguments:
+              parameters:
+                - name: analysis
+                  value: "{{tasks.investigate.outputs.parameters.analysis}}"
+                - name: recommendations
+                  value: "{{tasks.investigate.outputs.parameters.recommendations}}"
+          - name: notify-completion
+            template: notify-rocketchat-completion
+            dependencies: [create-issue]
+            arguments:
+              parameters:
+                - name: issue-url
+                  value: "{{tasks.create-issue.outputs.parameters.issue-url}}"
+                - name: analysis
+                  value: "{{tasks.investigate.outputs.parameters.analysis}}"
+
+    # Holmes Investigation with multi-cluster context
+    - name: holmes-investigate
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        source: |
+          #!/bin/sh
+          set -e
+
+          CLUSTER="{{workflow.parameters.cluster-name}}"
+          NAMESPACE="{{workflow.parameters.namespace}}"
+          RESOURCE="{{workflow.parameters.resource-name}}"
+          KIND="{{workflow.parameters.resource-kind}}"
+          REASON="{{workflow.parameters.event-reason}}"
+          MESSAGE="{{workflow.parameters.event-message}}"
+
+          echo "Investigating ${REASON} on cluster ${CLUSTER}..."
+
+          # Build Holmes investigation request with cluster context
+          cat > /tmp/request.json << EOF
+          {
+            "source": "multi-cluster-automation",
+            "title": "[${CLUSTER}] ${REASON}: ${KIND}/${RESOURCE} in ${NAMESPACE}",
+            "description": "Investigate ${REASON} event for ${KIND}/${RESOURCE} in namespace ${NAMESPACE} on cluster ${CLUSTER}. Event message: ${MESSAGE}",
+            "subject": {
+              "name": "${RESOURCE}",
+              "namespace": "${NAMESPACE}",
+              "kind": "${KIND}",
+              "cluster": "${CLUSTER}"
+            },
+            "context": {
+              "cluster": "${CLUSTER}",
+              "event_reason": "${REASON}",
+              "runbooks": ["AKSPodNotHealthy", "AKSPodCrashLooping", "AKSOOMKilled"]
+            },
+            "include_tool_calls": true,
+            "include_tool_call_results": true
+          }
+          EOF
+
+          echo "Request:"
+          cat /tmp/request.json
+
+          # Call Holmes API
+          # Holmes should have multi-cluster access via AKS-MCP
+          RESPONSE=$(curl -s -X POST \
+            "http://holmesgpt.holmesgpt.svc.cluster.local:80/api/investigate" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/request.json \
+            --max-time 300 || echo '{"error": "Holmes API timeout"}')
+
+          echo "Response received"
+
+          # Extract analysis and recommendations
+          ANALYSIS=$(echo "$RESPONSE" | jq -r '.analysis // .result // "Investigation completed but no detailed analysis available."')
+          RECOMMENDATIONS=$(echo "$RESPONSE" | jq -r '.recommendations // "Check pod logs and events for more details."')
+
+          # Handle null/empty values
+          if [ "$ANALYSIS" = "null" ] || [ -z "$ANALYSIS" ]; then
+            ANALYSIS="Investigation completed. Event: ${REASON} for ${KIND}/${RESOURCE} in ${NAMESPACE} on cluster ${CLUSTER}."
+          fi
+
+          if [ "$RECOMMENDATIONS" = "null" ] || [ -z "$RECOMMENDATIONS" ]; then
+            RECOMMENDATIONS="1. Check pod logs: kubectl logs ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
+          2. Check pod events: kubectl describe pod ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
+          3. Check resource limits and requests
+          4. Review application health probes"
+          fi
+
+          echo "$ANALYSIS" > /tmp/analysis.txt
+          echo "$RECOMMENDATIONS" > /tmp/recommendations.txt
+
+          echo "Investigation complete"
+      outputs:
+        parameters:
+          - name: analysis
+            valueFrom:
+              path: /tmp/analysis.txt
+          - name: recommendations
+            valueFrom:
+              path: /tmp/recommendations.txt
+
+    # Create GitLab issue with cluster context
+    # Based on working workflow-gitlab-issue-creator.yaml pattern
+    - name: create-gitlab-issue
+      inputs:
+        parameters:
+          - name: analysis
+          - name: recommendations
+      outputs:
+        parameters:
+          - name: issue-url
+            valueFrom:
+              path: /tmp/issue_url.txt
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        env:
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-mcp-secret
+                key: GITLAB_PERSONAL_ACCESS_TOKEN
+          - name: ANALYSIS
+            value: "{{inputs.parameters.analysis}}"
+          - name: RECOMMENDATIONS
+            value: "{{inputs.parameters.recommendations}}"
+        source: |
+          CLUSTER="{{workflow.parameters.cluster-name}}"
+          NAMESPACE="{{workflow.parameters.namespace}}"
+          RESOURCE="{{workflow.parameters.resource-name}}"
+          KIND="{{workflow.parameters.resource-kind}}"
+          REASON="{{workflow.parameters.event-reason}}"
+          MESSAGE="{{workflow.parameters.event-message}}"
+          PROJECT="{{workflow.parameters.gitlab-project}}"
+          WORKFLOW_NAME="{{workflow.name}}"
+
+          ENCODED_PROJECT=$(echo "$PROJECT" | sed 's/\//%2F/g')
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          # Build issue title
+          TITLE="[${CLUSTER}] ${REASON}: ${NAMESPACE}/${RESOURCE}"
+
+          # Determine severity label
+          case "$REASON" in
+            OOMKilled|CrashLoopBackOff) SEVERITY="severity-critical" ;;
+            BackOff|ImagePullBackOff|FailedScheduling) SEVERITY="severity-high" ;;
+            *) SEVERITY="severity-medium" ;;
+          esac
+
+          # Build description line by line to avoid YAML parsing issues
+          echo "## Cluster Information" > /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "- **Cluster**: ${CLUSTER}" >> /tmp/description.txt
+          echo "- **Namespace**: ${NAMESPACE}" >> /tmp/description.txt
+          echo "- **Resource**: ${KIND}/${RESOURCE}" >> /tmp/description.txt
+          echo "- **Event**: ${REASON}" >> /tmp/description.txt
+          echo "- **Workflow**: ${WORKFLOW_NAME}" >> /tmp/description.txt
+          echo "- **Timestamp**: ${TIMESTAMP}" >> /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "## Event Message" >> /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "${MESSAGE}" >> /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "## AI Analysis" >> /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "${ANALYSIS}" >> /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "## Recommendations" >> /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "${RECOMMENDATIONS}" >> /tmp/description.txt
+          echo "" >> /tmp/description.txt
+          echo "---" >> /tmp/description.txt
+          echo "*Auto-generated by Multi-Cluster Remediation Pipeline*" >> /tmp/description.txt
+          DESCRIPTION=$(cat /tmp/description.txt)
+
+          # Use jq to safely build JSON payload (handles special chars)
+          jq -n \
+            --arg title "$TITLE" \
+            --arg desc "$DESCRIPTION" \
+            --arg labels "multi-cluster,auto-generated,${REASON},${CLUSTER},${SEVERITY}" \
+            '{title: $title, description: $desc, labels: $labels}' > /tmp/issue_payload.json
+
+          echo "Creating GitLab issue in project: ${PROJECT}"
+          echo "Payload preview:"
+          cat /tmp/issue_payload.json | head -20
+
+          curl -s -X POST \
+            "https://gitlab.com/api/v4/projects/${ENCODED_PROJECT}/issues" \
+            -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/issue_payload.json > /tmp/gitlab_response.json
+
+          echo ""
+          echo "GitLab API Response:"
+          cat /tmp/gitlab_response.json | jq '.' 2>/dev/null || cat /tmp/gitlab_response.json
+
+          ISSUE_URL=$(cat /tmp/gitlab_response.json | jq -r '.web_url // empty')
+
+          if [ -n "$ISSUE_URL" ]; then
+            echo "$ISSUE_URL" > /tmp/issue_url.txt
+            echo ""
+            echo "Issue created successfully: $ISSUE_URL"
+          else
+            ERROR=$(cat /tmp/gitlab_response.json | jq -r '.message // .error // empty')
+            if [ -n "$ERROR" ]; then
+              echo "ERROR: $ERROR" > /tmp/issue_url.txt
+              echo "GitLab API Error: $ERROR"
+            else
+              echo "https://gitlab.com/${PROJECT}/issues" > /tmp/issue_url.txt
+              echo "Warning: Could not extract issue URL"
+            fi
+          fi
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+
+    # Notify RocketChat with completion and GitLab link
+    - name: notify-rocketchat-completion
+      inputs:
+        parameters:
+          - name: issue-url
+          - name: analysis
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        env:
+          - name: WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: rocketchat-webhook-config
+                key: WEBHOOK_URL
+          - name: ANALYSIS
+            value: "{{inputs.parameters.analysis}}"
+        source: |
+          #!/bin/sh
+          ISSUE_URL='{{inputs.parameters.issue-url}}'
+          RESOURCE='{{workflow.parameters.resource-name}}'
+          NAMESPACE='{{workflow.parameters.namespace}}'
+          REASON='{{workflow.parameters.event-reason}}'
+
+          # Truncate analysis to first 800 chars using jq (handles special chars safely)
+          # jq's .[0:800] safely truncates without breaking JSON
+          ANALYSIS_SHORT=$(echo "$ANALYSIS" | jq -Rs '.[0:800]' | jq -r '.')
+
+          # Add ellipsis if truncated
+          ANALYSIS_LEN=$(echo "$ANALYSIS" | wc -c)
+          if [ "$ANALYSIS_LEN" -gt 800 ]; then
+            ANALYSIS_SHORT="${ANALYSIS_SHORT}..."
+          fi
+
+          # Use jq to build JSON safely (handles special chars in analysis)
+          jq -n \
+            --arg issue_url "$ISSUE_URL" \
+            --arg title "${REASON}: ${NAMESPACE}/${RESOURCE}" \
+            --arg analysis "$ANALYSIS_SHORT" \
+            '{
+              text: ":white_check_mark: **Triage Complete**",
+              attachments: [
+                {
+                  title: $title,
+                  title_link: $issue_url,
+                  text: $analysis,
+                  color: "#2ecc71"
+                },
+                {
+                  title: "GitLab Issue",
+                  text: (":link: " + $issue_url),
+                  color: "#3498db"
+                }
+              ]
+            }' > /tmp/payload.json
+
+          curl -s -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload.json \
+            --max-time 10 || echo "Notification failed"

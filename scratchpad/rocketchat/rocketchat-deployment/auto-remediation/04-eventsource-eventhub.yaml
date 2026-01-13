@@ -1,0 +1,53 @@
+# Argo Events EventSource for Azure Event Hub
+# Consumes K8s events sent by Fluent Bit via Kafka protocol
+#
+# Authentication: Shared Access Key (from Key Vault)
+#
+# Note: EventSource uses AMQP to consume from Event Hub
+# regardless of how events were sent (Kafka/HTTP)
+#
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+  azureEventsHub:
+    k8s-warnings:
+      # Event Hub FQDN - UPDATE THIS
+      fqdn: "your-eventhub-namespace.servicebus.windows.net"
+      # Event Hub name (topic)
+      hubName: "kube-events"
+      # Consumer group (create via Azure CLI: az eventhubs eventhub consumer-group create ...)
+      consumerGroup: "argo-events"
+
+      # Shared Access Key authentication
+      # Key/value from eventhub-credentials secret (synced from Key Vault)
+      sharedAccessKeyName:
+        name: eventhub-credentials
+        key: key-name
+      sharedAccessKey:
+        name: eventhub-credentials
+        key: key-value
+
+      # Optional: Checkpoint storage for reliable consumption
+      # Recommended for production to avoid reprocessing events
+      # blobConnectionString:
+      #   name: azure-storage-credentials
+      #   key: connection-string
+      # blobContainer: eventhub-checkpoints

@@ -1,0 +1,82 @@
+# Event Hub Configuration
+# Contains connection details and authentication secrets
+#
+# IMPORTANT: Update these values before deployment:
+# - EVENTHUB_NAMESPACE: Your Event Hub namespace name
+# - EVENTHUB_NAME: Your Event Hub (topic) name
+# - CLUSTER_NAME: Identifier for this cluster
+# - connection-string: From Key Vault or Azure Portal
+#
+---
+# ConfigMap for monitoring namespace (Fluent Bit)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eventhub-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+data:
+  # UPDATE THESE VALUES
+  EVENTHUB_NAMESPACE: "your-eventhub-namespace"      # e.g., "k8s-events-hub-prod"
+  EVENTHUB_NAME: "kube-events"                       # Event Hub name (topic)
+  EVENTHUB_FQDN: "your-eventhub-namespace.servicebus.windows.net"
+  CLUSTER_NAME: "your-cluster-name"                  # e.g., "aks-prod-cluster"
+
+---
+# ConfigMap for argo-events namespace (EventSource)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eventhub-config
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+data:
+  # MUST MATCH the values in monitoring namespace
+  EVENTHUB_NAMESPACE: "your-eventhub-namespace"
+  EVENTHUB_NAME: "kube-events"
+  EVENTHUB_FQDN: "your-eventhub-namespace.servicebus.windows.net"
+
+---
+# Secret for Fluent Bit (monitoring namespace)
+# Connection string from Key Vault
+#
+# Get connection string:
+#   az eventhubs namespace authorization-rule keys list \
+#     -g <resource-group> \
+#     --namespace-name <eventhub-namespace> \
+#     --name RootManageSharedAccessKey \
+#     --query primaryConnectionString -o tsv
+#
+# Or use External Secrets Operator / CSI Secret Store Driver to sync from Key Vault
+#
+apiVersion: v1
+kind: Secret
+metadata:
+  name: eventhub-kafka-secret
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+type: Opaque
+stringData:
+  # Full connection string format:
+  # Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<key-name>;SharedAccessKey=<key-value>
+  connection-string: "Endpoint=sb://YOUR_NAMESPACE.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=YOUR_KEY_HERE"
+
+---
+# Secret for Argo Events EventSource (argo-events namespace)
+# Uses Shared Access Key (extracted from connection string)
+#
+apiVersion: v1
+kind: Secret
+metadata:
+  name: eventhub-credentials
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+type: Opaque
+stringData:
+  # Extract these from the connection string:
+  key-name: "RootManageSharedAccessKey"
+  key-value: "YOUR_SHARED_ACCESS_KEY_HERE"

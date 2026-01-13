@@ -1,0 +1,127 @@
+# Key Vault Integration Options for Event Hub Connection String
+#
+# Since Workload Identity is not supported by Fluent Bit's Kafka output,
+# we need to use a SAS token (connection string) stored in Key Vault.
+#
+# There are 3 ways to get secrets from Key Vault into Kubernetes:
+#
+# ============================================================================
+# Option 1: External Secrets Operator (RECOMMENDED)
+# ============================================================================
+# Syncs secrets from Key Vault to Kubernetes Secrets automatically
+# Requires: External Secrets Operator + Azure Key Vault Provider
+#
+# Install ESO:
+#   helm repo add external-secrets https://charts.external-secrets.io
+#   helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace
+#
+---
+# ClusterSecretStore (one per cluster, uses Workload Identity)
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: azure-keyvault
+spec:
+  provider:
+    azurekv:
+      # Key Vault URL
+      vaultUrl: "https://YOUR_KEYVAULT_NAME.vault.azure.net"
+      authType: WorkloadIdentity
+      serviceAccountRef:
+        name: external-secrets-sa  # SA with Workload Identity binding
+        namespace: external-secrets
+
+---
+# ExternalSecret for Fluent Bit (monitoring namespace)
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: eventhub-kafka-secret
+  namespace: monitoring
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: azure-keyvault
+  target:
+    name: eventhub-kafka-secret
+  data:
+    - secretKey: connection-string
+      remoteRef:
+        key: eventhub-connection-string  # Key Vault secret name
+
+---
+# ExternalSecret for Argo Events (argo-events namespace)
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: eventhub-credentials
+  namespace: argo-events
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: azure-keyvault
+  target:
+    name: eventhub-credentials
+  data:
+    - secretKey: key-name
+      remoteRef:
+        key: eventhub-key-name
+    - secretKey: key-value
+      remoteRef:
+        key: eventhub-key-value
+
+# ============================================================================
+# Option 2: Azure Key Vault Provider for Secrets Store CSI Driver
+# ============================================================================
+# Mounts secrets as files in pods
+# Requires: Secrets Store CSI Driver + Azure Key Vault Provider
+#
+# Install on AKS:
+#   az aks enable-addons --addons azure-keyvault-secrets-provider -g <rg> -n <cluster>
+#
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: eventhub-secrets
+  namespace: monitoring
+spec:
+  provider: azure
+  parameters:
+    usePodIdentity: "false"
+    useVMManagedIdentity: "true"
+    userAssignedIdentityID: ""  # Leave empty for system-assigned MI
+    keyvaultName: "YOUR_KEYVAULT_NAME"
+    objects: |
+      array:
+        - |
+          objectName: eventhub-connection-string
+          objectType: secret
+    tenantId: "YOUR_TENANT_ID"
+  secretObjects:
+    - secretName: eventhub-kafka-secret
+      type: Opaque
+      data:
+        - objectName: eventhub-connection-string
+          key: connection-string
+
+# ============================================================================
+# Option 3: Manual Sync (NOT RECOMMENDED for production)
+# ============================================================================
+# Manually copy from Key Vault to Kubernetes
+# Use only for testing - secrets don't auto-rotate
+#
+# Get connection string:
+#   CONNECTION_STRING=$(az keyvault secret show \
+#     --vault-name YOUR_KEYVAULT \
+#     --name eventhub-connection-string \
+#     --query value -o tsv)
+#
+# Create secret:
+#   kubectl create secret generic eventhub-kafka-secret \
+#     --namespace monitoring \
+#     --from-literal=connection-string="$CONNECTION_STRING"
+#
+# ============================================================================

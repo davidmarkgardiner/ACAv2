@@ -1,0 +1,33 @@
+# Istio Gateway for RocketChat
+# IMPORTANT: Deploy to aks-istio-ingress namespace (not rocketchat)
+#
+# Update YOUR_DOMAIN before applying
+#
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: rocketchat-gateway
+  namespace: aks-istio-ingress  # CRITICAL: Must be in this namespace
+spec:
+  selector:
+    istio: aks-istio-ingressgateway-external  # AKS Managed Istio selector
+  servers:
+    # HTTPS (after certificate is ready)
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: rocketchat-tls-secret  # Must be in same namespace
+      hosts:
+        - "YOUR_DOMAIN"  # UPDATE: e.g., rocketchat.example.com
+    # HTTP (redirects to HTTPS)
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      tls:
+        httpsRedirect: true
+      hosts:
+        - "YOUR_DOMAIN"  # UPDATE: e.g., rocketchat.example.com

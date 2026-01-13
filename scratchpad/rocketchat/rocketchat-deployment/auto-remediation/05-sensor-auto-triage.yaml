@@ -1,0 +1,130 @@
+# Argo Events Sensor - Auto-Triage for K8s Warning Events
+# Consumes events from Fluent Bit via Event Hub
+# Triggers HolmesGPT analysis and GitLab issue creation
+#
+# IMPORTANT: Includes rate limiting to prevent workflow flood
+#
+# Event Hub payload structure:
+# {"body": "<base64-encoded-json>", "id": "", "partitionKey": ""}
+#
+# Decoded Fluent Bit event:
+# {
+#   "type": "Warning",
+#   "reason": "BackOff|OOMKilled|ImagePullBackOff|...",
+#   "message": "...",
+#   "involvedObject": {"kind": "Pod", "name": "...", "namespace": "..."},
+#   "cluster": "cluster-name"
+# }
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: auto-triage-sensor
+  namespace: argo-events
+  labels:
+    app: auto-triage
+    sender: fluent-bit
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: k8s-warning-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-warnings
+      # Optional: Filter for specific event reasons
+      # filters:
+      #   data:
+      #     - path: body  # Can't filter base64 directly - filter in workflow instead
+
+  triggers:
+    - template:
+        name: run-auto-triage
+        conditions: "k8s-warning-event"
+        # CRITICAL: Rate limiting to prevent workflow flood
+        # K8s generates many events - this limits to 3/minute
+        rateLimit:
+          requestsPerUnit: 3
+          unit: Minute
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: auto-triage-
+                labels:
+                  app: auto-triage
+                  sender: fluent-bit
+                  source: eventhub
+              spec:
+                # Auto-cleanup to prevent pod accumulation
+                ttlStrategy:
+                  secondsAfterCompletion: 300
+                  secondsAfterSuccess: 300
+                  secondsAfterFailure: 600
+                podGC:
+                  strategy: OnWorkflowCompletion
+                workflowTemplateRef:
+                  name: multi-cluster-triage
+                serviceAccountName: argo-events-sa
+                arguments:
+                  parameters:
+                    - name: cluster-name
+                      value: ""
+                    - name: namespace
+                      value: ""
+                    - name: resource-name
+                      value: ""
+                    - name: resource-kind
+                      value: ""
+                    - name: event-reason
+                      value: ""
+                    - name: event-message
+                      value: ""
+                    - name: gitlab-project
+                      value: "your-org/your-repo"  # UPDATE THIS
+          parameters:
+            # Decode Base64 Event Hub payload and extract fields
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "cluster" "unknown" }}'
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "default" }}'
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "name" "unknown" }}'
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "kind" "Pod" }}'
+              dest: spec.arguments.parameters.3.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "Unknown" }}'
+              dest: spec.arguments.parameters.4.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "message" "" }}'
+              dest: spec.arguments.parameters.5.value
+      retryStrategy:
+        steps: 3
+        duration: 10s
+
+---
+# ResourceQuota to limit workflow pod accumulation
+# Safety net in case rate limiting is insufficient
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workflow-limits
+  namespace: argo-events
+spec:
+  hard:
+    pods: "100"
+    count/workflows.argoproj.io: "50"

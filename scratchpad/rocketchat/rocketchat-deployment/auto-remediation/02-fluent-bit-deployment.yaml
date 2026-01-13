@@ -1,0 +1,171 @@
+# Fluent Bit Deployment for Kubernetes Events
+# Watches K8s events and sends to Azure Event Hub via Kafka protocol
+#
+# Authentication: Uses connection string (SAS token) from Key Vault
+# Note: Workload Identity/OAUTHBEARER not supported by Fluent Bit for Kafka
+#
+# For events (not logs), we use a Deployment, not DaemonSet
+#
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app: fluent-bit
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+    component: k8s-events
+
+---
+# ClusterRole for reading Kubernetes events
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-events
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit-events
+    namespace: monitoring
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+    component: k8s-events
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluent-bit
+      component: k8s-events
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+        component: k8s-events
+      annotations:
+        # Trigger restart on config change
+        checksum/config: "change-me-on-update"
+    spec:
+      serviceAccountName: fluent-bit-events
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3.2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 2020
+              protocol: TCP
+          env:
+            # Cluster name for event identification
+            - name: CLUSTER_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: CLUSTER_NAME
+            # Event Hub config from ConfigMap
+            - name: EVENTHUB_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_NAMESPACE
+            - name: EVENTHUB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_NAME
+            - name: EVENTHUB_FQDN
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_FQDN
+            # Connection string from Key Vault (via External Secrets or CSI driver)
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: eventhub-kafka-secret
+                  key: connection-string
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/
+            - name: varlog
+              mountPath: /var/log
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-config
+        - name: varlog
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+
+---
+# Service for metrics/health checks
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+spec:
+  selector:
+    app: fluent-bit
+    component: k8s-events
+  ports:
+    - name: http
+      port: 2020
+      targetPort: http

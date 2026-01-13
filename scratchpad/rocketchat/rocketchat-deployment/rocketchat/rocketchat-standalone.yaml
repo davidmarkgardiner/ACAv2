@@ -1,0 +1,78 @@
+# Rocket.Chat Standalone Deployment (uses external MongoDB)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocketchat
+  namespace: rocketchat
+  labels:
+    app: rocketchat
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rocketchat
+  template:
+    metadata:
+      labels:
+        app: rocketchat
+    spec:
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+          - name: single-request-reopen
+      initContainers:
+      - name: wait-for-mongodb
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nslookup mongodb.rocketchat.svc.cluster.local; do echo waiting for mongodb DNS; sleep 2; done; echo MongoDB DNS ready']
+      containers:
+      - name: rocketchat
+        image: docker.io/rocketchat/rocket.chat:7.13.2
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: MONGO_URL
+          value: "mongodb://mongodb.rocketchat.svc.cluster.local:27017/rocketchat"
+        # No OPLOG without replica set - real-time features may be limited
+        - name: ROOT_URL
+          value: "http://localhost:3000"
+        - name: PORT
+          value: "3000"
+        - name: DEPLOY_PLATFORM
+          value: "kubernetes"
+        resources:
+          requests:
+            cpu: 200m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        readinessProbe:
+          httpGet:
+            path: /api/info
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/info
+            port: 3000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rocketchat
+  namespace: rocketchat
+spec:
+  selector:
+    app: rocketchat
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http

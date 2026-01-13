@@ -1,0 +1,39 @@
+# cert-manager Certificate for RocketChat TLS
+# IMPORTANT: Deploy to aks-istio-ingress namespace (same as Gateway)
+#
+# Prerequisites:
+#   - cert-manager installed
+#   - ClusterIssuer "letsencrypt-prod" configured
+#
+# Update YOUR_DOMAIN before applying
+#
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rocketchat-tls
+  namespace: aks-istio-ingress  # CRITICAL: Same namespace as Gateway
+spec:
+  secretName: rocketchat-tls-secret  # Referenced by Gateway credentialName
+  issuerRef:
+    name: letsencrypt-prod  # Your ClusterIssuer name
+    kind: ClusterIssuer
+  dnsNames:
+    - "YOUR_DOMAIN"  # UPDATE: e.g., rocketchat.example.com
+---
+# ClusterIssuer (if not already created)
+# Only apply this if you don't have a ClusterIssuer yet
+#
+# apiVersion: cert-manager.io/v1
+# kind: ClusterIssuer
+# metadata:
+#   name: letsencrypt-prod
+# spec:
+#   acme:
+#     server: https://acme-v02.api.letsencrypt.org/directory
+#     email: YOUR_EMAIL@example.com
+#     privateKeySecretRef:
+#       name: letsencrypt-prod-account-key
+#     solvers:
+#       - http01:
+#           ingress:
+#             class: istio  # For Istio-based HTTP-01 challenge

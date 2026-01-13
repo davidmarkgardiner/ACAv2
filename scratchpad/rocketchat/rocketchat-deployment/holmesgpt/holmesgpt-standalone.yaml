@@ -1,0 +1,267 @@
+# HolmesGPT Standalone Deployment
+# For use without KRO - extracts resources from KRO ResourceGraphDefinition
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: holmesgpt
+  labels:
+    app: holmesgpt
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: holmes
+  namespace: holmesgpt
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: holmes-cluster-role
+rules:
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses]
+    verbs: [list, get, watch]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [pods, nodes]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - events
+      - namespaces
+      - persistentvolumes
+      - persistentvolumeclaims
+      - pods
+      - pods/status
+      - pods/log
+      - services
+      - serviceaccounts
+      - endpoints
+      - nodes
+    verbs: [get, list, watch]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: [apiservices]
+    verbs: [get, list]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: [clusterroles, clusterrolebindings, roles, rolebindings]
+    verbs: [get, list, watch]
+  - apiGroups: ["autoscaling"]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  - apiGroups: ["apps"]
+    resources:
+      - daemonsets
+      - deployments
+      - deployments/scale
+      - replicasets
+      - replicasets/scale
+      - statefulsets
+    verbs: [get, list, watch]
+  - apiGroups: ["extensions"]
+    resources:
+      - daemonsets
+      - deployments
+      - ingresses
+      - replicasets
+    verbs: [get, list, watch]
+  - apiGroups: ["batch"]
+    resources: [cronjobs, jobs]
+    verbs: [get, list, watch]
+  - apiGroups: ["events.k8s.io"]
+    resources: [events]
+    verbs: [get, list]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: [customresourcedefinitions]
+    verbs: [list, get]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch]
+  - apiGroups: ["policy"]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: holmes-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: holmes-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: holmes
+    namespace: holmesgpt
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-toolsets
+  namespace: holmesgpt
+data:
+  custom_toolset.yaml: |
+    toolsets:
+      kubernetes/core:
+        enabled: true
+      kubernetes/logs:
+        enabled: true
+      robusta:
+        enabled: false
+      internet:
+        enabled: true
+      prometheus/metrics:
+        enabled: false
+  model_list.yaml: |
+    {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-config
+  namespace: holmesgpt
+data:
+  config.yaml: |
+    max_steps: 40
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-runbooks
+  namespace: holmesgpt
+data:
+  dns-troubleshooting.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(DNS)|(CoreDNS)|(name.*resolution)"
+        instructions: >
+          Diagnose DNS resolution issues.
+          1. Check CoreDNS pods: kubectl get pods -n kube-system -l k8s-app=kube-dns
+          2. Review CoreDNS logs: kubectl logs -n kube-system -l k8s-app=kube-dns --tail=200
+          3. Test DNS resolution: kubectl run -it --rm debug --image=busybox -- nslookup kubernetes.default
+  aks-troubleshooting.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(AKS)|(Azure.*Kubernetes)|(node.*not.*ready)"
+        instructions: >
+          Diagnose AKS issues.
+          1. Check node status: kubectl get nodes -o wide
+          2. Check node conditions: kubectl describe nodes
+          3. Review system pods: kubectl get pods -n kube-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: holmes-secrets
+  namespace: holmesgpt
+type: Opaque
+stringData:
+  # Set via environment or replace with actual keys
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-placeholder}"
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-placeholder}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: holmes
+  namespace: holmesgpt
+  labels:
+    app: holmes
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: holmes
+  template:
+    metadata:
+      labels:
+        app: holmes
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: holmes
+      containers:
+        - name: holmes
+          image: robustadev/holmes:0.18.2
+          imagePullPolicy: Always
+          command: ["python3", "-u", "server.py"]
+          ports:
+            - containerPort: 5050
+              name: http
+          livenessProbe:
+            tcpSocket:
+              port: 5050
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: 5050
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: ENABLE_TELEMETRY
+              value: "false"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: holmes-secrets
+                  key: OPENAI_API_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: holmes-secrets
+                  key: ANTHROPIC_API_KEY
+          lifecycle:
+            preStop:
+              exec:
+                command: ["bash", "-c", "kill -SIGINT 1"]
+          volumeMounts:
+            - name: custom-toolsets
+              mountPath: /etc/holmes/config
+            - name: runbooks
+              mountPath: /etc/holmes/runbooks
+            - name: config
+              mountPath: /root/.holmes
+          resources:
+            requests:
+              cpu: 100m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: custom-toolsets
+          configMap:
+            name: holmes-toolsets
+            optional: true
+        - name: runbooks
+          configMap:
+            name: holmes-runbooks
+            optional: true
+        - name: config
+          configMap:
+            name: holmes-config
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: holmesgpt
+  namespace: holmesgpt
+  labels:
+    app: holmes
+spec:
+  selector:
+    app: holmes
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 5050
