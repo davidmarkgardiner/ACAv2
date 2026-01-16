@@ -1,0 +1,28 @@
+# Simple Webhook EventSource for testing Mattermost integration
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: test-webhook
+  namespace: argo-events
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    triage:
+      port: "12000"
+      endpoint: /triage
+      method: POST
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-webhook-svc
+  namespace: argo-events
+spec:
+  selector:
+    eventsource-name: test-webhook
+  ports:
+    - port: 12000
+      targetPort: 12000

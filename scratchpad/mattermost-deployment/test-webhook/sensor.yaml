@@ -1,0 +1,19 @@
+# Simple Sensor for testing - just logs the payload
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: test-sensor
+  namespace: argo-events
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+  dependencies:
+    - name: triage-dep
+      eventSourceName: test-webhook
+      eventName: triage
+  triggers:
+    - template:
+        name: log-payload
+        log:
+          intervalSeconds: 1
