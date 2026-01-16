@@ -1,0 +1,256 @@
+# Mattermost Manual Triage Integration
+# Allows users to manually submit events for AI triage via Mattermost
+#
+# Architecture:
+#   User (@triage command) → Mattermost Outgoing Webhook
+#     → Argo Events Webhook EventSource
+#     → Argo Events Sensor
+#     → multi-cluster-triage Workflow
+#     → Results posted back to Mattermost
+#
+# Usage in Mattermost:
+#   @triage namespace/pod-name reason [cluster]
+#   @triage payments/checkout-xyz OOMKilled
+#   @triage kube-system/coredns-abc CrashLoopBackOff prod-cluster
+#
+# Or with slash command:
+#   /triage namespace/pod reason
+#
+# Mattermost Webhook Payload format:
+# {
+#   "channel_id": "xxx",
+#   "channel_name": "town-square",
+#   "team_id": "xxx",
+#   "team_domain": "my-team",
+#   "post_id": "xxx",
+#   "text": "@triage default/nginx CrashLoopBackOff",
+#   "trigger_word": "@triage",
+#   "user_id": "xxx",
+#   "user_name": "john.doe",
+#   "file_ids": ""
+# }
+
+---
+# Webhook EventSource - receives manual triage requests from Mattermost
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: manual-triage-webhook
+  namespace: argo-events
+  labels:
+    app: manual-triage
+    integration: mattermost
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    manual-triage:
+      port: "12000"
+      endpoint: /triage
+      method: POST
+
+---
+# Sensor - processes manual triage requests and triggers workflow
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: manual-triage-sensor
+  namespace: argo-events
+  labels:
+    app: manual-triage
+    integration: mattermost
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: triage-request
+      eventSourceName: manual-triage-webhook
+      eventName: manual-triage
+
+  triggers:
+    - template:
+        name: run-triage-workflow
+        conditions: "triage-request"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: manual-triage-
+                labels:
+                  app: manual-triage
+                  source: mattermost
+              spec:
+                # Auto-cleanup
+                ttlStrategy:
+                  secondsAfterCompletion: 300
+                  secondsAfterSuccess: 300
+                  secondsAfterFailure: 600
+                podGC:
+                  strategy: OnWorkflowCompletion
+                workflowTemplateRef:
+                  name: multi-cluster-triage
+                serviceAccountName: argo-events-sa
+                arguments:
+                  parameters:
+                    - name: cluster-name
+                      value: ""
+                    - name: namespace
+                      value: ""
+                    - name: resource-name
+                      value: ""
+                    - name: resource-kind
+                      value: ""
+                    - name: event-reason
+                      value: ""
+                    - name: event-message
+                      value: ""
+                    - name: gitlab-project
+                      value: "davidmarkgardiner/mcp-test-repo"
+          parameters:
+            # Parse Mattermost payload - text format: "@triage namespace/resource reason [cluster]"
+            # cluster-name (use default if not in text)
+            - src:
+                dependencyName: triage-request
+                dataTemplate: '{{ $text := .Input.body.text }}{{ $parts := splitList " " $text }}{{ if ge (len $parts) 4 }}{{ index $parts 3 }}{{ else }}kind-argo-workflow{{ end }}'
+              dest: spec.arguments.parameters.0.value
+            # namespace (from namespace/resource)
+            - src:
+                dependencyName: triage-request
+                dataTemplate: '{{ $text := .Input.body.text }}{{ $parts := splitList " " $text }}{{ if ge (len $parts) 2 }}{{ $res := index $parts 1 }}{{ $resParts := splitList "/" $res }}{{ if ge (len $resParts) 2 }}{{ index $resParts 0 }}{{ else }}default{{ end }}{{ else }}default{{ end }}'
+              dest: spec.arguments.parameters.1.value
+            # resource-name (from namespace/resource)
+            - src:
+                dependencyName: triage-request
+                dataTemplate: '{{ $text := .Input.body.text }}{{ $parts := splitList " " $text }}{{ if ge (len $parts) 2 }}{{ $res := index $parts 1 }}{{ $resParts := splitList "/" $res }}{{ if ge (len $resParts) 2 }}{{ index $resParts 1 }}{{ else }}{{ $res }}{{ end }}{{ else }}unknown{{ end }}'
+              dest: spec.arguments.parameters.2.value
+            # resource-kind (always Pod for now)
+            - src:
+                dependencyName: triage-request
+                value: Pod
+              dest: spec.arguments.parameters.3.value
+            # event-reason
+            - src:
+                dependencyName: triage-request
+                dataTemplate: '{{ $text := .Input.body.text }}{{ $parts := splitList " " $text }}{{ if ge (len $parts) 3 }}{{ index $parts 2 }}{{ else }}Unknown{{ end }}'
+              dest: spec.arguments.parameters.4.value
+            # event-message
+            - src:
+                dependencyName: triage-request
+                dataTemplate: 'Manual triage from {{ .Input.body.user_name }} in #{{ .Input.body.channel_name }}: {{ .Input.body.text }}'
+              dest: spec.arguments.parameters.5.value
+      retryStrategy:
+        steps: 3
+        duration: 10s
+
+    # Post acknowledgment back to Mattermost via inline workflow
+    - template:
+        name: notify-mattermost-started
+        conditions: "triage-request"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: triage-notify-
+                labels:
+                  app: manual-triage
+                  type: notification
+              spec:
+                serviceAccountName: argo-events-sa
+                ttlStrategy:
+                  secondsAfterCompletion: 60
+                entrypoint: notify
+                arguments:
+                  parameters:
+                    - name: text
+                      value: ""
+                    - name: user
+                      value: ""
+                    - name: channel
+                      value: ""
+                templates:
+                  - name: notify
+                    inputs:
+                      parameters:
+                        - name: text
+                        - name: user
+                        - name: channel
+                    script:
+                      image: badouralix/curl-jq:latest
+                      command: [sh]
+                      env:
+                        - name: WEBHOOK_URL
+                          valueFrom:
+                            configMapKeyRef:
+                              name: mattermost-webhook-config
+                              key: WEBHOOK_URL
+                      source: |
+                        #!/bin/sh
+                        TEXT='{{inputs.parameters.text}}'
+                        USER='{{inputs.parameters.user}}'
+                        CHANNEL='{{inputs.parameters.channel}}'
+
+                        # Mattermost incoming webhook format
+                        PAYLOAD=$(cat <<EOFP
+                        {
+                          "channel": "${CHANNEL}",
+                          "username": "Holmes Bot",
+                          "icon_url": "https://www.robustaintelligence.com/hubfs/holmes_logo.svg",
+                          "text": ":mag: **Triage Started**\n${TEXT}\n\nTriggered by: ${USER}\n_Holmes is analyzing..._"
+                        }
+                        EOFP
+                        )
+
+                        curl -s -X POST "$WEBHOOK_URL" \
+                          -H "Content-Type: application/json" \
+                          -d "$PAYLOAD" \
+                          --max-time 10 || echo "Notification failed"
+          parameters:
+            - src:
+                dependencyName: triage-request
+                dataKey: body.text
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: triage-request
+                dataKey: body.user_name
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: triage-request
+                dataKey: body.channel_name
+              dest: spec.arguments.parameters.2.value
+
+---
+# ConfigMap for Mattermost webhook URL
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mattermost-webhook-config
+  namespace: argo-events
+data:
+  # Update this after creating the incoming webhook in Mattermost
+  WEBHOOK_URL: "http://mattermost.mattermost.svc.cluster.local:8065/hooks/PLACEHOLDER"
+
+---
+# Service to expose the webhook
+apiVersion: v1
+kind: Service
+metadata:
+  name: manual-triage-webhook
+  namespace: argo-events
+  labels:
+    app: manual-triage
+spec:
+  selector:
+    eventsource-name: manual-triage-webhook
+  ports:
+    - port: 12000
+      targetPort: 12000

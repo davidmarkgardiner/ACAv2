@@ -1,0 +1,44 @@
+# Argo Events EventSource for Azure Event Hub - PRODUCTION
+# Uses Shared Access Key authentication
+#
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    environment: production
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+  azureEventsHub:
+    k8s-warnings:
+      # Event Hub FQDN
+      # Format: <namespace>.servicebus.windows.net
+      fqdn: "k8s-events-hub-fb.servicebus.windows.net"
+
+      # Event Hub name
+      hubName: "kube-events"
+
+      # Consumer group
+      consumerGroup: "argo-events"
+
+      # Shared Access Key authentication
+      sharedAccessKeyName:
+        name: eventhub-listener-secret
+        key: sharedAccessKeyName
+      sharedAccessKey:
+        name: eventhub-listener-secret
+        key: sharedAccessKey

@@ -1,0 +1,227 @@
+# Mattermost Standalone Deployment
+# For local development/testing - air-gap friendly
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mattermost-config
+  namespace: mattermost
+data:
+  # Site settings
+  MM_SERVICESETTINGS_SITEURL: "http://localhost:8065"
+  MM_SERVICESETTINGS_LISTENADDRESS: ":8065"
+
+  # Enable webhooks and integrations (critical for Argo integration)
+  MM_SERVICESETTINGS_ENABLEINCOMINGWEBHOOKS: "true"
+  MM_SERVICESETTINGS_ENABLEOUTGOINGWEBHOOKS: "true"
+  MM_SERVICESETTINGS_ENABLECOMMANDS: "true"
+  MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE: "true"
+  MM_SERVICESETTINGS_ENABLEPOSTICONOVERRIDE: "true"
+  MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+
+  # Team settings
+  MM_TEAMSETTINGS_ENABLETEAMCREATION: "true"
+  MM_TEAMSETTINGS_ENABLEUSERCREATION: "true"
+  MM_TEAMSETTINGS_ENABLEOPENSERVER: "true"
+
+  # File settings - use local storage for air-gap
+  MM_FILESETTINGS_DRIVERNAME: "local"
+  MM_FILESETTINGS_DIRECTORY: "/mattermost/data/"
+  MM_FILESETTINGS_MAXFILESIZE: "52428800"
+
+  # Log settings
+  MM_LOGSETTINGS_ENABLECONSOLE: "true"
+  MM_LOGSETTINGS_CONSOLELEVEL: "INFO"
+  MM_LOGSETTINGS_ENABLEFILE: "true"
+  MM_LOGSETTINGS_FILELEVEL: "INFO"
+
+  # Email settings - disable for local testing
+  MM_EMAILSETTINGS_SENDEMAILNOTIFICATIONS: "false"
+  MM_EMAILSETTINGS_REQUIREEMAILVERIFICATION: "false"
+  MM_EMAILSETTINGS_ENABLESMTPAUTH: "false"
+
+  # Plugin settings
+  MM_PLUGINSETTINGS_ENABLE: "true"
+  MM_PLUGINSETTINGS_ENABLEUPLOADS: "true"
+
+  # Telemetry - disable for air-gap
+  MM_LOGSETTINGS_ENABLEDIAGNOSTICS: "false"
+  MM_SERVICESETTINGS_ENABLESECURITYFIXALERT: "false"
+
+  # Air-gap critical settings
+  # Allow internal connections for outgoing webhooks to reach Argo Events
+  MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,*.svc.cluster.local"
+  MM_SERVICESETTINGS_OUTGOINGINTEGRATIONREQUESTSTIMEOUT: "60"
+
+  # Disable marketplace (requires internet)
+  MM_PLUGINSETTINGS_ENABLEMARKETPLACE: "false"
+  MM_PLUGINSETTINGS_ENABLEREMOTEMARKETPLACE: "false"
+
+  # Disable push notifications (requires internet)
+  MM_EMAILSETTINGS_SENDPUSHNOTIFICATIONS: "false"
+  MM_EMAILSETTINGS_PUSHNOTIFICATIONSERVER: ""
+
+  # Disable image proxy (requires internet)
+  MM_IMAGEPROXYSETTINGS_ENABLE: "false"
+
+  # Disable community links
+  MM_SUPPORTSETTINGS_ENABLEASKCOMMUNITYSUPPORTLINK: "false"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mattermost-data
+  namespace: mattermost
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mattermost
+  namespace: mattermost
+  labels:
+    app: mattermost
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mattermost
+  template:
+    metadata:
+      labels:
+        app: mattermost
+    spec:
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+      securityContext:
+        runAsUser: 2000
+        runAsGroup: 2000
+        fsGroup: 2000
+      initContainers:
+      - name: wait-for-postgresql
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z postgresql.mattermost.svc.cluster.local 5432; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+          echo "PostgreSQL is ready"
+      containers:
+      - name: mattermost
+        image: mattermost/mattermost-team-edition:10.2.0
+        ports:
+        - containerPort: 8065
+          name: http
+        - containerPort: 8443
+          name: calls
+        envFrom:
+        - configMapRef:
+            name: mattermost-config
+        env:
+        # Database connection string
+        - name: MM_SQLSETTINGS_DRIVERNAME
+          value: "postgres"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-secret
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-secret
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-secret
+              key: POSTGRES_DB
+        - name: MM_SQLSETTINGS_DATASOURCE
+          value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgresql.mattermost.svc.cluster.local:5432/$(POSTGRES_DB)?sslmode=disable&connect_timeout=10"
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        volumeMounts:
+        - name: mattermost-data
+          mountPath: /mattermost/data
+        - name: mattermost-logs
+          mountPath: /mattermost/logs
+        - name: mattermost-plugins
+          mountPath: /mattermost/plugins
+        - name: mattermost-client-plugins
+          mountPath: /mattermost/client/plugins
+        - name: mattermost-config-volume
+          mountPath: /mattermost/config
+        readinessProbe:
+          httpGet:
+            path: /api/v4/system/ping
+            port: 8065
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api/v4/system/ping
+            port: 8065
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+      volumes:
+      - name: mattermost-data
+        persistentVolumeClaim:
+          claimName: mattermost-data
+      - name: mattermost-logs
+        emptyDir: {}
+      - name: mattermost-plugins
+        emptyDir: {}
+      - name: mattermost-client-plugins
+        emptyDir: {}
+      - name: mattermost-config-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mattermost
+  namespace: mattermost
+spec:
+  selector:
+    app: mattermost
+  ports:
+  - port: 8065
+    targetPort: 8065
+    name: http
+  - port: 8443
+    targetPort: 8443
+    name: calls
+---
+# NodePort service for local access without port-forward
+apiVersion: v1
+kind: Service
+metadata:
+  name: mattermost-nodeport
+  namespace: mattermost
+spec:
+  type: NodePort
+  selector:
+    app: mattermost
+  ports:
+  - port: 8065
+    targetPort: 8065
+    nodePort: 30065
+    name: http
