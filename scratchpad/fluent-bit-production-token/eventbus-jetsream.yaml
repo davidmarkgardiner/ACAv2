@@ -1,0 +1,52 @@
+
+# ````                                                                                                                                   
+#   ┌─────────────────┬───────────────────────────────────────────┬───────────────────────┐                                                                            
+#   │    Container    │                   Image                   │        Purpose        │                                                                            
+#   ├─────────────────┼───────────────────────────────────────────┼───────────────────────┤                                                                            
+#   │ nats            │ nats:2.10.10                              │ Main NATS server      │                                                                            
+#   ├─────────────────┼───────────────────────────────────────────┼───────────────────────┤                                                                            
+#   │ config-reloader │ natsio/nats-server-config-reloader:0.14.0 │ Config reload sidecar │                                                                            
+#   ├─────────────────┼───────────────────────────────────────────┼───────────────────────┤                                                                            
+#   │ metrics         │ natsio/prometheus-nats-exporter:0.14.0    │ Metrics exporter      │                                                                            
+#   └─────────────────┴───────────────────────────────────────────┴───────────────────────┘                                                                            
+#   For air-gapped, you'll need to mirror all 3. The JetStream spec doesn't have the same metricsExporterImage: "" option as NATS native.      
+# ```
+apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: argo-events
+spec:
+  jetstream:
+    # Supported versions: latest, 2.8.1, 2.8.1-alpine, 2.8.2, 2.8.2-alpine, 2.9.1, 2.9.12, 2.9.16, 2.10.10
+    version: "2.10.10"
+    replicas: 3
+    # Air-gapped image - UPDATE to your registry
+    containerTemplate:
+      imagePullPolicy: IfNotPresent
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+    # Persistence (optional - enable for durability)
+    # persistence:
+    #   storageClassName: managed-premium
+    #   accessMode: ReadWriteOnce
+    #   volumeSize: 10Gi
+    # Stream settings
+    settings: |
+      max_file_store: 1GB
+    # For air-gapped: override the image
+    # Note: JetStream uses nats image, specify via affinity/nodeSelector or
+    # check if your Argo Events controller has image override options
