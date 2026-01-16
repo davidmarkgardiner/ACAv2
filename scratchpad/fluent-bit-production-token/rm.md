@@ -1,5 +1,5 @@
 The secret eventhub-listener-secret was referenced but never created. Now fixed with:                                                                              
-                                                                                                                                                                     
+```                                                                                                                                                             
   New file: 03a-mgmt-cluster-external-secret.yaml                                                                                                                    
   - ExternalSecret that syncs credentials from Key Vault to the management cluster                                                                                   
                                                                                                                                                                      
@@ -49,7 +49,7 @@ The secret eventhub-listener-secret was referenced but never created. Now fixed 
                                                                                                                                                                      
 ⏺ Read(application-stack/apps/holmesgpt/multi-cluster/fluent-bit-production/04-sensor-production.yaml)                                                               
   ⎿  Read 70 lines                                                                                                                                                   
-                                                                                                                                                                     
+                                                                                                                                                               
 ⏺ Here's how they connect:                                                                                                                                           
                                                                                                                                                                      
   ┌─────────────────────────────────────────────────────────────────────────┐                                                                                        
