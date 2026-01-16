@@ -101,6 +101,9 @@ subjects:
 ---
 # EventBus (required for Argo Events communication)
 # If you don't have an EventBus, sensors can't receive events!
+#
+# UPDATE the image to your private registry before applying
+#
 apiVersion: argoproj.io/v1alpha1
 kind: EventBus
 metadata:
@@ -111,3 +114,24 @@ spec:
     native:
       replicas: 3
       auth: token
+      # Disable metrics exporter (no sidecar)
+      metricsExporterImage: ""
+      # Air-gapped image - UPDATE to your registry
+      image: your-registry.example.com/nats:2.10.14-alpine
+      containerTemplate:
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
