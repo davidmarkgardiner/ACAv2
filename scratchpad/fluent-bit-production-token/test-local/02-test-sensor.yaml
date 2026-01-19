@@ -1,0 +1,110 @@
+# Test Sensor for LOCAL TESTING
+# Subscribes to webhook EventSource and triggers the same workflow as production
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: webhook-test-sensor
+  namespace: argo-events
+  labels:
+    purpose: local-testing
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: test-event
+      eventSourceName: webhook-test
+      eventName: test-k8s-event
+
+  triggers:
+    # Debug trigger - just logs the payload
+    - template:
+        name: log-test-event
+        conditions: "test-event"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: test-log-event-
+                labels:
+                  purpose: local-testing
+              spec:
+                serviceAccountName: argo-events-sa
+                entrypoint: log-event
+                arguments:
+                  parameters:
+                    - name: raw-payload
+                      value: ""
+                    - name: cluster
+                      value: ""
+                    - name: namespace
+                      value: ""
+                    - name: resource-name
+                      value: ""
+                    - name: reason
+                      value: ""
+                    - name: message
+                      value: ""
+                templates:
+                  - name: log-event
+                    inputs:
+                      parameters:
+                        - name: raw-payload
+                        - name: cluster
+                        - name: namespace
+                        - name: resource-name
+                        - name: reason
+                        - name: message
+                    script:
+                      image: alpine:3.18
+                      command: [sh]
+                      source: |
+                        echo "=========================================="
+                        echo "LOCAL TEST - Event Received Successfully!"
+                        echo "=========================================="
+                        echo ""
+                        echo "Extracted Parameters:"
+                        echo "  Cluster:       {{inputs.parameters.cluster}}"
+                        echo "  Namespace:     {{inputs.parameters.namespace}}"
+                        echo "  Resource:      {{inputs.parameters.resource-name}}"
+                        echo "  Reason:        {{inputs.parameters.reason}}"
+                        echo "  Message:       {{inputs.parameters.message}}"
+                        echo ""
+                        echo "Raw Payload:"
+                        echo '{{inputs.parameters.raw-payload}}'
+                        echo ""
+                        echo "=========================================="
+                        echo "SUCCESS: Sensor -> Workflow pipeline works!"
+                        echo "=========================================="
+          parameters:
+            # Raw payload for debugging
+            - src:
+                dependencyName: test-event
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+            # Extract fields - webhook sends JSON directly (no base64)
+            - src:
+                dependencyName: test-event
+                dataTemplate: '{{ .Input.body.cluster | default "unknown" }}'
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: test-event
+                dataTemplate: '{{ .Input.body.involvedObject.namespace | default "default" }}'
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: test-event
+                dataTemplate: '{{ .Input.body.involvedObject.name | default "unknown" }}'
+              dest: spec.arguments.parameters.3.value
+            - src:
+                dependencyName: test-event
+                dataTemplate: '{{ .Input.body.reason | default "Unknown" }}'
+              dest: spec.arguments.parameters.4.value
+            - src:
+                dependencyName: test-event
+                dataTemplate: '{{ .Input.body.message | default "" }}'
+              dest: spec.arguments.parameters.5.value
