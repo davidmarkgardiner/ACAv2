@@ -1,0 +1,18 @@
+{
+  "type": "Warning",
+  "reason": "BackOff",
+  "message": "Back-off pulling image \"invalid:nonexistent\"",
+  "involvedObject": {
+    "kind": "Pod",
+    "name": "test-pod-abc123",
+    "namespace": "production"
+  },
+  "cluster": "aks-prod-cluster",
+  "source": {
+    "component": "kubelet",
+    "host": "aks-node-1"
+  },
+  "firstTimestamp": "2024-01-15T10:00:00Z",
+  "lastTimestamp": "2024-01-15T10:05:00Z",
+  "count": 5
+}
