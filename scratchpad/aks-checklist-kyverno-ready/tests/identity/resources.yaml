@@ -1,0 +1,209 @@
+# Test resources for identity-policies
+---
+# Pod with explicit serviceAccountName - should pass explicit SA policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-explicit-sa
+  namespace: test-ns
+spec:
+  serviceAccountName: my-app-sa
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with default serviceAccountName - should fail explicit SA policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-default-sa
+  namespace: test-ns
+spec:
+  serviceAccountName: default
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without serviceAccountName (uses default) - should fail explicit SA policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-sa-specified
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with workload identity and projected token - should pass token projection policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-workload-identity
+  namespace: test-ns
+  labels:
+    azure.workload.identity/use: "true"
+spec:
+  serviceAccountName: workload-identity-sa
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: azure-identity-token
+          mountPath: /var/run/secrets/azure/tokens
+  volumes:
+    - name: azure-identity-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: api://AzureADTokenExchange
+              expirationSeconds: 3600
+              path: azure-identity-token
+---
+# Pod with workload identity but without projected token - should fail token projection policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-workload-identity-no-token
+  namespace: test-ns
+  labels:
+    azure.workload.identity/use: "true"
+spec:
+  serviceAccountName: workload-identity-sa
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without workload identity label - should skip token projection policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-workload-identity
+  namespace: test-ns
+spec:
+  serviceAccountName: my-sa
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod pulling from ACR without imagePullSecrets (using managed identity) - should pass ACR auth policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-acr-managed-identity
+  namespace: test-ns
+spec:
+  serviceAccountName: my-sa
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod pulling from ACR with acr-prefixed imagePullSecrets - should fail ACR auth policy (prefers MI)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-acr-with-pullsecret
+  namespace: test-ns
+spec:
+  imagePullSecrets:
+    - name: acr-pull-secret
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# ClusterRoleBinding to cluster-admin - should fail admin binding policy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: User
+    name: admin@example.com
+    apiGroup: rbac.authorization.k8s.io
+---
+# ClusterRoleBinding to non-admin role - should pass admin binding policy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: viewer-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: User
+    name: viewer@example.com
+    apiGroup: rbac.authorization.k8s.io
+---
+# Role with wildcard verb on secrets - should fail RBAC least privilege policy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: role-wildcard-secrets
+  namespace: test-ns
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["*"]
+---
+# Role with specific verbs - should pass RBAC least privilege policy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: role-specific-verbs
+  namespace: test-ns
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+# ClusterRole with wildcard on configmaps - should fail RBAC least privilege policy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clusterrole-wildcard-configmaps
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["*"]
+---
+# ClusterRole with specific verbs - should pass RBAC least privilege policy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clusterrole-specific
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+# ServiceAccount with workload identity annotation - should pass WI annotation policy
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-with-wi-annotation
+  namespace: test-ns
+  labels:
+    azure.workload.identity/use: "true"
+  annotations:
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000001"
+---
+# ServiceAccount with workload identity label but no annotation - should fail WI annotation policy
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-without-wi-annotation
+  namespace: test-ns
+  labels:
+    azure.workload.identity/use: "true"
+---
+# ServiceAccount without workload identity - should skip WI annotation policy
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-no-workload-identity
+  namespace: test-ns

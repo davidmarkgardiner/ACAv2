@@ -60,7 +60,9 @@ spec:
                     - name: event-message
                       value: ""
                     - name: gitlab-project
-                      value: "markgardiner/mcp-test-repo"
+                      value: "davidmarkgardiner/mcp-test-repo"
+                    - name: holmes-url
+                      value: "http://holmesgpt.holmesgpt.svc.cluster.local:80"
           parameters:
             # Map Event Hub payload to workflow parameters
             # Event Hub body is Base64 encoded - use b64dec function

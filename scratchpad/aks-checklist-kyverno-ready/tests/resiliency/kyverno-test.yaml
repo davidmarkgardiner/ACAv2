@@ -1,0 +1,162 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-bc-dr-policies-test
+policies:
+  - ../../policies/resiliency/bc-dr-policies.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-deployment-zone-spread tests
+  - kind: Deployment
+    policy: aks-check-deployment-zone-spread
+    rule: require-zone-topology
+    resources:
+      - critical-deployment-with-zone-spread
+    result: pass
+  - kind: Deployment
+    policy: aks-check-deployment-zone-spread
+    rule: require-zone-topology
+    resources:
+      - critical-deployment-no-zone-spread
+    result: fail
+  - kind: Deployment
+    policy: aks-check-deployment-zone-spread
+    rule: require-zone-topology
+    resources:
+      - non-critical-deployment
+    result: skip
+  # aks-check-multi-replica-antiaffinity tests
+  - kind: Deployment
+    policy: aks-check-multi-replica-antiaffinity
+    rule: require-antiaffinity-3plus
+    resources:
+      - deployment-3-replicas-antiaffinity
+    result: pass
+  - kind: Deployment
+    policy: aks-check-multi-replica-antiaffinity
+    rule: require-antiaffinity-3plus
+    resources:
+      - deployment-3-replicas-no-antiaffinity
+    result: fail
+  - kind: Deployment
+    policy: aks-check-multi-replica-antiaffinity
+    rule: require-antiaffinity-3plus
+    resources:
+      - deployment-2-replicas
+    result: skip
+  # aks-check-pdb-min-available tests
+  - kind: PodDisruptionBudget
+    policy: aks-check-pdb-min-available
+    rule: validate-pdb-config
+    resources:
+      - pdb-with-minavailable
+    result: pass
+  - kind: PodDisruptionBudget
+    policy: aks-check-pdb-min-available
+    rule: validate-pdb-config
+    resources:
+      - pdb-with-maxunavailable
+    result: pass
+  - kind: PodDisruptionBudget
+    policy: aks-check-pdb-min-available
+    rule: validate-pdb-config
+    resources:
+      - pdb-no-config
+    result: fail
+  # aks-check-statefulset-replicas tests
+  - kind: StatefulSet
+    policy: aks-check-statefulset-replicas
+    rule: sts-min-replicas
+    resources:
+      - sts-with-replicas
+    result: pass
+  - kind: StatefulSet
+    policy: aks-check-statefulset-replicas
+    rule: sts-min-replicas
+    resources:
+      - sts-single-replica
+    result: fail
+  # aks-check-node-selector-resilience tests
+  - kind: Pod
+    policy: aks-check-node-selector-resilience
+    rule: no-single-zone-selector
+    resources:
+      - pod-no-zone-selector
+    result: pass
+  - kind: Pod
+    policy: aks-check-node-selector-resilience
+    rule: no-single-zone-selector
+    resources:
+      - pod-with-zone-selector
+    result: fail
+  # aks-check-priority-class tests
+  - kind: Deployment
+    policy: aks-check-priority-class
+    rule: require-priority-class
+    resources:
+      - critical-deployment-with-priority
+    result: pass
+  - kind: Deployment
+    policy: aks-check-priority-class
+    rule: require-priority-class
+    resources:
+      - critical-deployment-no-priority
+    result: fail
+  # aks-check-termination-grace-period tests
+  - kind: Pod
+    policy: aks-check-termination-grace-period
+    rule: require-grace-period
+    resources:
+      - pod-with-grace-period
+    result: pass
+  - kind: Pod
+    policy: aks-check-termination-grace-period
+    rule: require-grace-period
+    resources:
+      - pod-short-grace-period
+    result: fail
+  - kind: Pod
+    policy: aks-check-termination-grace-period
+    rule: require-grace-period
+    resources:
+      - pod-default-grace-period
+    result: pass
+  # aks-check-backup-label tests
+  - kind: StatefulSet
+    policy: aks-check-backup-label
+    rule: require-backup-label
+    resources:
+      - sts-with-backup-label
+    result: pass
+  - kind: StatefulSet
+    policy: aks-check-backup-label
+    rule: require-backup-label
+    resources:
+      - sts-with-velero-annotation
+    result: pass
+  - kind: StatefulSet
+    policy: aks-check-backup-label
+    rule: require-backup-label
+    resources:
+      - sts-with-backup-exclude
+    result: pass
+  - kind: StatefulSet
+    policy: aks-check-backup-label
+    rule: require-backup-label
+    resources:
+      - sts-no-backup-label
+    result: fail
+  # aks-check-acr-georeplication tests
+  - kind: Deployment
+    policy: aks-check-acr-georeplication
+    rule: require-image-region-annotation
+    resources:
+      - critical-deployment-with-acr-geo
+    result: pass
+  - kind: Deployment
+    policy: aks-check-acr-georeplication
+    rule: require-image-region-annotation
+    resources:
+      - critical-deployment-no-acr-geo
+    result: fail

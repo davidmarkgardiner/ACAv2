@@ -1,0 +1,156 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-storage-policies-test
+policies:
+  - ../../policies/storage/storage-policies.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-disallow-emptydir-sizelimit tests
+  - kind: Pod
+    policy: aks-check-disallow-emptydir-sizelimit
+    rule: require-emptydir-sizelimit
+    resources:
+      - pod-emptydir-with-limit
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-emptydir-sizelimit
+    rule: require-emptydir-sizelimit
+    resources:
+      - pod-emptydir-no-limit
+    result: fail
+  - kind: Pod
+    policy: aks-check-disallow-emptydir-sizelimit
+    rule: require-emptydir-sizelimit
+    resources:
+      - pod-no-emptydir
+    result: pass
+  # aks-check-pvc-storage-class tests
+  - kind: PersistentVolumeClaim
+    policy: aks-check-pvc-storage-class
+    rule: validate-storage-class
+    resources:
+      - pvc-approved-class
+    result: pass
+  - kind: PersistentVolumeClaim
+    policy: aks-check-pvc-storage-class
+    rule: validate-storage-class
+    resources:
+      - pvc-premium-class
+    result: pass
+  - kind: PersistentVolumeClaim
+    policy: aks-check-pvc-storage-class
+    rule: validate-storage-class
+    resources:
+      - pvc-unapproved-class
+    result: fail
+  # aks-check-pvc-access-mode tests
+  - kind: PersistentVolumeClaim
+    policy: aks-check-pvc-access-mode
+    rule: validate-access-mode
+    resources:
+      - pvc-with-access-mode
+    result: pass
+  - kind: PersistentVolumeClaim
+    policy: aks-check-pvc-access-mode
+    rule: validate-access-mode
+    resources:
+      - pvc-rwx-access-mode
+    result: pass
+  # aks-check-statefulset-pvc-template tests
+  - kind: StatefulSet
+    policy: aks-check-statefulset-pvc-template
+    rule: sts-pvc-storage-class
+    resources:
+      - sts-with-pvc-template
+    result: pass
+  - kind: StatefulSet
+    policy: aks-check-statefulset-pvc-template
+    rule: sts-pvc-storage-class
+    resources:
+      - sts-pvc-no-storage-class
+    result: fail
+  # aks-check-disallow-local-storage tests
+  - kind: Pod
+    policy: aks-check-disallow-local-storage
+    rule: warn-local-storage
+    resources:
+      - pod-no-local-volume
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-local-storage
+    rule: warn-local-storage
+    resources:
+      - pod-with-local-volume
+    result: fail
+  # aks-check-csi-driver-usage tests
+  - kind: PersistentVolume
+    policy: aks-check-csi-driver-usage
+    rule: recommend-csi
+    resources:
+      - pv-with-csi
+    result: pass
+  - kind: PersistentVolume
+    policy: aks-check-csi-driver-usage
+    rule: recommend-csi
+    resources:
+      - pv-with-blob-csi
+    result: pass
+  - kind: PersistentVolume
+    policy: aks-check-csi-driver-usage
+    rule: recommend-csi
+    resources:
+      - pv-with-azure-disk
+    result: fail
+  - kind: PersistentVolume
+    policy: aks-check-csi-driver-usage
+    rule: recommend-csi
+    resources:
+      - pv-with-secrets-csi
+    result: pass
+  # aks-check-secrets-store-csi tests
+  - kind: Pod
+    policy: aks-check-secrets-store-csi
+    rule: check-secrets-store
+    resources:
+      - pod-keyvault-with-csi
+    result: pass
+  - kind: Pod
+    policy: aks-check-secrets-store-csi
+    rule: check-secrets-store
+    resources:
+      - pod-keyvault-no-csi
+    result: fail
+  - kind: Pod
+    policy: aks-check-secrets-store-csi
+    rule: check-secrets-store
+    resources:
+      - pod-no-keyvault-label
+    result: skip
+  # aks-check-volume-snapshot-class tests
+  - kind: VolumeSnapshot
+    policy: aks-check-volume-snapshot-class
+    rule: validate-snapshot-class
+    resources:
+      - snapshot-with-class
+    result: pass
+  - kind: VolumeSnapshot
+    policy: aks-check-volume-snapshot-class
+    rule: validate-snapshot-class
+    resources:
+      - snapshot-no-class
+    result: fail
+  # aks-check-pvc-delete-protection tests
+  - kind: PersistentVolumeClaim
+    policy: aks-check-pvc-delete-protection
+    rule: require-protection-label
+    resources:
+      - pvc-with-importance-label
+    result: pass
+  - kind: PersistentVolumeClaim
+    policy: aks-check-pvc-delete-protection
+    rule: require-protection-label
+    resources:
+      - pvc-no-importance-label
+    result: fail

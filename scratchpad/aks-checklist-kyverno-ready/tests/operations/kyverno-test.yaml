@@ -1,0 +1,136 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-namespace-governance-test
+policies:
+  - ../../policies/operations/namespace-governance.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-require-namespace-labels tests
+  - kind: Namespace
+    policy: aks-check-require-namespace-labels
+    rule: require-owner-label
+    resources:
+      - ns-with-labels
+    result: pass
+  - kind: Namespace
+    policy: aks-check-require-namespace-labels
+    rule: require-owner-label
+    resources:
+      - ns-without-owner
+    result: fail
+  - kind: Namespace
+    policy: aks-check-require-namespace-labels
+    rule: require-owner-label
+    resources:
+      - ns-without-environment
+    result: fail
+  # aks-check-require-resource-quota tests
+  - kind: Namespace
+    policy: aks-check-require-resource-quota
+    rule: check-quota-exists
+    resources:
+      - ns-with-quota-label
+    result: pass
+  - kind: Namespace
+    policy: aks-check-require-resource-quota
+    rule: check-quota-exists
+    resources:
+      - ns-without-quota-label
+    result: fail
+  # aks-check-require-limit-range tests
+  - kind: Namespace
+    policy: aks-check-require-limit-range
+    rule: check-limitrange-exists
+    resources:
+      - ns-with-limitrange-label
+    result: pass
+  - kind: Namespace
+    policy: aks-check-require-limit-range
+    rule: check-limitrange-exists
+    resources:
+      - ns-without-limitrange-label
+    result: fail
+  # aks-check-require-azure-tags tests
+  - kind: Namespace
+    policy: aks-check-require-azure-tags
+    rule: require-cost-center
+    resources:
+      - ns-with-cost-center
+    result: pass
+  - kind: Namespace
+    policy: aks-check-require-azure-tags
+    rule: require-cost-center
+    resources:
+      - ns-without-cost-center
+    result: fail
+  # aks-check-gitops-labels tests
+  - kind: Deployment
+    policy: aks-check-gitops-labels
+    rule: check-gitops-labels
+    resources:
+      - deployment-argocd
+    result: pass
+  - kind: Deployment
+    policy: aks-check-gitops-labels
+    rule: check-gitops-labels
+    resources:
+      - deployment-argocd-instance
+    result: pass
+  - kind: Deployment
+    policy: aks-check-gitops-labels
+    rule: check-gitops-labels
+    resources:
+      - deployment-flux
+    result: pass
+  - kind: Deployment
+    policy: aks-check-gitops-labels
+    rule: check-gitops-labels
+    resources:
+      - deployment-no-gitops
+    result: fail
+  # aks-check-require-annotations-documentation tests
+  - kind: Deployment
+    policy: aks-check-require-annotations-documentation
+    rule: require-documentation
+    resources:
+      - deployment-with-description
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-annotations-documentation
+    rule: require-documentation
+    resources:
+      - deployment-with-docs-url
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-annotations-documentation
+    rule: require-documentation
+    resources:
+      - deployment-no-docs
+    result: fail
+  # aks-check-require-contact-labels tests
+  - kind: Deployment
+    policy: aks-check-require-contact-labels
+    rule: require-team-contact
+    resources:
+      - deployment-with-team
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-contact-labels
+    rule: require-team-contact
+    resources:
+      - deployment-with-oncall
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-contact-labels
+    rule: require-team-contact
+    resources:
+      - deployment-with-slack
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-contact-labels
+    rule: require-team-contact
+    resources:
+      - deployment-no-contact
+    result: fail

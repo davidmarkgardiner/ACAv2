@@ -1,0 +1,568 @@
+# Argo Workflow for AKS Checklist Compliance Scanning
+# Runs Kyverno CLI against cluster resources and generates reports
+---
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: aks-compliance-scan
+  namespace: argo-workflows
+  annotations:
+    description: "Automated AKS checklist compliance scanning using Kyverno CLI"
+spec:
+  entrypoint: compliance-scan
+  serviceAccountName: compliance-scanner
+
+  # Pod cleanup - delete pods immediately after workflow completes
+  podGC:
+    strategy: OnWorkflowSuccess    # Delete pods when workflow succeeds
+    deleteDelayDuration: 60s       # Wait 60s before deletion (for log collection)
+
+  # Workflow cleanup - auto-delete workflow after completion
+  ttlStrategy:
+    secondsAfterCompletion: 3600   # Delete 1 hour after completion
+    secondsAfterSuccess: 3600      # Delete 1 hour after success
+    secondsAfterFailure: 86400     # Keep failed workflows 24h for debugging
+
+  arguments:
+    parameters:
+      - name: cluster-name
+        value: "aks-cluster"
+      - name: namespaces
+        value: "all"  # or comma-separated list
+      - name: severity-filter
+        value: "high,medium"
+      - name: output-format
+        value: "json"
+      - name: slack-channel
+        value: "#aks-compliance"
+  
+  volumeClaimTemplates:
+    - metadata:
+        name: reports
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+  templates:
+    - name: compliance-scan
+      dag:
+        tasks:
+          - name: fetch-policies
+            template: fetch-policies
+          
+          - name: scan-security
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "security"
+
+          - name: scan-resources
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "resources"
+
+          - name: scan-application
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "application"
+
+          - name: scan-network
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "network"
+
+          - name: scan-operations
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "operations"
+
+          - name: scan-identity
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "identity"
+
+          - name: scan-storage
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "storage"
+
+          - name: scan-resiliency
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "resiliency"
+
+          - name: scan-container
+            template: scan-category
+            dependencies: [fetch-policies]
+            arguments:
+              parameters:
+                - name: category
+                  value: "container"
+
+          - name: aggregate-reports
+            template: aggregate-reports
+            dependencies: [scan-security, scan-resources, scan-application, scan-network, scan-operations, scan-identity, scan-storage, scan-resiliency, scan-container]
+          
+          - name: generate-html-report
+            template: generate-html-report
+            dependencies: [aggregate-reports]
+          
+          - name: upload-to-storage
+            template: upload-to-storage
+            dependencies: [generate-html-report]
+          
+          - name: send-notification
+            template: send-notification
+            dependencies: [aggregate-reports]
+
+    - name: fetch-policies
+      container:
+        image: bitnami/git:latest
+        command: [sh, -c]
+        args:
+          - |
+            git clone https://github.com/your-org/aks-checklist-kyverno.git /policies
+            ls -la /policies/policies/
+        volumeMounts:
+          - name: reports
+            mountPath: /policies
+
+    - name: scan-category
+      inputs:
+        parameters:
+          - name: category
+      container:
+        image: ghcr.io/kyverno/kyverno-cli:v1.12.0
+        command: [sh, -c]
+        args:
+          - |
+            echo "Scanning category: {{inputs.parameters.category}}"
+            
+            # Scan all cluster resources against policies
+            kyverno apply /policies/policies/{{inputs.parameters.category}}/ \
+              --cluster \
+              --policy-report \
+              -o json > /reports/{{inputs.parameters.category}}-report.json
+            
+            # Generate summary
+            echo "=== {{inputs.parameters.category}} Summary ===" > /reports/{{inputs.parameters.category}}-summary.txt
+            cat /reports/{{inputs.parameters.category}}-report.json | \
+              jq -r '.results[] | "\(.policy): \(.result) - \(.message)"' >> /reports/{{inputs.parameters.category}}-summary.txt
+            
+            echo "Scan complete for {{inputs.parameters.category}}"
+        volumeMounts:
+          - name: reports
+            mountPath: /policies
+          - name: reports
+            mountPath: /reports
+
+    - name: aggregate-reports
+      container:
+        image: python:3.11-slim
+        command: [sh, -c]
+        args:
+          - |
+            pip install jq pyyaml
+            
+            cat << 'EOF' > /tmp/aggregate.py
+            import json
+            import os
+            from datetime import datetime
+            
+            reports_dir = "/reports"
+            categories = ["security", "resources", "application", "network", "operations", "identity", "storage", "resiliency", "container"]
+            
+            aggregated = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "cluster": os.environ.get("CLUSTER_NAME", "unknown"),
+                "summary": {
+                    "total_policies": 0,
+                    "pass": 0,
+                    "fail": 0,
+                    "warn": 0,
+                    "error": 0,
+                    "skip": 0
+                },
+                "by_category": {},
+                "by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+                "violations": []
+            }
+            
+            for category in categories:
+                report_file = f"{reports_dir}/{category}-report.json"
+                if os.path.exists(report_file):
+                    with open(report_file) as f:
+                        try:
+                            data = json.load(f)
+                            cat_summary = {"pass": 0, "fail": 0, "warn": 0}
+                            
+                            for result in data.get("results", []):
+                                status = result.get("result", "").lower()
+                                if status == "pass":
+                                    aggregated["summary"]["pass"] += 1
+                                    cat_summary["pass"] += 1
+                                elif status == "fail":
+                                    aggregated["summary"]["fail"] += 1
+                                    cat_summary["fail"] += 1
+                                    aggregated["violations"].append({
+                                        "category": category,
+                                        "policy": result.get("policy"),
+                                        "rule": result.get("rule"),
+                                        "resource": result.get("resource", {}).get("name"),
+                                        "namespace": result.get("resource", {}).get("namespace"),
+                                        "message": result.get("message")
+                                    })
+                                elif status == "warn":
+                                    aggregated["summary"]["warn"] += 1
+                                    cat_summary["warn"] += 1
+                                
+                                aggregated["summary"]["total_policies"] += 1
+                            
+                            aggregated["by_category"][category] = cat_summary
+                        except json.JSONDecodeError:
+                            aggregated["by_category"][category] = {"error": "Failed to parse report"}
+            
+            # Calculate compliance percentage
+            total = aggregated["summary"]["pass"] + aggregated["summary"]["fail"]
+            if total > 0:
+                aggregated["compliance_percentage"] = round(
+                    (aggregated["summary"]["pass"] / total) * 100, 2
+                )
+            else:
+                aggregated["compliance_percentage"] = 0
+            
+            with open(f"{reports_dir}/aggregated-report.json", "w") as f:
+                json.dump(aggregated, f, indent=2)
+            
+            print(f"Aggregated report generated: {aggregated['compliance_percentage']}% compliant")
+            EOF
+            
+            CLUSTER_NAME="{{workflow.parameters.cluster-name}}" python /tmp/aggregate.py
+        volumeMounts:
+          - name: reports
+            mountPath: /reports
+
+    - name: generate-html-report
+      container:
+        image: python:3.11-slim
+        command: [sh, -c]
+        args:
+          - |
+            cat << 'EOF' > /tmp/generate_html.py
+            import json
+            from datetime import datetime
+            
+            with open("/reports/aggregated-report.json") as f:
+                data = json.load(f)
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>AKS Compliance Report - {data['cluster']}</title>
+                <style>
+                    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; background: #f5f5f5; }}
+                    .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                    h1 {{ color: #333; border-bottom: 2px solid #0066cc; padding-bottom: 10px; }}
+                    .summary {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0; }}
+                    .stat {{ padding: 20px; border-radius: 8px; text-align: center; }}
+                    .stat.pass {{ background: #d4edda; color: #155724; }}
+                    .stat.fail {{ background: #f8d7da; color: #721c24; }}
+                    .stat.warn {{ background: #fff3cd; color: #856404; }}
+                    .stat.compliance {{ background: #cce5ff; color: #004085; }}
+                    .stat h2 {{ margin: 0; font-size: 36px; }}
+                    .stat p {{ margin: 5px 0 0 0; }}
+                    .category {{ margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 4px; }}
+                    .category h3 {{ margin: 0 0 10px 0; }}
+                    .violations {{ margin-top: 30px; }}
+                    .violation {{ padding: 15px; margin: 10px 0; background: #fff; border-left: 4px solid #dc3545; border-radius: 4px; }}
+                    .violation.high {{ border-color: #dc3545; }}
+                    .violation.medium {{ border-color: #ffc107; }}
+                    .violation.low {{ border-color: #17a2b8; }}
+                    table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+                    th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+                    th {{ background: #f8f9fa; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🔍 AKS Compliance Report</h1>
+                    <p><strong>Cluster:</strong> {data['cluster']} | <strong>Generated:</strong> {data['timestamp']}</p>
+                    
+                    <div class="summary">
+                        <div class="stat compliance">
+                            <h2>{data['compliance_percentage']}%</h2>
+                            <p>Compliance Score</p>
+                        </div>
+                        <div class="stat pass">
+                            <h2>{data['summary']['pass']}</h2>
+                            <p>Passed</p>
+                        </div>
+                        <div class="stat fail">
+                            <h2>{data['summary']['fail']}</h2>
+                            <p>Failed</p>
+                        </div>
+                        <div class="stat warn">
+                            <h2>{data['summary']['warn']}</h2>
+                            <p>Warnings</p>
+                        </div>
+                    </div>
+                    
+                    <h2>📊 Results by Category</h2>
+                    <table>
+                        <tr><th>Category</th><th>Pass</th><th>Fail</th><th>Warn</th></tr>
+            """
+            
+            for cat, stats in data['by_category'].items():
+                if isinstance(stats, dict) and 'pass' in stats:
+                    html += f"<tr><td>{cat.title()}</td><td>{stats['pass']}</td><td>{stats['fail']}</td><td>{stats['warn']}</td></tr>"
+            
+            html += """
+                    </table>
+                    
+                    <div class="violations">
+                        <h2>⚠️ Violations</h2>
+            """
+            
+            for v in data['violations'][:50]:  # Limit to first 50
+                html += f"""
+                        <div class="violation">
+                            <strong>{v['policy']}</strong> - {v['rule']}<br>
+                            <small>Namespace: {v.get('namespace', 'cluster-scoped')} | Resource: {v.get('resource', 'N/A')}</small><br>
+                            {v.get('message', '')}
+                        </div>
+                """
+            
+            if len(data['violations']) > 50:
+                html += f"<p><em>... and {len(data['violations']) - 50} more violations. See full JSON report.</em></p>"
+            
+            html += """
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            with open("/reports/compliance-report.html", "w") as f:
+                f.write(html)
+            
+            print("HTML report generated")
+            EOF
+            
+            python /tmp/generate_html.py
+        volumeMounts:
+          - name: reports
+            mountPath: /reports
+
+    - name: upload-to-storage
+      container:
+        image: mcr.microsoft.com/azure-cli:latest
+        command: [sh, -c]
+        args:
+          - |
+            # Upload to Azure Blob Storage
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            CLUSTER_NAME="{{workflow.parameters.cluster-name}}"
+            
+            az storage blob upload \
+              --account-name ${STORAGE_ACCOUNT} \
+              --container-name compliance-reports \
+              --name "${CLUSTER_NAME}/${TIMESTAMP}/compliance-report.html" \
+              --file /reports/compliance-report.html \
+              --auth-mode login || echo "Storage upload skipped - no credentials"
+            
+            az storage blob upload \
+              --account-name ${STORAGE_ACCOUNT} \
+              --container-name compliance-reports \
+              --name "${CLUSTER_NAME}/${TIMESTAMP}/aggregated-report.json" \
+              --file /reports/aggregated-report.json \
+              --auth-mode login || echo "Storage upload skipped - no credentials"
+            
+            echo "Reports uploaded to storage"
+        env:
+          - name: STORAGE_ACCOUNT
+            valueFrom:
+              secretKeyRef:
+                name: compliance-storage
+                key: account-name
+                optional: true
+        volumeMounts:
+          - name: reports
+            mountPath: /reports
+
+    - name: send-notification
+      container:
+        image: curlimages/curl:latest
+        command: [sh, -c]
+        args:
+          - |
+            # Read aggregated report
+            COMPLIANCE=$(cat /reports/aggregated-report.json | grep -o '"compliance_percentage": [0-9.]*' | cut -d' ' -f2)
+            PASS=$(cat /reports/aggregated-report.json | grep -o '"pass": [0-9]*' | head -1 | cut -d' ' -f2)
+            FAIL=$(cat /reports/aggregated-report.json | grep -o '"fail": [0-9]*' | head -1 | cut -d' ' -f2)
+            
+            # Send to Slack (if webhook configured)
+            if [ -n "${SLACK_WEBHOOK}" ]; then
+              curl -X POST ${SLACK_WEBHOOK} \
+                -H 'Content-type: application/json' \
+                --data "{
+                  \"text\": \"🔍 AKS Compliance Scan Complete\",
+                  \"blocks\": [
+                    {
+                      \"type\": \"header\",
+                      \"text\": {\"type\": \"plain_text\", \"text\": \"AKS Compliance Report - {{workflow.parameters.cluster-name}}\"}
+                    },
+                    {
+                      \"type\": \"section\",
+                      \"fields\": [
+                        {\"type\": \"mrkdwn\", \"text\": \"*Compliance:* ${COMPLIANCE}%\"},
+                        {\"type\": \"mrkdwn\", \"text\": \"*Passed:* ${PASS}\"},
+                        {\"type\": \"mrkdwn\", \"text\": \"*Failed:* ${FAIL}\"}
+                      ]
+                    }
+                  ]
+                }"
+              echo "Slack notification sent"
+            else
+              echo "Slack webhook not configured, skipping notification"
+            fi
+        env:
+          - name: SLACK_WEBHOOK
+            valueFrom:
+              secretKeyRef:
+                name: compliance-slack
+                key: webhook-url
+                optional: true
+        volumeMounts:
+          - name: reports
+            mountPath: /reports
+
+---
+# CronWorkflow for scheduled scans - runs every 24 hours (full scan)
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: aks-compliance-scan-daily
+  namespace: argo-workflows
+  annotations:
+    description: "Daily AKS checklist compliance scan - full scan every 24 hours"
+spec:
+  schedule: "0 6 * * *"  # Every 24 hours at 6 AM UTC
+  timezone: "UTC"
+  concurrencyPolicy: "Replace"
+  # Minimize pod noise - keep only last 2 successful runs
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  # Suspend if needed (set to true to pause scheduling)
+  suspend: false
+  workflowSpec:
+    workflowTemplateRef:
+      name: aks-compliance-scan
+    # Inherit TTL and podGC from template
+    arguments:
+      parameters:
+        - name: cluster-name
+          value: "production-aks"
+        - name: namespaces
+          value: "all"
+        - name: severity-filter
+          value: "high,medium,low"
+
+---
+# CronWorkflow for critical security policies - runs every 6 hours
+# Use this for policies that need more frequent checking (certifications, critical security)
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: aks-compliance-scan-security-frequent
+  namespace: argo-workflows
+  annotations:
+    description: "Frequent security policy scan - every 6 hours for critical policies"
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  timezone: "UTC"
+  concurrencyPolicy: "Replace"
+  successfulJobsHistoryLimit: 1  # Keep only latest
+  failedJobsHistoryLimit: 2
+  suspend: false
+  workflowSpec:
+    workflowTemplateRef:
+      name: aks-compliance-scan
+    arguments:
+      parameters:
+        - name: cluster-name
+          value: "production-aks"
+        - name: namespaces
+          value: "all"
+        - name: severity-filter
+          value: "critical,high"  # Only critical/high for frequent scans
+
+---
+# ServiceAccount for compliance scanner
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: compliance-scanner
+  namespace: argo-workflows
+
+---
+# ClusterRole for reading resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: compliance-scanner
+rules:
+  - apiGroups: [""]
+    resources: ["*"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+  - apiGroups: ["wgpolicyk8s.io"]
+    resources: ["policyreports", "clusterpolicyreports"]
+    verbs: ["get", "list", "create", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: compliance-scanner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: compliance-scanner
+subjects:
+  - kind: ServiceAccount
+    name: compliance-scanner
+    namespace: argo-workflows

@@ -1,0 +1,43 @@
+# Kustomization for AKS Checklist Policies
+# Use: kubectl apply -k policies/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Security policies
+  - security/pod-security.yaml
+  - security/secrets-images.yaml
+
+  # Resource management
+  - resources/resource-management.yaml
+
+  # Application deployment
+  - application/deployment-best-practices.yaml
+
+  # Network security
+  - network/network-security.yaml
+
+  # Operations and governance
+  - operations/namespace-governance.yaml
+
+  # Identity and access
+  - identity/identity-policies.yaml
+
+  # Storage policies
+  - storage/storage-policies.yaml
+
+  # Business continuity and disaster recovery
+  - resiliency/bc-dr-policies.yaml
+
+  # Container security
+  - container/container-security.yaml
+
+commonLabels:
+  app.kubernetes.io/name: aks-checklist-policies
+  app.kubernetes.io/part-of: aks-compliance
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/version: "1.1.0"
+
+commonAnnotations:
+  source: "https://www.the-aks-checklist.com/"
+  documentation: "https://github.com/Azure/the-aks-checklist/tree/main/aks-checklist-kyverno"

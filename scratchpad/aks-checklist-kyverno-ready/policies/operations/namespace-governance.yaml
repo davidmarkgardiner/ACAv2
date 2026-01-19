@@ -1,0 +1,234 @@
+# Operations Policies
+# Maps to: Cluster Operations, Multi-Tenant sections of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-namespace-labels
+  annotations:
+    policies.kyverno.io/title: Require Namespace Labels
+    policies.kyverno.io/category: Operations
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Multi-Tenant - Isolation
+    aks-checklist/item: "Logically isolate cluster"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-owner-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              names:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - default
+      validate:
+        message: "Namespaces must have 'owner' and 'environment' labels."
+        pattern:
+          metadata:
+            labels:
+              owner: "?*"
+              environment: "dev | test | staging | production | prod"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-resource-quota
+  annotations:
+    policies.kyverno.io/title: Require ResourceQuota
+    policies.kyverno.io/category: Operations
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Enforce resource quotas for namespaces"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-quota-exists
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              names:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      validate:
+        message: "Namespace should have 'resource-quota-configured' label set to true."
+        pattern:
+          metadata:
+            labels:
+              resource-quota-configured: "true"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-limit-range
+  annotations:
+    policies.kyverno.io/title: Require LimitRange
+    policies.kyverno.io/category: Operations
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Namespaces should have LimitRange"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-limitrange-exists
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              names:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      validate:
+        message: "Namespace should have 'limit-range-configured' label set to true."
+        pattern:
+          metadata:
+            labels:
+              limit-range-configured: "true"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-azure-tags
+  annotations:
+    policies.kyverno.io/title: Require Azure Tags Annotation
+    policies.kyverno.io/category: Operations
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Multi-Tenant - Isolation
+    aks-checklist/item: "Use Azure tags in Azure Kubernetes Service"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-cost-center
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      validate:
+        message: "Namespace should have 'cost-center' annotation for cost allocation."
+        pattern:
+          metadata:
+            annotations:
+              cost-center: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-gitops-labels
+  annotations:
+    policies.kyverno.io/title: GitOps Source Labels
+    policies.kyverno.io/category: Operations
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Cluster Operations
+    aks-checklist/item: "Use GitOps to deploy workloads"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-gitops-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+      validate:
+        message: "Resources should be managed by GitOps (ArgoCD or Flux labels expected)."
+        anyPattern:
+          - metadata:
+              labels:
+                app.kubernetes.io/managed-by: "argocd | Helm | flux"
+          - metadata:
+              labels:
+                argocd.argoproj.io/instance: "?*"
+          - metadata:
+              labels:
+                kustomize.toolkit.fluxcd.io/name: "?*"
+          - metadata:
+              labels:
+                helm.toolkit.fluxcd.io/name: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-annotations-documentation
+  annotations:
+    policies.kyverno.io/title: Require Documentation Annotations
+    policies.kyverno.io/category: Operations
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Cluster Operations
+    aks-checklist/item: "Apply different types of labels to all resources"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-documentation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      validate:
+        message: "Deployments should have documentation annotation (description or docs-url)."
+        anyPattern:
+          - metadata:
+              annotations:
+                description: "?*"
+          - metadata:
+              annotations:
+                docs-url: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-contact-labels
+  annotations:
+    policies.kyverno.io/title: Require Contact Labels
+    policies.kyverno.io/category: Operations
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Cluster Operations
+    aks-checklist/item: "Apply different types of labels to all resources"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-team-contact
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+      validate:
+        message: "Workloads should have team contact information (team label or on-call annotation)."
+        anyPattern:
+          - metadata:
+              labels:
+                team: "?*"
+          - metadata:
+              annotations:
+                on-call: "?*"
+          - metadata:
+              annotations:
+                slack-channel: "?*"

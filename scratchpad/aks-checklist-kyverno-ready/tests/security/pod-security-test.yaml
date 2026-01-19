@@ -1,0 +1,208 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-pod-security-test
+policies:
+  - ../../policies/security/pod-security.yaml
+resources:
+  - pod-security-resources.yaml
+results:
+  # aks-check-disallow-privileged-containers tests
+  - kind: Pod
+    policy: aks-check-disallow-privileged-containers
+    rule: privileged-containers
+    resources:
+      - pod-not-privileged
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-privileged-containers
+    rule: privileged-containers
+    resources:
+      - pod-privileged
+    result: fail
+  - kind: Pod
+    policy: aks-check-disallow-privileged-containers
+    rule: privileged-containers
+    resources:
+      - pod-no-security-context
+    result: pass
+  # aks-check-require-security-context tests
+  - kind: Pod
+    policy: aks-check-require-security-context
+    rule: require-security-context
+    resources:
+      - pod-with-security-context
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-security-context
+    rule: require-security-context
+    resources:
+      - pod-without-security-context
+    result: fail
+  # aks-check-disallow-host-namespaces tests
+  - kind: Pod
+    policy: aks-check-disallow-host-namespaces
+    rule: host-namespaces
+    resources:
+      - pod-no-host-namespaces
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-host-namespaces
+    rule: host-namespaces
+    resources:
+      - pod-with-host-pid
+    result: fail
+  - kind: Pod
+    policy: aks-check-disallow-host-namespaces
+    rule: host-namespaces
+    resources:
+      - pod-with-host-network
+    result: fail
+  # aks-check-disallow-default-serviceaccount tests
+  - kind: Pod
+    policy: aks-check-disallow-default-serviceaccount
+    rule: disallow-default-sa
+    resources:
+      - pod-explicit-sa
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-default-serviceaccount
+    rule: disallow-default-sa
+    resources:
+      - pod-default-sa
+    result: fail
+  - kind: Pod
+    policy: aks-check-disallow-default-serviceaccount
+    rule: automount-sa-token
+    resources:
+      - pod-explicit-sa
+    result: pass
+  # aks-check-disallow-capabilities tests
+  - kind: Pod
+    policy: aks-check-disallow-capabilities
+    rule: capabilities
+    resources:
+      - pod-allowed-capability
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-capabilities
+    rule: capabilities
+    resources:
+      - pod-forbidden-capability
+    result: fail
+  # aks-check-require-drop-all-capabilities tests
+  - kind: Pod
+    policy: aks-check-require-drop-all-capabilities
+    rule: drop-all-capabilities
+    resources:
+      - pod-drop-all-capabilities
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-drop-all-capabilities
+    rule: drop-all-capabilities
+    resources:
+      - pod-no-drop-capabilities
+    result: fail
+  # aks-check-disallow-root-user tests
+  - kind: Pod
+    policy: aks-check-disallow-root-user
+    rule: run-as-non-root
+    resources:
+      - pod-non-root-container
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-root-user
+    rule: run-as-non-root
+    resources:
+      - pod-root-allowed
+    result: fail
+  # aks-check-restrict-seccomp-profiles tests
+  - kind: Pod
+    policy: aks-check-restrict-seccomp-profiles
+    rule: seccomp-profile
+    resources:
+      - pod-runtime-seccomp
+    result: pass
+  - kind: Pod
+    policy: aks-check-restrict-seccomp-profiles
+    rule: seccomp-profile
+    resources:
+      - pod-localhost-seccomp
+    result: pass
+  - kind: Pod
+    policy: aks-check-restrict-seccomp-profiles
+    rule: seccomp-profile
+    resources:
+      - pod-unconfined-seccomp
+    result: fail
+  # aks-check-disallow-hostpath tests
+  - kind: Pod
+    policy: aks-check-disallow-hostpath
+    rule: host-path
+    resources:
+      - pod-no-hostpath
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-hostpath
+    rule: host-path
+    resources:
+      - pod-with-hostpath
+    result: fail
+  # aks-check-require-readonly-rootfs tests
+  - kind: Pod
+    policy: aks-check-require-readonly-rootfs
+    rule: readonly-rootfs
+    resources:
+      - pod-readonly-rootfs
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-readonly-rootfs
+    rule: readonly-rootfs
+    resources:
+      - pod-writable-rootfs
+    result: fail
+  # aks-check-windows-nodeselector tests
+  - kind: Pod
+    policy: aks-check-windows-nodeselector
+    rule: require-windows-nodeselector
+    resources:
+      - windows-pod-with-selector
+    result: pass
+  - kind: Pod
+    policy: aks-check-windows-nodeselector
+    rule: require-windows-nodeselector
+    resources:
+      - windows-pod-no-selector
+    result: fail
+  - kind: Pod
+    policy: aks-check-windows-nodeselector
+    rule: require-windows-nodeselector
+    resources:
+      - linux-pod
+    result: skip
+  # aks-check-disallow-sysctls tests
+  - kind: Pod
+    policy: aks-check-disallow-sysctls
+    rule: disallow-unsafe-sysctls
+    resources:
+      - pod-safe-sysctls
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-sysctls
+    rule: disallow-unsafe-sysctls
+    resources:
+      - pod-unsafe-sysctls
+    result: fail
+  # aks-check-disallow-host-ports tests
+  - kind: Pod
+    policy: aks-check-disallow-host-ports
+    rule: disallow-host-ports
+    resources:
+      - pod-no-host-port
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-host-ports
+    rule: disallow-host-ports
+    resources:
+      - pod-with-host-port
+    result: fail

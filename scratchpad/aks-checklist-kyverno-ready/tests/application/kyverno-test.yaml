@@ -1,0 +1,180 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-deployment-best-practices-test
+policies:
+  - ../../policies/application/deployment-best-practices.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-require-liveness-probe tests
+  - kind: Pod
+    policy: aks-check-require-liveness-probe
+    rule: require-liveness-probe
+    resources:
+      - pod-with-liveness-http
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-liveness-probe
+    rule: require-liveness-probe
+    resources:
+      - pod-with-liveness-tcp
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-liveness-probe
+    rule: require-liveness-probe
+    resources:
+      - pod-with-liveness-exec
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-liveness-probe
+    rule: require-liveness-probe
+    resources:
+      - pod-without-liveness
+    result: fail
+  # aks-check-require-readiness-probe tests
+  - kind: Pod
+    policy: aks-check-require-readiness-probe
+    rule: require-readiness-probe
+    resources:
+      - pod-with-readiness
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-readiness-probe
+    rule: require-readiness-probe
+    resources:
+      - pod-without-readiness
+    result: fail
+  # aks-check-recommend-startup-probe tests
+  - kind: Pod
+    policy: aks-check-recommend-startup-probe
+    rule: recommend-startup-probe
+    resources:
+      - pod-with-startup
+    result: pass
+  - kind: Pod
+    policy: aks-check-recommend-startup-probe
+    rule: recommend-startup-probe
+    resources:
+      - pod-without-startup
+    result: fail
+  # aks-check-require-labels tests
+  - kind: Deployment
+    policy: aks-check-require-labels
+    rule: require-app-label
+    resources:
+      - deployment-with-labels
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-labels
+    rule: require-app-label
+    resources:
+      - deployment-without-labels
+    result: fail
+  - kind: Deployment
+    policy: aks-check-require-labels
+    rule: require-version-label
+    resources:
+      - deployment-with-labels
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-labels
+    rule: require-version-label
+    resources:
+      - deployment-without-labels
+    result: fail
+  - kind: Deployment
+    policy: aks-check-require-labels
+    rule: require-team-label
+    resources:
+      - deployment-with-labels
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-labels
+    rule: require-team-label
+    resources:
+      - deployment-without-labels
+    result: fail
+  # aks-check-disallow-naked-pods tests
+  - kind: Pod
+    policy: aks-check-disallow-naked-pods
+    rule: disallow-naked-pods
+    resources:
+      - pod-with-owner
+    result: pass
+  - kind: Pod
+    policy: aks-check-disallow-naked-pods
+    rule: disallow-naked-pods
+    resources:
+      - naked-pod
+    result: fail
+  # aks-check-disallow-default-namespace tests
+  - kind: Pod
+    policy: aks-check-disallow-default-namespace
+    rule: disallow-default-namespace
+    resources:
+      - pod-in-default
+    result: fail
+  # aks-check-require-prestop-hook tests
+  - kind: Pod
+    policy: aks-check-require-prestop-hook
+    rule: recommend-prestop
+    resources:
+      - pod-with-prestop-exec
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-prestop-hook
+    rule: recommend-prestop
+    resources:
+      - pod-with-prestop-http
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-prestop-hook
+    rule: recommend-prestop
+    resources:
+      - pod-without-prestop
+    result: pass
+  # aks-check-require-pod-antiaffinity tests
+  - kind: Deployment
+    policy: aks-check-require-pod-antiaffinity
+    rule: require-pod-antiaffinity
+    resources:
+      - deployment-with-antiaffinity-preferred
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-pod-antiaffinity
+    rule: require-pod-antiaffinity
+    resources:
+      - deployment-with-antiaffinity-required
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-pod-antiaffinity
+    rule: require-pod-antiaffinity
+    resources:
+      - deployment-without-antiaffinity
+    result: fail
+  - kind: Deployment
+    policy: aks-check-require-pod-antiaffinity
+    rule: require-pod-antiaffinity
+    resources:
+      - deployment-single-replica
+    result: skip
+  # aks-check-require-topology-spread tests
+  - kind: Deployment
+    policy: aks-check-require-topology-spread
+    rule: recommend-topology-spread
+    resources:
+      - deployment-with-topology-spread
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-topology-spread
+    rule: recommend-topology-spread
+    resources:
+      - deployment-without-topology-spread
+    result: fail
+  - kind: Deployment
+    policy: aks-check-require-topology-spread
+    rule: recommend-topology-spread
+    resources:
+      - deployment-with-antiaffinity-preferred
+    result: skip

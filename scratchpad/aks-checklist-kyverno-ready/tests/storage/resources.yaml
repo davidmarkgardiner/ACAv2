@@ -1,0 +1,388 @@
+# Test resources for storage-policies
+---
+# Pod with emptyDir sizeLimit - should pass emptyDir sizelimit policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-emptydir-with-limit
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+  volumes:
+    - name: cache
+      emptyDir:
+        sizeLimit: 1Gi
+---
+# Pod with emptyDir without sizeLimit - should fail emptyDir sizelimit policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-emptydir-no-limit
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+  volumes:
+    - name: cache
+      emptyDir: {}
+---
+# Pod without emptyDir volume - should pass emptyDir sizelimit policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-emptydir
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# PVC with approved storage class - should pass PVC storage class policy
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-approved-class
+  namespace: test-ns
+  labels:
+    data-importance: high
+spec:
+  storageClassName: managed-csi
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# PVC with premium storage class - should pass PVC storage class policy
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-premium-class
+  namespace: test-ns
+  labels:
+    data-importance: critical
+spec:
+  storageClassName: managed-csi-premium
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# PVC with unapproved storage class - should fail PVC storage class policy
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-unapproved-class
+  namespace: test-ns
+  labels:
+    data-importance: medium
+spec:
+  storageClassName: standard-hdd
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# PVC with accessModes - should pass PVC access mode policy
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-with-access-mode
+  namespace: test-ns
+  labels:
+    data-importance: high
+spec:
+  storageClassName: managed-csi
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# PVC with ReadWriteMany - should pass PVC access mode policy
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-rwx-access-mode
+  namespace: test-ns
+  labels:
+    data-importance: medium
+spec:
+  storageClassName: azurefile-csi
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+---
+# StatefulSet with volumeClaimTemplates - should pass STS PVC template policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-with-pvc-template
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+spec:
+  serviceName: my-sts
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        storageClassName: managed-csi
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+---
+# StatefulSet without volumeClaimTemplates storage requirements - should fail STS PVC template policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-pvc-no-storage-class
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+spec:
+  serviceName: my-sts
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+---
+# Pod without local volume - should pass local storage policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-local-volume
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      emptyDir:
+        sizeLimit: 1Gi
+---
+# Pod with local volume - should fail local storage policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-local-volume
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: local-data
+          mountPath: /data
+  volumes:
+    - name: local-data
+      local:
+        path: /mnt/data
+---
+# PV with CSI driver - should pass CSI driver policy
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-with-csi
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  csi:
+    driver: disk.csi.azure.com
+    volumeHandle: my-disk-handle
+---
+# PV with blob CSI driver - should pass CSI driver policy
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-with-blob-csi
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  csi:
+    driver: blob.csi.azure.com
+    volumeHandle: my-blob-handle
+---
+# PV with azureDisk - should pass CSI driver policy
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-with-azure-disk
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  azureDisk:
+    kind: Managed
+    diskName: my-disk
+    diskURI: /subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/disks/my-disk
+    cachingMode: ReadOnly
+    fsType: ext4
+---
+# PV with secrets-store CSI - should pass CSI driver policy
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-with-secrets-csi
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadOnlyMany
+  csi:
+    driver: secrets-store.csi.k8s.io
+    volumeHandle: my-secrets
+---
+# Pod with keyvault label and secrets-store CSI - should pass secrets store policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-keyvault-with-csi
+  namespace: test-ns
+  labels:
+    azure.keyvault.secrets/use: "true"
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: secrets
+          mountPath: /mnt/secrets
+  volumes:
+    - name: secrets
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: azure-keyvault
+---
+# Pod with keyvault label without secrets-store CSI - should fail secrets store policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-keyvault-no-csi
+  namespace: test-ns
+  labels:
+    azure.keyvault.secrets/use: "true"
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without keyvault label - should skip secrets store policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-keyvault-label
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# VolumeSnapshot with volumeSnapshotClassName - should pass snapshot class policy
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: snapshot-with-class
+  namespace: test-ns
+spec:
+  volumeSnapshotClassName: azure-disk-snapshot-class
+  source:
+    persistentVolumeClaimName: my-pvc
+---
+# VolumeSnapshot without volumeSnapshotClassName - should fail snapshot class policy
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: snapshot-no-class
+  namespace: test-ns
+spec:
+  source:
+    persistentVolumeClaimName: my-pvc
+---
+# PVC with data-importance label - should pass PVC protection label policy
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-with-importance-label
+  namespace: test-ns
+  labels:
+    data-importance: critical
+spec:
+  storageClassName: managed-csi-premium
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# PVC without data-importance label - should fail PVC protection label policy
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-no-importance-label
+  namespace: test-ns
+spec:
+  storageClassName: managed-csi
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

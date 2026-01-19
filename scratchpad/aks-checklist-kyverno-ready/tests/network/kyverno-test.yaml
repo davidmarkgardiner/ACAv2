@@ -1,0 +1,144 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-network-security-test
+policies:
+  - ../../policies/network/network-security.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-require-network-policy tests
+  - kind: Namespace
+    policy: aks-check-require-network-policy
+    rule: require-network-policy-in-namespace
+    resources:
+      - ns-with-network-policy
+    result: pass
+  - kind: Namespace
+    policy: aks-check-require-network-policy
+    rule: require-network-policy-in-namespace
+    resources:
+      - ns-without-network-policy
+    result: fail
+  # aks-check-disallow-loadbalancer-public tests
+  - kind: Service
+    policy: aks-check-disallow-loadbalancer-public
+    rule: require-internal-lb
+    resources:
+      - svc-internal-lb
+    result: pass
+  - kind: Service
+    policy: aks-check-disallow-loadbalancer-public
+    rule: require-internal-lb
+    resources:
+      - svc-external-lb
+    result: fail
+  - kind: Service
+    policy: aks-check-disallow-loadbalancer-public
+    rule: require-internal-lb
+    resources:
+      - svc-clusterip
+    result: skip
+  # aks-check-disallow-nodeport tests
+  - kind: Service
+    policy: aks-check-disallow-nodeport
+    rule: disallow-nodeport
+    resources:
+      - svc-nodeport
+    result: fail
+  - kind: Service
+    policy: aks-check-disallow-nodeport
+    rule: disallow-nodeport
+    resources:
+      - svc-non-nodeport
+    result: pass
+  # aks-check-require-ingress-tls tests
+  - kind: Ingress
+    policy: aks-check-require-ingress-tls
+    rule: require-tls
+    resources:
+      - ingress-with-tls
+    result: pass
+  - kind: Ingress
+    policy: aks-check-require-ingress-tls
+    rule: require-tls
+    resources:
+      - ingress-without-tls
+    result: fail
+  # aks-check-validate-ingress-hostname tests
+  - kind: Ingress
+    policy: aks-check-validate-ingress-hostname
+    rule: validate-hostname
+    resources:
+      - ingress-approved-host
+    result: pass
+  - kind: Ingress
+    policy: aks-check-validate-ingress-hostname
+    rule: validate-hostname
+    resources:
+      - ingress-internal-host
+    result: pass
+  - kind: Ingress
+    policy: aks-check-validate-ingress-hostname
+    rule: validate-hostname
+    resources:
+      - ingress-unapproved-host
+    result: fail
+  # aks-check-block-imds-access tests
+  - kind: Namespace
+    policy: aks-check-block-imds-access
+    rule: check-imds-network-policy
+    resources:
+      - ns-imds-blocked
+    result: pass
+  - kind: Namespace
+    policy: aks-check-block-imds-access
+    rule: check-imds-network-policy
+    resources:
+      - ns-imds-not-blocked
+    result: fail
+  # aks-check-require-ingress-class tests
+  - kind: Ingress
+    policy: aks-check-require-ingress-class
+    rule: require-ingress-class
+    resources:
+      - ingress-with-class
+    result: pass
+  - kind: Ingress
+    policy: aks-check-require-ingress-class
+    rule: require-ingress-class
+    resources:
+      - ingress-without-class
+    result: fail
+  # aks-check-service-mesh-label tests
+  - kind: Namespace
+    policy: aks-check-service-mesh-label
+    rule: check-istio-sidecar
+    resources:
+      - ns-with-istio
+    result: pass
+  - kind: Namespace
+    policy: aks-check-service-mesh-label
+    rule: check-istio-sidecar
+    resources:
+      - ns-with-istio-rev
+    result: pass
+  - kind: Namespace
+    policy: aks-check-service-mesh-label
+    rule: check-istio-sidecar
+    resources:
+      - ns-without-istio
+    result: fail
+  # aks-check-egress-annotation tests
+  - kind: Deployment
+    policy: aks-check-egress-annotation
+    rule: require-egress-annotation
+    resources:
+      - deployment-with-egress
+    result: pass
+  - kind: Deployment
+    policy: aks-check-egress-annotation
+    rule: require-egress-annotation
+    resources:
+      - deployment-without-egress
+    result: fail

@@ -1,0 +1,328 @@
+# Test resources for network-security policies
+---
+# Namespace with network-policy label - should pass network policy requirement
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-network-policy
+  labels:
+    network-policy: configured
+---
+# Namespace without network-policy label - should fail network policy requirement
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-network-policy
+---
+# Service LoadBalancer with internal annotation - should pass internal LB policy
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-internal-lb
+  namespace: test-ns
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+---
+# Service LoadBalancer without internal annotation - should fail internal LB policy
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-external-lb
+  namespace: test-ns
+spec:
+  type: LoadBalancer
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+---
+# Service ClusterIP - should skip LB policy
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-clusterip
+  namespace: test-ns
+spec:
+  type: ClusterIP
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+---
+# Service NodePort - should fail NodePort policy
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-nodeport
+  namespace: test-ns
+spec:
+  type: NodePort
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      nodePort: 30080
+---
+# Service non-NodePort - should pass NodePort policy
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-non-nodeport
+  namespace: test-ns
+spec:
+  type: ClusterIP
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+---
+# Ingress with TLS - should pass TLS policy
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-with-tls
+  namespace: test-ns
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.xxx.com
+      secretName: tls-secret
+  rules:
+    - host: app.xxx.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+---
+# Ingress without TLS - should fail TLS policy
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-without-tls
+  namespace: test-ns
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: app.xxx.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+---
+# Ingress with approved hostname - should pass hostname validation
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-approved-host
+  namespace: test-ns
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.xxx.com
+      secretName: tls-secret
+  rules:
+    - host: app.xxx.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+---
+# Ingress with internal hostname - should pass hostname validation
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-internal-host
+  namespace: test-ns
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.internal.xxx.com
+      secretName: tls-secret
+  rules:
+    - host: app.internal.xxx.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+---
+# Ingress with unapproved hostname - should fail hostname validation
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-unapproved-host
+  namespace: test-ns
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.example.com
+      secretName: tls-secret
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+---
+# Namespace with IMDS blocked label - should pass IMDS policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-imds-blocked
+  labels:
+    imds-blocked: "true"
+---
+# Namespace without IMDS blocked label - should fail IMDS policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-imds-not-blocked
+  labels:
+    environment: prod
+---
+# Ingress with ingressClassName - should pass ingress class policy
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-with-class
+  namespace: test-ns
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: app.xxx.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+---
+# Ingress without ingressClassName - should fail ingress class policy
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-without-class
+  namespace: test-ns
+spec:
+  rules:
+    - host: app.xxx.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+---
+# Namespace with istio-injection label - should pass service mesh policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-istio
+  labels:
+    istio-injection: enabled
+---
+# Namespace with istio revision label - should pass service mesh policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-istio-rev
+  labels:
+    istio.io/rev: 1-17
+---
+# Namespace without istio labels - should fail service mesh policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-istio
+  labels:
+    environment: prod
+---
+# Deployment with egress-requirements annotation - should pass egress policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-egress
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+  annotations:
+    egress-requirements: "external-api.example.com:443"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without egress-requirements annotation - should fail egress policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-without-egress
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19

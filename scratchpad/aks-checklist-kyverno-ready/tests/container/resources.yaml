@@ -1,0 +1,298 @@
+# Test resources for container-security policies
+---
+# Pod with image-scan label (passed) - should pass scan label policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-scan-passed
+  namespace: test-ns
+  labels:
+    image-scan: passed
+spec:
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod with trivy annotation - should pass scan label policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-trivy-annotation
+  namespace: test-ns
+  annotations:
+    trivy.aquasecurity.github.io/scan: "completed"
+spec:
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod without scan label - should fail scan label policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-scan-label
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod with distroless image - should pass base images policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-distroless
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: gcr.io/distroless/static:nonroot
+---
+# Pod with alpine image - should pass base images policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-alpine
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: alpine:3.14
+---
+# Pod with base-image-approved annotation - should pass base images policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-base-approved
+  namespace: test-ns
+  annotations:
+    base-image-approved: "true"
+spec:
+  containers:
+    - name: app
+      image: ubuntu:20.04
+---
+# Pod without approved base - should fail base images policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-approved-base
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: ubuntu:20.04
+---
+# Namespace with runtime-security label (falco) - should pass runtime security policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-runtime-security-falco
+  labels:
+    runtime-security: falco
+---
+# Namespace with defender annotation - should pass runtime security policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-defender
+  annotations:
+    security.azure.com/defender: "enabled"
+---
+# Namespace without runtime security - should fail runtime security policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-runtime-security
+---
+# Pod with image digest - should pass image signature policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-digest
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx@sha256:abc123def456
+---
+# Pod with image-signed annotation - should pass image signature policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-signed-annotation
+  namespace: test-ns
+  annotations:
+    image-signed: cosign
+spec:
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod without digest or signed annotation - should fail image signature policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-signature
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod pulling from ACR with serviceAccountName - should pass registry auth policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-acr-with-sa
+  namespace: test-ns
+spec:
+  serviceAccountName: my-sa
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod pulling from ACR with imagePullSecrets - should pass registry auth policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-acr-with-pullsecret
+  namespace: test-ns
+spec:
+  imagePullSecrets:
+    - name: acr-secret
+  containers:
+    - name: app
+      image: myregistry.azurecr.io/myapp:1.0
+---
+# Pod pulling from non-ACR (no auth needed) - should pass/skip registry auth policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-non-acr
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with allowPrivilegeEscalation: false - should pass privilege escalation policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-privilege-escalation
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        allowPrivilegeEscalation: false
+  initContainers:
+    - name: init
+      image: busybox:1.35
+      securityContext:
+        allowPrivilegeEscalation: false
+---
+# Pod with allowPrivilegeEscalation: true - should fail privilege escalation policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-privilege-escalation
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        allowPrivilegeEscalation: true
+---
+# Pod without securityContext (default) - should pass privilege escalation policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-default-security-context
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with procMount: Default - should pass proc mount policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-proc-mount-default
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        procMount: Default
+---
+# Pod without procMount (defaults to Default) - should pass proc mount policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-proc-mount
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with runAsUser >= 1000 - should pass container user policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-non-root-user
+  namespace: test-ns
+spec:
+  securityContext:
+    runAsUser: 1000
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        runAsUser: 1000
+---
+# Pod with runAsUser 0 (root) - should fail container user policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-root-user
+  namespace: test-ns
+spec:
+  securityContext:
+    runAsUser: 0
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        runAsUser: 0
+---
+# Pod without runAsUser - should pass (optional check) container user policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-runas-user
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Namespace with ACR network access annotation - should pass ACR network policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-acr-network
+  annotations:
+    acr-network-access: private-endpoint
+---
+# Namespace without ACR network annotation - should fail ACR network policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-acr-network

@@ -1,0 +1,418 @@
+# Test resources for pod-security policies
+---
+# Pod with privileged: false - should pass privileged containers policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-not-privileged
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        privileged: false
+  initContainers:
+    - name: init
+      image: busybox:1.35
+      securityContext:
+        privileged: false
+---
+# Pod with privileged: true - should fail privileged containers policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-privileged
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        privileged: true
+---
+# Pod without securityContext (defaults to not privileged) - should pass privileged containers policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-security-context
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with runAsNonRoot: true - should pass security context policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-security-context
+  namespace: test-ns
+spec:
+  securityContext:
+    runAsNonRoot: true
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without runAsNonRoot - should fail security context policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-security-context
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with host namespaces disabled - should pass host namespaces policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-host-namespaces
+  namespace: test-ns
+spec:
+  hostPID: false
+  hostIPC: false
+  hostNetwork: false
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with hostPID: true - should fail host namespaces policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-host-pid
+  namespace: test-ns
+spec:
+  hostPID: true
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with hostNetwork: true - should fail host namespaces policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-host-network
+  namespace: test-ns
+spec:
+  hostNetwork: true
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with explicit non-default serviceAccountName - should pass default SA policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-explicit-sa
+  namespace: test-ns
+spec:
+  serviceAccountName: my-app-sa
+  automountServiceAccountToken: false
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with default serviceAccountName - should fail default SA policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-default-sa
+  namespace: test-ns
+spec:
+  serviceAccountName: default
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with only NET_BIND_SERVICE capability - should pass capabilities policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-allowed-capability
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        capabilities:
+          add:
+            - NET_BIND_SERVICE
+          drop:
+            - ALL
+---
+# Pod with SYS_ADMIN capability - should fail capabilities policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-forbidden-capability
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        capabilities:
+          add:
+            - SYS_ADMIN
+---
+# Pod with drop all capabilities - should pass drop all capabilities policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-drop-all-capabilities
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        capabilities:
+          drop:
+            - ALL
+---
+# Pod without drop all capabilities - should fail drop all capabilities policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-drop-capabilities
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with runAsNonRoot in container - should pass root user policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-non-root-container
+  namespace: test-ns
+spec:
+  securityContext:
+    runAsNonRoot: true
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        runAsNonRoot: true
+---
+# Pod with runAsNonRoot: false - should fail root user policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-root-allowed
+  namespace: test-ns
+spec:
+  securityContext:
+    runAsNonRoot: false
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        runAsNonRoot: false
+---
+# Pod with RuntimeDefault seccomp - should pass seccomp policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-runtime-seccomp
+  namespace: test-ns
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with Localhost seccomp - should pass seccomp policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-localhost-seccomp
+  namespace: test-ns
+spec:
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: my-profile.json
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with Unconfined seccomp - should fail seccomp policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-unconfined-seccomp
+  namespace: test-ns
+spec:
+  securityContext:
+    seccompProfile:
+      type: Unconfined
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without hostPath volume - should pass hostPath policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-hostpath
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      emptyDir: {}
+---
+# Pod with hostPath volume - should fail hostPath policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-hostpath
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      volumeMounts:
+        - name: host-data
+          mountPath: /host-data
+  volumes:
+    - name: host-data
+      hostPath:
+        path: /etc/passwd
+---
+# Pod with readOnlyRootFilesystem: true - should pass readonly rootfs policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-readonly-rootfs
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        readOnlyRootFilesystem: true
+---
+# Pod with readOnlyRootFilesystem: false - should fail readonly rootfs policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-writable-rootfs
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      securityContext:
+        readOnlyRootFilesystem: false
+---
+# Windows pod with correct nodeSelector - should pass Windows nodeSelector policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: windows-pod-with-selector
+  namespace: test-ns
+  labels:
+    kubernetes.io/os: windows
+spec:
+  nodeSelector:
+    kubernetes.io/os: windows
+  containers:
+    - name: app
+      image: mcr.microsoft.com/windows/servercore:ltsc2022
+---
+# Windows pod without nodeSelector - should fail Windows nodeSelector policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: windows-pod-no-selector
+  namespace: test-ns
+  labels:
+    kubernetes.io/os: windows
+spec:
+  containers:
+    - name: app
+      image: mcr.microsoft.com/windows/servercore:ltsc2022
+---
+# Non-Windows pod - should skip Windows nodeSelector policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: linux-pod
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with safe sysctls - should pass sysctls policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-safe-sysctls
+  namespace: test-ns
+spec:
+  securityContext:
+    sysctls:
+      - name: net.ipv4.tcp_syncookies
+        value: "1"
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with unsafe sysctls - should fail sysctls policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-unsafe-sysctls
+  namespace: test-ns
+spec:
+  securityContext:
+    sysctls:
+      - name: kernel.panic
+        value: "1"
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without hostPort - should pass host ports policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-host-port
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      ports:
+        - containerPort: 80
+---
+# Pod with hostPort - should fail host ports policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-host-port
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      ports:
+        - containerPort: 80
+          hostPort: 8080

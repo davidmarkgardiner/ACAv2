@@ -1,0 +1,283 @@
+# Network Policies
+# Maps to: Networking section of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-network-policy
+  annotations:
+    policies.kyverno.io/title: Require NetworkPolicy
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Networking
+    aks-checklist/item: "Control traffic flow with network policies"
+    policies.kyverno.io/description: >-
+      Namespaces should have NetworkPolicies defined to control traffic flow.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-network-policy-in-namespace
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              names:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+                - gatekeeper-system
+      validate:
+        message: "Namespace should be labeled to indicate NetworkPolicy coverage."
+        pattern:
+          metadata:
+            labels:
+              network-policy: "configured | pending"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-loadbalancer-public
+  annotations:
+    policies.kyverno.io/title: Disallow Public LoadBalancer
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Networking
+    aks-checklist/item: "Don't expose your load-balancer on Internet if not necessary"
+    policies.kyverno.io/description: >-
+      Services should use internal load balancers unless explicitly required.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-internal-lb
+      match:
+        any:
+          - resources:
+              kinds:
+                - Service
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.type }}"
+            operator: Equals
+            value: LoadBalancer
+      validate:
+        message: "LoadBalancer services should be internal. Add annotation 'service.beta.kubernetes.io/azure-load-balancer-internal: true'."
+        pattern:
+          metadata:
+            annotations:
+              service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-nodeport
+  annotations:
+    policies.kyverno.io/title: Disallow NodePort Services
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Networking
+    aks-checklist/item: "Use an ingress controller to expose web-based apps"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-nodeport
+      match:
+        any:
+          - resources:
+              kinds:
+                - Service
+      validate:
+        message: "NodePort services are not recommended. Use Ingress or LoadBalancer instead."
+        pattern:
+          spec:
+            type: "!NodePort"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-ingress-tls
+  annotations:
+    policies.kyverno.io/title: Require Ingress TLS
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Networking
+    aks-checklist/item: "Secure your exposed applications with a web application firewall (WAF)"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-tls
+      match:
+        any:
+          - resources:
+              kinds:
+                - Ingress
+      validate:
+        message: "Ingress resources must have TLS configured."
+        pattern:
+          spec:
+            tls:
+              - hosts:
+                  - "?*"
+                secretName: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-validate-ingress-hostname
+  annotations:
+    policies.kyverno.io/title: Validate Ingress Hostnames
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Networking
+    aks-checklist/item: "Apply control on ingress hostnames"
+    policies.kyverno.io/description: >-
+      Ingress hostnames should match approved domain patterns.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-hostname
+      match:
+        any:
+          - resources:
+              kinds:
+                - Ingress
+      validate:
+        message: "Ingress hostname must be from an approved domain (*.xxx.com, *.internal.xxx.com)."
+        foreach:
+          - list: "request.object.spec.rules[]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.host }}"
+                    operator: AnyNotIn
+                    value:
+                      - "*.xxx.com"
+                      - "*.internal.xxx.com"
+                      - "*.xxx.net"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-block-imds-access
+  annotations:
+    policies.kyverno.io/title: Block Pod Access to IMDS
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Networking
+    aks-checklist/item: "Block Pod access to VMSS IMDS"
+    policies.kyverno.io/description: >-
+      Pods should not have direct access to Azure Instance Metadata Service (IMDS).
+      This should be restricted via NetworkPolicy.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-imds-network-policy
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              names:
+                - kube-system
+      validate:
+        message: "Namespace should have a label indicating IMDS access is blocked via NetworkPolicy."
+        pattern:
+          metadata:
+            labels:
+              imds-blocked: "true"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-ingress-class
+  annotations:
+    policies.kyverno.io/title: Require Ingress Class
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Networking
+    aks-checklist/item: "Use an ingress controller to expose web-based apps"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-ingress-class
+      match:
+        any:
+          - resources:
+              kinds:
+                - Ingress
+      validate:
+        message: "Ingress must specify an ingressClassName."
+        pattern:
+          spec:
+            ingressClassName: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-service-mesh-label
+  annotations:
+    policies.kyverno.io/title: Check Service Mesh Configuration
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Networking
+    aks-checklist/item: "Consider using a service mesh for advanced microservice communication management"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-istio-sidecar
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      validate:
+        message: "Namespace should have Istio injection label configured."
+        anyPattern:
+          - metadata:
+              labels:
+                istio-injection: "enabled | disabled"
+          - metadata:
+              labels:
+                istio.io/rev: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-egress-annotation
+  annotations:
+    policies.kyverno.io/title: Require Egress Documentation
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Networking
+    aks-checklist/item: "Filter egress traffic with AzFW/NVA"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-egress-annotation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      validate:
+        message: "Deployments should document external dependencies with 'egress-requirements' annotation."
+        pattern:
+          metadata:
+            annotations:
+              egress-requirements: "?* | none"

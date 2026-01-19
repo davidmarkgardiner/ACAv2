@@ -1,0 +1,174 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-container-security-test
+policies:
+  - ../../policies/container/container-security.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-image-vulnerability-label tests
+  - kind: Pod
+    policy: aks-check-image-vulnerability-label
+    rule: require-scan-label
+    resources:
+      - pod-with-scan-passed
+    result: pass
+  - kind: Pod
+    policy: aks-check-image-vulnerability-label
+    rule: require-scan-label
+    resources:
+      - pod-with-trivy-annotation
+    result: pass
+  - kind: Pod
+    policy: aks-check-image-vulnerability-label
+    rule: require-scan-label
+    resources:
+      - pod-without-scan-label
+    result: fail
+  # aks-check-approved-base-images tests
+  - kind: Pod
+    policy: aks-check-approved-base-images
+    rule: recommend-distroless
+    resources:
+      - pod-with-distroless
+    result: pass
+  - kind: Pod
+    policy: aks-check-approved-base-images
+    rule: recommend-distroless
+    resources:
+      - pod-with-alpine
+    result: pass
+  - kind: Pod
+    policy: aks-check-approved-base-images
+    rule: recommend-distroless
+    resources:
+      - pod-with-base-approved
+    result: pass
+  - kind: Pod
+    policy: aks-check-approved-base-images
+    rule: recommend-distroless
+    resources:
+      - pod-without-approved-base
+    result: fail
+  # aks-check-runtime-security tests
+  - kind: Namespace
+    policy: aks-check-runtime-security
+    rule: recommend-runtime-security
+    resources:
+      - ns-with-runtime-security-falco
+    result: pass
+  - kind: Namespace
+    policy: aks-check-runtime-security
+    rule: recommend-runtime-security
+    resources:
+      - ns-with-defender
+    result: pass
+  - kind: Namespace
+    policy: aks-check-runtime-security
+    rule: recommend-runtime-security
+    resources:
+      - ns-without-runtime-security
+    result: fail
+  # aks-check-image-signature tests
+  - kind: Pod
+    policy: aks-check-image-signature
+    rule: recommend-signed-images
+    resources:
+      - pod-with-digest
+    result: pass
+  - kind: Pod
+    policy: aks-check-image-signature
+    rule: recommend-signed-images
+    resources:
+      - pod-with-signed-annotation
+    result: pass
+  - kind: Pod
+    policy: aks-check-image-signature
+    rule: recommend-signed-images
+    resources:
+      - pod-without-signature
+    result: fail
+  # aks-check-image-registry-auth tests
+  - kind: Pod
+    policy: aks-check-image-registry-auth
+    rule: validate-registry-auth
+    resources:
+      - pod-acr-with-sa
+    result: pass
+  - kind: Pod
+    policy: aks-check-image-registry-auth
+    rule: validate-registry-auth
+    resources:
+      - pod-acr-with-pullsecret
+    result: pass
+  - kind: Pod
+    policy: aks-check-image-registry-auth
+    rule: validate-registry-auth
+    resources:
+      - pod-non-acr
+    result: skip
+  # aks-check-container-allow-privilege-escalation tests
+  - kind: Pod
+    policy: aks-check-container-allow-privilege-escalation
+    rule: disallow-privilege-escalation
+    resources:
+      - pod-no-privilege-escalation
+    result: pass
+  - kind: Pod
+    policy: aks-check-container-allow-privilege-escalation
+    rule: disallow-privilege-escalation
+    resources:
+      - pod-with-privilege-escalation
+    result: fail
+  - kind: Pod
+    policy: aks-check-container-allow-privilege-escalation
+    rule: disallow-privilege-escalation
+    resources:
+      - pod-default-security-context
+    result: pass
+  # aks-check-proc-mount tests
+  - kind: Pod
+    policy: aks-check-proc-mount
+    rule: restrict-proc-mount
+    resources:
+      - pod-proc-mount-default
+    result: pass
+  - kind: Pod
+    policy: aks-check-proc-mount
+    rule: restrict-proc-mount
+    resources:
+      - pod-no-proc-mount
+    result: pass
+  # aks-check-container-user tests
+  - kind: Pod
+    policy: aks-check-container-user
+    rule: require-run-as-user
+    resources:
+      - pod-non-root-user
+    result: pass
+  - kind: Pod
+    policy: aks-check-container-user
+    rule: require-run-as-user
+    resources:
+      - pod-root-user
+    result: fail
+  - kind: Pod
+    policy: aks-check-container-user
+    rule: require-run-as-user
+    resources:
+      - pod-no-runas-user
+    result: pass
+  # aks-check-acr-private-endpoint tests
+  - kind: Namespace
+    policy: aks-check-acr-private-endpoint
+    rule: document-acr-network
+    resources:
+      - ns-with-acr-network
+    result: pass
+  - kind: Namespace
+    policy: aks-check-acr-private-endpoint
+    rule: document-acr-network
+    resources:
+      - ns-without-acr-network
+    result: fail

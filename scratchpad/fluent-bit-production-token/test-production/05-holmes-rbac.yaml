@@ -1,0 +1,132 @@
+# Holmes RBAC - Required for Holmes to investigate Kubernetes resources
+#
+# If you see "RBAC: access denied" errors from Holmes, apply this file:
+#   kubectl apply -f 05-holmes-rbac.yaml
+#
+# This grants Holmes read-only access to cluster resources for investigation
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: holmesgpt
+  labels:
+    app: holmesgpt
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: holmes
+  namespace: holmesgpt
+  labels:
+    app: holmesgpt
+---
+# ClusterRole with read-only access to investigate resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: holmes-cluster-role
+  labels:
+    app: holmesgpt
+rules:
+  # Core resources
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - endpoints
+      - events
+      - namespaces
+      - nodes
+      - persistentvolumeclaims
+      - persistentvolumes
+      - pods
+      - pods/log
+      - pods/status
+      - replicationcontrollers
+      - secrets
+      - serviceaccounts
+      - services
+    verbs: [get, list, watch]
+
+  # Apps resources
+  - apiGroups: ["apps"]
+    resources:
+      - daemonsets
+      - deployments
+      - deployments/scale
+      - replicasets
+      - replicasets/scale
+      - statefulsets
+    verbs: [get, list, watch]
+
+  # Batch resources
+  - apiGroups: ["batch"]
+    resources: [cronjobs, jobs]
+    verbs: [get, list, watch]
+
+  # Networking resources
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch]
+
+  # Storage resources
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+
+  # Autoscaling resources
+  - apiGroups: ["autoscaling"]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+
+  # RBAC resources (for investigating permission issues)
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: [clusterroles, clusterrolebindings, roles, rolebindings]
+    verbs: [get, list, watch]
+
+  # Metrics (for resource usage investigation)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [pods, nodes]
+    verbs: [get, list]
+
+  # Events API
+  - apiGroups: ["events.k8s.io"]
+    resources: [events]
+    verbs: [get, list, watch]
+
+  # Extensions (legacy)
+  - apiGroups: ["extensions"]
+    resources: [daemonsets, deployments, ingresses, replicasets]
+    verbs: [get, list, watch]
+
+  # Policy
+  - apiGroups: ["policy"]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list]
+
+  # API registration
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: [apiservices]
+    verbs: [get, list]
+
+  # CRDs
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: [customresourcedefinitions]
+    verbs: [get, list]
+
+---
+# Bind ClusterRole to Holmes ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: holmes-cluster-role-binding
+  labels:
+    app: holmesgpt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: holmes-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: holmes
+    namespace: holmesgpt

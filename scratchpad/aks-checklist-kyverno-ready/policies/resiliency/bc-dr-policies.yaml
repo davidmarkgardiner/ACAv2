@@ -1,0 +1,304 @@
+# Business Continuity and Disaster Recovery Policies
+# Maps to: Biz Continuity - DR section of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-deployment-zone-spread
+  annotations:
+    policies.kyverno.io/title: Require Zone Spread for Critical Workloads
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Use Availability Zones if supported in your Azure region"
+    policies.kyverno.io/description: >-
+      Critical deployments should spread pods across availability zones.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-zone-topology
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              selector:
+                matchLabels:
+                  criticality: "high"
+      validate:
+        message: "Critical deployments should use topologySpreadConstraints for zone distribution."
+        pattern:
+          spec:
+            template:
+              spec:
+                topologySpreadConstraints:
+                  - topologyKey: "topology.kubernetes.io/zone"
+                    maxSkew: "?*"
+                    whenUnsatisfiable: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-multi-replica-antiaffinity
+  annotations:
+    policies.kyverno.io/title: Multi-Replica Requires Anti-Affinity
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Avoid Pods being placed into a single node"
+    policies.kyverno.io/description: >-
+      Deployments with 3+ replicas should have pod anti-affinity to spread across nodes.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-antiaffinity-3plus
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.replicas || `1` }}"
+            operator: GreaterThanOrEquals
+            value: 3
+      validate:
+        message: "Deployments with 3+ replicas should define podAntiAffinity."
+        anyPattern:
+          - spec:
+              template:
+                spec:
+                  affinity:
+                    podAntiAffinity:
+                      preferredDuringSchedulingIgnoredDuringExecution:
+                        - weight: "?*"
+          - spec:
+              template:
+                spec:
+                  affinity:
+                    podAntiAffinity:
+                      requiredDuringSchedulingIgnoredDuringExecution:
+                        - topologyKey: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-pdb-min-available
+  annotations:
+    policies.kyverno.io/title: Validate PodDisruptionBudget Configuration
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Use Disruption Budgets in your pod and deployment definitions"
+    policies.kyverno.io/description: >-
+      PodDisruptionBudgets should have reasonable minAvailable or maxUnavailable settings.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-pdb-config
+      match:
+        any:
+          - resources:
+              kinds:
+                - PodDisruptionBudget
+      validate:
+        message: "PDB must specify minAvailable or maxUnavailable."
+        anyPattern:
+          - spec:
+              minAvailable: "?*"
+          - spec:
+              maxUnavailable: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-statefulset-replicas
+  annotations:
+    policies.kyverno.io/title: StatefulSet Minimum Replicas
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Avoid Pods being placed into a single node"
+    policies.kyverno.io/description: >-
+      StatefulSets should have multiple replicas for high availability.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: sts-min-replicas
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "StatefulSets should have at least 2 replicas for high availability."
+        pattern:
+          spec:
+            replicas: ">1"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-node-selector-resilience
+  annotations:
+    policies.kyverno.io/title: Validate Node Selector for Zone Awareness
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Use Availability Zones if supported in your Azure region"
+    policies.kyverno.io/description: >-
+      Pods with node selectors should not pin to a single zone.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: no-single-zone-selector
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Avoid selecting a specific zone in nodeSelector; use topologySpreadConstraints instead."
+        pattern:
+          spec:
+            =(nodeSelector):
+              X(topology.kubernetes.io/zone): "null"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-priority-class
+  annotations:
+    policies.kyverno.io/title: Require PriorityClass for Critical Workloads
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Define non-functional requirements such as SLAs"
+    policies.kyverno.io/description: >-
+      Critical workloads should have a PriorityClass to survive preemption.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-priority-class
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+              selector:
+                matchLabels:
+                  criticality: "high"
+      validate:
+        message: "Critical workloads should specify a priorityClassName."
+        pattern:
+          spec:
+            template:
+              spec:
+                priorityClassName: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-termination-grace-period
+  annotations:
+    policies.kyverno.io/title: Require Adequate Termination Grace Period
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Implement a proper prestop hook"
+    policies.kyverno.io/description: >-
+      Pods should have adequate terminationGracePeriodSeconds for graceful shutdown.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-grace-period
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Consider setting terminationGracePeriodSeconds > 30 for graceful shutdown."
+        pattern:
+          spec:
+            =(terminationGracePeriodSeconds): ">=30"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-backup-label
+  annotations:
+    policies.kyverno.io/title: Require Backup Label for StatefulSets
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Create a storage migration plan"
+    policies.kyverno.io/description: >-
+      StatefulSets should have backup configuration labels for Velero or similar tools.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-backup-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet
+      validate:
+        message: "StatefulSets should have 'backup.velero.io/backup-volumes' or 'backup-strategy' label."
+        anyPattern:
+          - metadata:
+              labels:
+                backup-strategy: "?*"
+          - metadata:
+              annotations:
+                backup.velero.io/backup-volumes: "?*"
+          - metadata:
+              labels:
+                backup-exclude: "true"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-acr-georeplication
+  annotations:
+    policies.kyverno.io/title: Validate Multi-Region Image Availability
+    policies.kyverno.io/category: Resiliency
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "If using a private registry (ACR), configure region replication"
+    policies.kyverno.io/description: >-
+      Critical workloads should document their image availability for DR.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-image-region-annotation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              selector:
+                matchLabels:
+                  criticality: "high"
+      validate:
+        message: "Critical deployments should document ACR geo-replication status."
+        pattern:
+          metadata:
+            annotations:
+              acr-georeplication: "enabled | not-required"

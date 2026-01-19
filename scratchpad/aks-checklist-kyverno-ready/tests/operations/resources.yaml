@@ -1,0 +1,349 @@
+# Test resources for namespace-governance policies
+---
+# Namespace with owner and environment labels - should pass namespace labels policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-labels
+  labels:
+    owner: team-alpha
+    environment: production
+---
+# Namespace without owner label - should fail namespace labels policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-owner
+  labels:
+    environment: dev
+---
+# Namespace without environment label - should fail namespace labels policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-environment
+  labels:
+    owner: team-beta
+---
+# Namespace with resource-quota-configured label - should pass quota policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-quota-label
+  labels:
+    owner: team-alpha
+    environment: prod
+    resource-quota-configured: "true"
+---
+# Namespace without resource-quota-configured label - should fail quota policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-quota-label
+  labels:
+    owner: team-alpha
+    environment: prod
+---
+# Namespace with limit-range-configured label - should pass limit range policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-limitrange-label
+  labels:
+    owner: team-alpha
+    environment: prod
+    limit-range-configured: "true"
+---
+# Namespace without limit-range-configured label - should fail limit range policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-limitrange-label
+  labels:
+    owner: team-alpha
+    environment: prod
+---
+# Namespace with cost-center annotation - should pass azure tags policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-with-cost-center
+  labels:
+    owner: team-alpha
+    environment: prod
+  annotations:
+    cost-center: "CC-12345"
+---
+# Namespace without cost-center annotation - should fail azure tags policy
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-without-cost-center
+  labels:
+    owner: team-alpha
+    environment: prod
+---
+# Deployment with GitOps labels (argocd managed-by) - should pass gitops policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-argocd
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/managed-by: argocd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with argocd instance label - should pass gitops policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-argocd-instance
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    argocd.argoproj.io/instance: my-argocd-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with Flux label - should pass gitops policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-flux
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    kustomize.toolkit.fluxcd.io/name: my-flux-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without GitOps labels - should fail gitops policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-no-gitops
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with description annotation - should pass documentation policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-description
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    description: "This deployment runs the main application"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with docs-url annotation - should pass documentation policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-docs-url
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    docs-url: "https://docs.example.com/my-app"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without documentation - should fail documentation policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-no-docs
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with team label - should pass contact labels policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-team
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with on-call annotation - should pass contact labels policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-oncall
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    on-call: "platform-team@example.com"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with slack-channel annotation - should pass contact labels policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-slack
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    slack-channel: "#platform-alerts"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without contact info - should fail contact labels policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-no-contact
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19

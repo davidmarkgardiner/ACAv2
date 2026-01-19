@@ -1,0 +1,209 @@
+# Identity Policies
+# Maps to: Identity - Authorization section of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-service-account
+  annotations:
+    policies.kyverno.io/title: Require Explicit ServiceAccount
+    policies.kyverno.io/category: Identity
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Identity - Authorization
+    aks-checklist/item: "Use managed identities instead of Service Principals"
+    policies.kyverno.io/description: >-
+      Pods should use an explicit ServiceAccount rather than the default.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-explicit-sa
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+      validate:
+        message: "Pods must specify an explicit serviceAccountName (not 'default')."
+        pattern:
+          spec:
+            serviceAccountName: "!default & ?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-sa-token-projection
+  annotations:
+    policies.kyverno.io/title: Require Projected ServiceAccount Token
+    policies.kyverno.io/category: Identity
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Identity - Authorization
+    aks-checklist/item: "Implement Azure Workload Identity"
+    policies.kyverno.io/description: >-
+      Pods using workload identity should use projected service account tokens.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-token-projection
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  azure.workload.identity/use: "true"
+      validate:
+        message: "Pods using Workload Identity should have projected service account token."
+        pattern:
+          spec:
+            volumes:
+              - name: azure-identity-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-acr-authentication
+  annotations:
+    policies.kyverno.io/title: Validate ACR Authentication
+    policies.kyverno.io/category: Identity
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Identity - Authorization
+    aks-checklist/item: "Use AKS and ACR integration without password"
+    policies.kyverno.io/description: >-
+      Pods pulling from ACR should not use imagePullSecrets when managed identity is available.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: prefer-managed-acr-auth
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.containers[].image | [?contains(@, 'azurecr.io')] | length(@) }}"
+            operator: GreaterThan
+            value: 0
+      validate:
+        message: "Pods pulling from ACR should use managed identity (no imagePullSecrets needed with proper AKS-ACR integration)."
+        pattern:
+          spec:
+            =(imagePullSecrets):
+              - X(name): "acr-*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-no-admin-clusterrolebinding
+  annotations:
+    policies.kyverno.io/title: Restrict cluster-admin ClusterRoleBinding
+    policies.kyverno.io/category: Identity
+    policies.kyverno.io/severity: critical
+    aks-checklist/section: Identity - Authorization
+    aks-checklist/item: "Limit access to admin kubeconfig"
+    policies.kyverno.io/description: >-
+      ClusterRoleBindings to cluster-admin should be restricted.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: restrict-cluster-admin-binding
+      match:
+        any:
+          - resources:
+              kinds:
+                - ClusterRoleBinding
+      validate:
+        message: "ClusterRoleBindings to 'cluster-admin' should be carefully reviewed."
+        deny:
+          conditions:
+            all:
+              - key: "{{ request.object.roleRef.name }}"
+                operator: Equals
+                value: "cluster-admin"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-rbac-least-privilege
+  annotations:
+    policies.kyverno.io/title: Validate RBAC Least Privilege
+    policies.kyverno.io/category: Identity
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Identity - Authorization
+    aks-checklist/item: "Integrate authorization with AAD RBAC"
+    policies.kyverno.io/description: >-
+      Roles should not have wildcard permissions on critical resources.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: no-wildcard-verbs
+      match:
+        any:
+          - resources:
+              kinds:
+                - Role
+                - ClusterRole
+      validate:
+        message: "Roles should not use '*' for verbs on sensitive resources."
+        foreach:
+          - list: "request.object.rules[]"
+            deny:
+              conditions:
+                all:
+                  - key: "*"
+                    operator: AnyIn
+                    value: "{{ element.verbs[] }}"
+                  - key: "{{ element.resources[] || `[]` }}"
+                    operator: AnyIn
+                    value:
+                      - secrets
+                      - configmaps
+                      - pods/exec
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-serviceaccount-annotation
+  annotations:
+    policies.kyverno.io/title: Require Workload Identity Annotation
+    policies.kyverno.io/category: Identity
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Identity - Authorization
+    aks-checklist/item: "Implement Azure Workload Identity"
+    policies.kyverno.io/description: >-
+      ServiceAccounts used with Workload Identity should have proper annotations.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-wi-annotation
+      match:
+        any:
+          - resources:
+              kinds:
+                - ServiceAccount
+              selector:
+                matchLabels:
+                  azure.workload.identity/use: "true"
+      validate:
+        message: "ServiceAccounts for Workload Identity must have 'azure.workload.identity/client-id' annotation."
+        pattern:
+          metadata:
+            annotations:
+              azure.workload.identity/client-id: "?*"

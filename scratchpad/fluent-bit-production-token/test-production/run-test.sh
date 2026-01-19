@@ -149,7 +149,7 @@ if [ -n "$TRIAGE_WF" ]; then
         echo "=============================================="
         echo ""
         echo "Check your GitLab project for the new issue:"
-        echo "  https://gitlab.com/markgardiner/mcp-test-repo/-/issues"
+        echo "  https://gitlab.com/davidmarkgardiner/mcp-test-repo/-/issues"
         echo ""
         echo "Workflow logs:"
         kubectl logs -n $NS $TRIAGE_WF --all-containers 2>/dev/null | tail -30

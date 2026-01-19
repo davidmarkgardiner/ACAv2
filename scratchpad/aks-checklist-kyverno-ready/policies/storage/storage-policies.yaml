@@ -1,0 +1,283 @@
+# Storage Policies
+# Maps to: Storage section of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-emptydir-sizelimit
+  annotations:
+    policies.kyverno.io/title: Require EmptyDir Size Limits
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Storage
+    aks-checklist/item: "Choose the right storage type"
+    policies.kyverno.io/description: >-
+      EmptyDir volumes should have size limits to prevent disk exhaustion.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-emptydir-sizelimit
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "EmptyDir volumes should have sizeLimit specified to prevent node disk exhaustion."
+        foreach:
+          - list: "request.object.spec.volumes[?emptyDir]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.emptyDir.sizeLimit || '' }}"
+                    operator: Equals
+                    value: ""
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-pvc-storage-class
+  annotations:
+    policies.kyverno.io/title: Validate PVC Storage Class
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Storage
+    aks-checklist/item: "Choose the right storage type"
+    policies.kyverno.io/description: >-
+      PersistentVolumeClaims should use approved storage classes.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-storage-class
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolumeClaim
+      validate:
+        message: "PVCs should use an approved storageClassName (managed-csi, managed-csi-premium, azurefile-csi, azurefile-csi-premium)."
+        pattern:
+          spec:
+            storageClassName: "managed-csi | managed-csi-premium | azurefile-csi | azurefile-csi-premium | default"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-pvc-access-mode
+  annotations:
+    policies.kyverno.io/title: Validate PVC Access Mode
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Storage
+    aks-checklist/item: "Dynamically provision volumes"
+    policies.kyverno.io/description: >-
+      PersistentVolumeClaims should use appropriate access modes for the storage type.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-access-mode
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolumeClaim
+      validate:
+        message: "PVCs must specify accessModes explicitly."
+        pattern:
+          spec:
+            accessModes:
+              - "ReadWriteOnce | ReadWriteMany | ReadOnlyMany"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-statefulset-pvc-template
+  annotations:
+    policies.kyverno.io/title: StatefulSet PVC Template Best Practices
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Storage
+    aks-checklist/item: "Secure and back up your data"
+    policies.kyverno.io/description: >-
+      StatefulSet PVC templates should follow best practices for Azure.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: sts-pvc-storage-class
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet
+      validate:
+        message: "StatefulSet volumeClaimTemplates should specify storageClassName."
+        pattern:
+          spec:
+            volumeClaimTemplates:
+              - spec:
+                  storageClassName: "?*"
+                  resources:
+                    requests:
+                      storage: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-local-storage
+  annotations:
+    policies.kyverno.io/title: Warn on Local Storage Usage
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Storage
+    aks-checklist/item: "Avoid keeping state in the cluster"
+    policies.kyverno.io/description: >-
+      Local storage volumes may not survive pod rescheduling.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: warn-local-storage
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Local storage (hostPath, local) is not recommended for stateful data. Consider Azure Disks or Azure Files."
+        pattern:
+          spec:
+            =(volumes):
+              - X(local): "null"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-csi-driver-usage
+  annotations:
+    policies.kyverno.io/title: Recommend CSI Drivers
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Storage
+    aks-checklist/item: "Choose the right storage type"
+    policies.kyverno.io/description: >-
+      PersistentVolumes should use CSI drivers for Azure storage.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: recommend-csi
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolume
+      validate:
+        message: "PersistentVolumes should use CSI drivers (disk.csi.azure.com, file.csi.azure.com, blob.csi.azure.com)."
+        anyPattern:
+          - spec:
+              csi:
+                driver: "disk.csi.azure.com | file.csi.azure.com | blob.csi.azure.com | secrets-store.csi.k8s.io"
+          - spec:
+              azureDisk: "?*"
+          - spec:
+              azureFile: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-secrets-store-csi
+  annotations:
+    policies.kyverno.io/title: Recommend Secrets Store CSI Driver
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Storage
+    aks-checklist/item: "Secure and back up your data"
+    policies.kyverno.io/description: >-
+      Pods accessing Key Vault should use Secrets Store CSI Driver.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-secrets-store
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  azure.keyvault.secrets/use: "true"
+      validate:
+        message: "Pods marked for Key Vault access should mount secrets using Secrets Store CSI Driver."
+        pattern:
+          spec:
+            volumes:
+              - name: "?*"
+                csi:
+                  driver: secrets-store.csi.k8s.io
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-volume-snapshot-class
+  annotations:
+    policies.kyverno.io/title: Validate VolumeSnapshot Usage
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Storage
+    aks-checklist/item: "Secure and back up your data"
+    policies.kyverno.io/description: >-
+      VolumeSnapshots should use approved snapshot classes for backup.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-snapshot-class
+      match:
+        any:
+          - resources:
+              kinds:
+                - VolumeSnapshot
+      validate:
+        message: "VolumeSnapshots should specify a volumeSnapshotClassName."
+        pattern:
+          spec:
+            volumeSnapshotClassName: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-pvc-delete-protection
+  annotations:
+    policies.kyverno.io/title: Require PVC Deletion Protection Label
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Storage
+    aks-checklist/item: "Secure and back up your data"
+    policies.kyverno.io/description: >-
+      Important PVCs should have labels for deletion protection.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-protection-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolumeClaim
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "PVCs should have 'data-importance' label (critical, high, medium, low) for backup prioritization."
+        pattern:
+          metadata:
+            labels:
+              data-importance: "critical | high | medium | low"

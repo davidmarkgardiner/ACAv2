@@ -1,11 +1,12 @@
 # Multi-Cluster Triage WorkflowTemplate
-# Investigates issues across multiple clusters using Holmes + AKS-MCP
-# Creates GitLab issues with cluster context
+# Investigates issues using Holmes + creates GitLab issues
 #
 # Prerequisites:
-# 1. HolmesGPT deployed (optional - will use fallback if not available)
+# 1. HolmesGPT deployed with proper RBAC (see 05-holmes-rbac.yaml)
 # 2. GitLab PAT secret (gitlab-mcp-secret)
 # 3. RocketChat webhook config (optional)
+#
+# Holmes endpoint is configurable via HOLMES_URL parameter
 #
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -16,12 +17,10 @@ metadata:
     app: multi-cluster-remediation
     purpose: production-test
 spec:
-  # Auto-cleanup: delete completed workflows after 5 minutes
   ttlStrategy:
     secondsAfterCompletion: 300
     secondsAfterSuccess: 300
     secondsAfterFailure: 600
-  # Clean up pods immediately after workflow completes
   podGC:
     strategy: OnWorkflowCompletion
   entrypoint: main
@@ -42,7 +41,10 @@ spec:
         description: Full event message
       - name: gitlab-project
         description: GitLab project for issue creation
-        default: "markgardiner/mcp-test-repo"
+        default: "davidmarkgardiner/mcp-test-repo"
+      - name: holmes-url
+        description: Holmes API URL (set to 'skip' to bypass Holmes)
+        default: "http://holmesgpt.holmesgpt.svc.cluster.local:80"
 
   templates:
     - name: main
@@ -68,16 +70,17 @@ spec:
                   value: "{{tasks.create-issue.outputs.parameters.issue-url}}"
                 - name: analysis
                   value: "{{tasks.investigate.outputs.parameters.analysis}}"
+                - name: recommendations
+                  value: "{{tasks.investigate.outputs.parameters.recommendations}}"
 
-    # Holmes Investigation with multi-cluster context
-    # Falls back to basic analysis if Holmes is not available
+    # Holmes Investigation with configurable endpoint and proper error handling
     - name: holmes-investigate
       script:
         image: badouralix/curl-jq:latest
         command: [sh]
         source: |
           #!/bin/sh
-          set -e
+          # Don't use set -e so we can handle errors gracefully
 
           CLUSTER="{{workflow.parameters.cluster-name}}"
           NAMESPACE="{{workflow.parameters.namespace}}"
@@ -85,10 +88,61 @@ spec:
           KIND="{{workflow.parameters.resource-kind}}"
           REASON="{{workflow.parameters.event-reason}}"
           MESSAGE="{{workflow.parameters.event-message}}"
+          HOLMES_URL="{{workflow.parameters.holmes-url}}"
 
-          echo "Investigating ${REASON} on cluster ${CLUSTER}..."
+          echo "=============================================="
+          echo "Holmes Investigation"
+          echo "=============================================="
+          echo "Cluster:   ${CLUSTER}"
+          echo "Namespace: ${NAMESPACE}"
+          echo "Resource:  ${KIND}/${RESOURCE}"
+          echo "Reason:    ${REASON}"
+          echo "Holmes:    ${HOLMES_URL}"
+          echo "=============================================="
 
-          # Build Holmes investigation request with cluster context
+          # Check if Holmes should be skipped
+          if [ "$HOLMES_URL" = "skip" ] || [ "$HOLMES_URL" = "none" ]; then
+            echo ""
+            echo "Holmes investigation SKIPPED (url=$HOLMES_URL)"
+            echo ""
+
+            # Generate fallback analysis
+            cat > /tmp/analysis.txt << ANALYSIS_EOF
+          **Automated Event Detection**
+
+          A \`${REASON}\` event was detected for ${KIND}/\`${RESOURCE}\` in namespace \`${NAMESPACE}\` on cluster \`${CLUSTER}\`.
+
+          **Event Details:**
+          - Type: Warning
+          - Reason: ${REASON}
+          - Message: ${MESSAGE}
+
+          *Note: HolmesGPT investigation was skipped. This is a basic event report.*
+          ANALYSIS_EOF
+
+            cat > /tmp/recommendations.txt << RECO_EOF
+          **Recommended Actions:**
+
+          1. Check pod logs:
+             \`\`\`bash
+             kubectl logs ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
+             \`\`\`
+
+          2. Check pod events:
+             \`\`\`bash
+             kubectl describe pod ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
+             \`\`\`
+
+          3. Check resource limits and requests
+
+          4. Review application health probes
+          RECO_EOF
+
+            echo "Fallback analysis generated"
+            exit 0
+          fi
+
+          # Build Holmes investigation request
           cat > /tmp/request.json << EOF
           {
             "source": "multi-cluster-automation",
@@ -110,75 +164,199 @@ spec:
           }
           EOF
 
-          echo "Request:"
-          cat /tmp/request.json
+          echo ""
+          echo "Request payload:"
+          cat /tmp/request.json | jq .
+          echo ""
 
-          # Try to call Holmes API
-          # Holmes should have multi-cluster access via AKS-MCP
-          RESPONSE=$(curl -s -X POST \
-            "http://holmesgpt.holmesgpt.svc.cluster.local:80/api/investigate" \
-            -H "Content-Type: application/json" \
-            -d @/tmp/request.json \
+          # Test Holmes connectivity first (uses /healthz and /readyz endpoints)
+          echo "Testing Holmes connectivity..."
+          HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" \
             --connect-timeout 5 \
-            --max-time 300 2>/dev/null || echo '{"error": "Holmes API not available"}')
+            --max-time 10 \
+            "${HOLMES_URL}/healthz" 2>/dev/null || echo "000")
 
-          echo "Response received: $RESPONSE"
+          echo "Health check (/healthz) response: HTTP ${HEALTH_CHECK}"
 
-          # Check if Holmes responded
-          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
-            echo "Holmes not available, using fallback analysis"
-            ANALYSIS="**Automated Event Detection**
+          if [ "$HEALTH_CHECK" = "000" ]; then
+            echo ""
+            echo "ERROR: Cannot connect to Holmes at ${HOLMES_URL}"
+            echo "Holmes may not be deployed or network policy is blocking access"
+            echo ""
+            HOLMES_AVAILABLE="false"
+          elif [ "$HEALTH_CHECK" = "404" ]; then
+            echo "Health endpoint not found, trying /readyz..."
+            HEALTH_CHECK2=$(curl -s -o /dev/null -w "%{http_code}" \
+              --connect-timeout 5 \
+              --max-time 10 \
+              "${HOLMES_URL}/readyz" 2>/dev/null || echo "000")
+            echo "Readiness check (/readyz): HTTP ${HEALTH_CHECK2}"
+            if [ "$HEALTH_CHECK2" = "000" ]; then
+              HOLMES_AVAILABLE="false"
+            else
+              HOLMES_AVAILABLE="true"
+            fi
+          else
+            HOLMES_AVAILABLE="true"
+          fi
 
-          A ${REASON} event was detected for ${KIND}/${RESOURCE} in namespace ${NAMESPACE} on cluster ${CLUSTER}.
+          if [ "$HOLMES_AVAILABLE" = "true" ]; then
+            echo ""
+            echo "Calling Holmes API (this may take up to 5 minutes)..."
+            echo "Endpoint: ${HOLMES_URL}/api/investigate"
+            echo ""
+
+            # Call Holmes with verbose output
+            HTTP_CODE=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              "${HOLMES_URL}/api/investigate" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/request.json \
+              --connect-timeout 10 \
+              --max-time 300 \
+              -o /tmp/holmes_response.json 2>&1)
+
+            # Extract HTTP code (last line)
+            RESPONSE_CODE=$(echo "$HTTP_CODE" | tail -1)
+
+            echo "Holmes API response code: ${RESPONSE_CODE}"
+            echo ""
+
+            if [ -f /tmp/holmes_response.json ]; then
+              echo "Holmes response:"
+              cat /tmp/holmes_response.json | jq . 2>/dev/null || cat /tmp/holmes_response.json
+              echo ""
+
+              # Check for error in response
+              ERROR_MSG=$(cat /tmp/holmes_response.json | jq -r '.error // .message // empty' 2>/dev/null)
+              if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "null" ]; then
+                echo "Holmes returned error: $ERROR_MSG"
+                HOLMES_SUCCESS="false"
+              elif [ "$RESPONSE_CODE" = "200" ]; then
+                HOLMES_SUCCESS="true"
+              else
+                echo "Non-200 response from Holmes"
+                HOLMES_SUCCESS="false"
+              fi
+            else
+              echo "No response file created"
+              HOLMES_SUCCESS="false"
+            fi
+          else
+            HOLMES_SUCCESS="false"
+          fi
+
+          # Extract or generate analysis
+          if [ "$HOLMES_SUCCESS" = "true" ]; then
+            echo ""
+            echo "Extracting analysis from Holmes response..."
+
+            ANALYSIS=$(cat /tmp/holmes_response.json | jq -r '.analysis // .result // empty' 2>/dev/null)
+            RECOMMENDATIONS=$(cat /tmp/holmes_response.json | jq -r '.recommendations // empty' 2>/dev/null)
+
+            if [ -n "$ANALYSIS" ] && [ "$ANALYSIS" != "null" ]; then
+              echo "$ANALYSIS" > /tmp/analysis.txt
+              echo "Analysis extracted successfully"
+            else
+              echo "No analysis in response, using fallback"
+              HOLMES_SUCCESS="false"
+            fi
+
+            if [ -n "$RECOMMENDATIONS" ] && [ "$RECOMMENDATIONS" != "null" ]; then
+              echo "$RECOMMENDATIONS" > /tmp/recommendations.txt
+            fi
+          fi
+
+          # Generate fallback if Holmes failed
+          if [ "$HOLMES_SUCCESS" != "true" ]; then
+            echo ""
+            echo "Using fallback analysis (Holmes unavailable or returned error)"
+            echo ""
+
+            cat > /tmp/analysis.txt << ANALYSIS_EOF
+          **Automated Event Detection**
+
+          A \`${REASON}\` event was detected for ${KIND}/\`${RESOURCE}\` in namespace \`${NAMESPACE}\` on cluster \`${CLUSTER}\`.
 
           **Event Details:**
           - Type: Warning
           - Reason: ${REASON}
           - Message: ${MESSAGE}
 
-          *Note: HolmesGPT was not available for AI-powered analysis. This is a basic event report.*"
+          **Holmes Status:** Not available or returned an error. Manual investigation required.
 
-            RECOMMENDATIONS="**Recommended Actions:**
+          *If you see "RBAC: access denied" errors, ensure Holmes has the required ClusterRole permissions. See 05-holmes-rbac.yaml.*
+          ANALYSIS_EOF
+          fi
+
+          # Generate recommendations if not already set
+          if [ ! -f /tmp/recommendations.txt ] || [ ! -s /tmp/recommendations.txt ]; then
+            case "$REASON" in
+              OOMKilled)
+                cat > /tmp/recommendations.txt << RECO_EOF
+          **OOMKilled Recommendations:**
+
+          1. Check current memory usage:
+             \`\`\`bash
+             kubectl top pod ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
+             \`\`\`
+
+          2. Review memory limits:
+             \`\`\`bash
+             kubectl get pod ${RESOURCE} -n ${NAMESPACE} -o jsonpath='{.spec.containers[*].resources}' --context ${CLUSTER}
+             \`\`\`
+
+          3. Check for memory leaks in application logs
+
+          4. Consider increasing memory limits or optimizing application
+          RECO_EOF
+                ;;
+              BackOff|CrashLoopBackOff)
+                cat > /tmp/recommendations.txt << RECO_EOF
+          **CrashLoopBackOff Recommendations:**
 
           1. Check pod logs:
-             \`\`\`
-             kubectl logs ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
+             \`\`\`bash
+             kubectl logs ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER} --previous
              \`\`\`
 
           2. Check pod events:
-             \`\`\`
+             \`\`\`bash
              kubectl describe pod ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
              \`\`\`
 
-          3. Check resource limits and requests
+          3. Verify liveness/readiness probes configuration
 
-          4. Review application health probes
+          4. Check application startup dependencies
+          RECO_EOF
+                ;;
+              *)
+                cat > /tmp/recommendations.txt << RECO_EOF
+          **General Recommendations:**
 
-          5. Check node resources:
+          1. Check pod logs:
+             \`\`\`bash
+             kubectl logs ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
              \`\`\`
-             kubectl top nodes --context ${CLUSTER}
-             \`\`\`"
-          else
-            # Extract analysis and recommendations from Holmes response
-            ANALYSIS=$(echo "$RESPONSE" | jq -r '.analysis // .result // "Investigation completed but no detailed analysis available."')
-            RECOMMENDATIONS=$(echo "$RESPONSE" | jq -r '.recommendations // "Check pod logs and events for more details."')
 
-            # Handle null/empty values
-            if [ "$ANALYSIS" = "null" ] || [ -z "$ANALYSIS" ]; then
-              ANALYSIS="Investigation completed. Event: ${REASON} for ${KIND}/${RESOURCE} in ${NAMESPACE} on cluster ${CLUSTER}."
-            fi
+          2. Describe the pod:
+             \`\`\`bash
+             kubectl describe pod ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
+             \`\`\`
 
-            if [ "$RECOMMENDATIONS" = "null" ] || [ -z "$RECOMMENDATIONS" ]; then
-              RECOMMENDATIONS="1. Check pod logs: kubectl logs ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
-          2. Check pod events: kubectl describe pod ${RESOURCE} -n ${NAMESPACE} --context ${CLUSTER}
-          3. Check resource limits and requests
-          4. Review application health probes"
-            fi
+          3. Check related events:
+             \`\`\`bash
+             kubectl get events -n ${NAMESPACE} --context ${CLUSTER} --field-selector involvedObject.name=${RESOURCE}
+             \`\`\`
+          RECO_EOF
+                ;;
+            esac
           fi
 
-          echo "$ANALYSIS" > /tmp/analysis.txt
-          echo "$RECOMMENDATIONS" > /tmp/recommendations.txt
-
+          echo ""
+          echo "=============================================="
+          echo "Investigation Complete"
+          echo "=============================================="
           echo ""
           echo "=== Analysis ==="
           cat /tmp/analysis.txt
@@ -186,7 +364,6 @@ spec:
           echo "=== Recommendations ==="
           cat /tmp/recommendations.txt
           echo ""
-          echo "Investigation complete"
       outputs:
         parameters:
           - name: analysis
@@ -196,7 +373,7 @@ spec:
             valueFrom:
               path: /tmp/recommendations.txt
 
-    # Create GitLab issue with cluster context
+    # Create GitLab issue
     - name: create-gitlab-issue
       inputs:
         parameters:
@@ -233,17 +410,15 @@ spec:
           ENCODED_PROJECT=$(echo "$PROJECT" | sed 's/\//%2F/g')
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
 
-          # Build issue title
           TITLE="[${CLUSTER}] ${REASON}: ${NAMESPACE}/${RESOURCE}"
 
-          # Determine severity label
           case "$REASON" in
             OOMKilled|CrashLoopBackOff) SEVERITY="severity-critical" ;;
             BackOff|ImagePullBackOff|FailedScheduling) SEVERITY="severity-high" ;;
             *) SEVERITY="severity-medium" ;;
           esac
 
-          # Build description line by line to avoid YAML parsing issues
+          # Build description
           echo "## Cluster Information" > /tmp/description.txt
           echo "" >> /tmp/description.txt
           echo "- **Cluster**: ${CLUSTER}" >> /tmp/description.txt
@@ -255,7 +430,9 @@ spec:
           echo "" >> /tmp/description.txt
           echo "## Event Message" >> /tmp/description.txt
           echo "" >> /tmp/description.txt
+          echo "\`\`\`" >> /tmp/description.txt
           echo "${MESSAGE}" >> /tmp/description.txt
+          echo "\`\`\`" >> /tmp/description.txt
           echo "" >> /tmp/description.txt
           echo "## AI Analysis" >> /tmp/description.txt
           echo "" >> /tmp/description.txt
@@ -266,10 +443,9 @@ spec:
           echo "${RECOMMENDATIONS}" >> /tmp/description.txt
           echo "" >> /tmp/description.txt
           echo "---" >> /tmp/description.txt
-          echo "*Auto-generated by Multi-Cluster Remediation Pipeline (Production Test)*" >> /tmp/description.txt
+          echo "*Auto-generated by Multi-Cluster Remediation Pipeline*" >> /tmp/description.txt
           DESCRIPTION=$(cat /tmp/description.txt)
 
-          # Use jq to safely build JSON payload (handles special chars)
           jq -n \
             --arg title "$TITLE" \
             --arg desc "$DESCRIPTION" \
@@ -277,8 +453,6 @@ spec:
             '{title: $title, description: $desc, labels: $labels}' > /tmp/issue_payload.json
 
           echo "Creating GitLab issue in project: ${PROJECT}"
-          echo "Payload preview:"
-          cat /tmp/issue_payload.json | head -20
 
           curl -s -X POST \
             "https://gitlab.com/api/v4/projects/${ENCODED_PROJECT}/issues" \
@@ -286,7 +460,6 @@ spec:
             -H "Content-Type: application/json" \
             -d @/tmp/issue_payload.json > /tmp/gitlab_response.json
 
-          echo ""
           echo "GitLab API Response:"
           cat /tmp/gitlab_response.json | jq '.' 2>/dev/null || cat /tmp/gitlab_response.json
 
@@ -295,16 +468,11 @@ spec:
           if [ -n "$ISSUE_URL" ]; then
             echo "$ISSUE_URL" > /tmp/issue_url.txt
             echo ""
-            echo "Issue created successfully: $ISSUE_URL"
+            echo "Issue created: $ISSUE_URL"
           else
             ERROR=$(cat /tmp/gitlab_response.json | jq -r '.message // .error // empty')
-            if [ -n "$ERROR" ]; then
-              echo "ERROR: $ERROR" > /tmp/issue_url.txt
-              echo "GitLab API Error: $ERROR"
-            else
-              echo "https://gitlab.com/${PROJECT}/issues" > /tmp/issue_url.txt
-              echo "Warning: Could not extract issue URL"
-            fi
+            echo "ERROR: $ERROR" > /tmp/issue_url.txt
+            echo "GitLab API Error: $ERROR"
           fi
         resources:
           requests:
@@ -314,12 +482,13 @@ spec:
             cpu: 200m
             memory: 128Mi
 
-    # Notify RocketChat with completion and GitLab link (optional)
+    # Notify Mattermost/RocketChat with analysis and recommendations
     - name: notify-rocketchat-completion
       inputs:
         parameters:
           - name: issue-url
           - name: analysis
+          - name: recommendations
       script:
         image: badouralix/curl-jq:latest
         command: [sh]
@@ -332,51 +501,89 @@ spec:
                 optional: true
           - name: ANALYSIS
             value: "{{inputs.parameters.analysis}}"
+          - name: RECOMMENDATIONS
+            value: "{{inputs.parameters.recommendations}}"
         source: |
           #!/bin/sh
           ISSUE_URL='{{inputs.parameters.issue-url}}'
           RESOURCE='{{workflow.parameters.resource-name}}'
           NAMESPACE='{{workflow.parameters.namespace}}'
+          CLUSTER='{{workflow.parameters.cluster-name}}'
           REASON='{{workflow.parameters.event-reason}}'
 
-          # Skip if webhook not configured
           if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" = "<YOUR_ROCKETCHAT_WEBHOOK_URL>" ]; then
-            echo "RocketChat webhook not configured, skipping notification"
+            echo "Webhook not configured, skipping notification"
             exit 0
           fi
 
-          # Truncate analysis to first 800 chars using jq (handles special chars safely)
-          ANALYSIS_SHORT=$(echo "$ANALYSIS" | jq -Rs '.[0:800]' | jq -r '.')
+          # Extract first 20 lines of analysis as summary
+          ANALYSIS_SUMMARY=$(echo "$ANALYSIS" | head -20)
+          ANALYSIS_SUMMARY="${ANALYSIS_SUMMARY}
 
-          # Add ellipsis if truncated
-          ANALYSIS_LEN=$(echo "$ANALYSIS" | wc -c)
-          if [ "$ANALYSIS_LEN" -gt 800 ]; then
-            ANALYSIS_SHORT="${ANALYSIS_SHORT}..."
-          fi
+          _See GitLab issue for complete analysis..._"
 
-          # Use jq to build JSON safely (handles special chars in analysis)
-          jq -n \
-            --arg issue_url "$ISSUE_URL" \
-            --arg title "${REASON}: ${NAMESPACE}/${RESOURCE}" \
-            --arg analysis "$ANALYSIS_SHORT" \
-            '{
-              text: ":white_check_mark: **Triage Complete**",
-              attachments: [
-                {
-                  title: $title,
-                  title_link: $issue_url,
-                  text: $analysis,
-                  color: "#2ecc71"
-                },
-                {
-                  title: "GitLab Issue",
-                  text: (":link: " + $issue_url),
-                  color: "#3498db"
-                }
-              ]
-            }' > /tmp/payload.json
+          # Keep full recommendations - they contain the useful commands
+          RECO_TEXT="$RECOMMENDATIONS"
 
-          curl -s -X POST "$WEBHOOK_URL" \
+          # Build the message with proper formatting
+          cat > /tmp/payload.json << PAYLOAD_EOF
+          {
+            "text": "### :mag: Triage Complete: ${REASON}",
+            "attachments": [
+              {
+                "fallback": "${REASON}: ${NAMESPACE}/${RESOURCE}",
+                "color": "#3498db",
+                "title": "[${CLUSTER}] ${NAMESPACE}/${RESOURCE}",
+                "title_link": "${ISSUE_URL}",
+                "fields": [
+                  {
+                    "short": true,
+                    "title": "Cluster",
+                    "value": "${CLUSTER}"
+                  },
+                  {
+                    "short": true,
+                    "title": "Event",
+                    "value": "${REASON}"
+                  }
+                ]
+              },
+              {
+                "fallback": "Analysis",
+                "color": "#2ecc71",
+                "title": ":brain: AI Analysis",
+                "text": $(echo "$ANALYSIS_SUMMARY" | jq -Rs .)
+              },
+              {
+                "fallback": "Recommendations",
+                "color": "#e67e22",
+                "title": ":wrench: Recommended Actions",
+                "text": $(echo "$RECO_TEXT" | jq -Rs .)
+              },
+              {
+                "fallback": "GitLab Issue",
+                "color": "#9b59b6",
+                "text": ":link: **[View Full Issue in GitLab](${ISSUE_URL})**"
+              }
+            ]
+          }
+          PAYLOAD_EOF
+
+          echo "Sending notification to Mattermost..."
+          cat /tmp/payload.json | jq .
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d @/tmp/payload.json \
-            --max-time 10 || echo "Notification failed (non-fatal)"
+            --max-time 10)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "Response: $BODY (HTTP $HTTP_CODE)"
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$BODY" = "ok" ]; then
+            echo "Notification sent successfully"
+          else
+            echo "Notification may have failed (non-fatal)"
+          fi

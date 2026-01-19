@@ -1,0 +1,425 @@
+# Security Policies - Pod Security
+# Maps to: Cluster Security, Application Deployment sections of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-privileged-containers
+  annotations:
+    policies.kyverno.io/title: Disallow Privileged Containers
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Don't use privileged containers"
+    policies.kyverno.io/description: >-
+      Privileged mode disables most security mechanisms and should not be allowed.
+      Windows containers do not support elevation of privilege.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: privileged-containers
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Privileged mode is disallowed. Set privileged to false."
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(privileged): false
+    - name: privileged-init-containers
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Privileged mode is disallowed for init containers."
+        pattern:
+          spec:
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): false
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-security-context
+  annotations:
+    policies.kyverno.io/title: Require Security Context
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Specify the security context of your pod/container"
+    policies.kyverno.io/description: >-
+      A security context defines privilege and access control settings for a Pod or Container.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-security-context
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Pods must have a securityContext defined."
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-host-namespaces
+  annotations:
+    policies.kyverno.io/title: Disallow Host Namespaces
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Define app separation requirements"
+    policies.kyverno.io/description: >-
+      Host namespaces (Process ID, IPC, Network) should not be shared.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: host-namespaces
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Sharing host namespaces is disallowed."
+        pattern:
+          spec:
+            =(hostPID): false
+            =(hostIPC): false
+            =(hostNetwork): false
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-default-serviceaccount
+  annotations:
+    policies.kyverno.io/title: Disallow Default ServiceAccount
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Identity - Authorization
+    aks-checklist/item: "Use managed identities instead of Service Principals"
+    policies.kyverno.io/description: >-
+      Pods should not use the default service account and should disable automounting.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-default-sa
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Using the default ServiceAccount is not recommended."
+        pattern:
+          spec:
+            =(serviceAccountName): "!default"
+    - name: automount-sa-token
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Auto-mounting service account tokens should be disabled when not needed."
+        pattern:
+          spec:
+            =(automountServiceAccountToken): false
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-capabilities
+  annotations:
+    policies.kyverno.io/title: Disallow Added Capabilities
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Configure your cluster for regulated industries"
+    policies.kyverno.io/description: >-
+      Adding capabilities beyond the default set is not allowed.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: capabilities
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Adding capabilities is not allowed. Drop all capabilities and add only those required."
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.containers[].securityContext.capabilities.add[] || `[]` }}"
+                operator: AnyNotIn
+                value:
+                  - NET_BIND_SERVICE
+                  - ""
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-drop-all-capabilities
+  annotations:
+    policies.kyverno.io/title: Require Drop All Capabilities
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Configure your cluster for regulated industries"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: drop-all-capabilities
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Containers must drop all capabilities."
+        foreach:
+          - list: "request.object.spec.containers[]"
+            deny:
+              conditions:
+                all:
+                  - key: ALL
+                    operator: AnyNotIn
+                    value: "{{ element.securityContext.capabilities.drop[] || `[]` }}"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-root-user
+  annotations:
+    policies.kyverno.io/title: Disallow Root User
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Specify the security context of your pod/container"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Running as root is not allowed. Set runAsNonRoot to true."
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): true
+            containers:
+              - =(securityContext):
+                  =(runAsNonRoot): true
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-restrict-seccomp-profiles
+  annotations:
+    policies.kyverno.io/title: Restrict Seccomp Profiles
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Configure your cluster for regulated industries"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: seccomp-profile
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Seccomp profile must be set to RuntimeDefault or Localhost."
+        pattern:
+          spec:
+            =(securityContext):
+              =(seccompProfile):
+                type: "RuntimeDefault | Localhost"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-hostpath
+  annotations:
+    policies.kyverno.io/title: Disallow HostPath Volumes
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Storage
+    aks-checklist/item: "Choose the right storage type"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: host-path
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "HostPath volumes are not allowed."
+        pattern:
+          spec:
+            =(volumes):
+              - X(hostPath): "null"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-readonly-rootfs
+  annotations:
+    policies.kyverno.io/title: Require Read-Only Root Filesystem
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Specify the security context of your pod/container"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: readonly-rootfs
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Root filesystem should be read-only."
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(readOnlyRootFilesystem): true
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-windows-nodeselector
+  annotations:
+    policies.kyverno.io/title: Require Windows NodeSelector
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Separate apps from control plane"
+    policies.kyverno.io/description: >-
+      Windows workloads should use nodeSelector to ensure they are scheduled
+      on Windows nodes. This prevents Windows containers from being scheduled
+      on Linux nodes where they cannot run.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-windows-nodeselector
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  kubernetes.io/os: windows
+      validate:
+        message: "Windows pods must have nodeSelector with 'kubernetes.io/os: windows' to ensure proper scheduling."
+        pattern:
+          spec:
+            nodeSelector:
+              kubernetes.io/os: windows
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-sysctls
+  annotations:
+    policies.kyverno.io/title: Disallow Unsafe Sysctls
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Configure your cluster for regulated industries"
+    policies.kyverno.io/description: >-
+      Sysctls can disable security mechanisms or affect all containers on a host.
+      Unsafe sysctls are disabled by default in Kubernetes but can be enabled via
+      allowUnsafeSysctls in the Kubelet config. This policy ensures pods do not use
+      unsafe sysctls that could compromise node security.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-unsafe-sysctls
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Unsafe sysctls are not allowed. Only safe sysctls (net.*, kernel.shm_*, kernel.msg_*, kernel.sem, fs.mqueue.*) are permitted."
+        pattern:
+          spec:
+            =(securityContext):
+              =(sysctls):
+                - name: "net.* | kernel.shm_* | kernel.msg_* | kernel.sem | fs.mqueue.*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-host-ports
+  annotations:
+    policies.kyverno.io/title: Disallow Host Ports
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Cluster Security
+    aks-checklist/item: "Define app separation requirements"
+    policies.kyverno.io/description: >-
+      Access to host ports allows potential snooping of network traffic and
+      can be used to bypass network policies. Host ports should not be used.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-host-ports
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Host ports are not allowed. Remove hostPort from container port definitions."
+        pattern:
+          spec:
+            containers:
+              - =(ports):
+                  - =(hostPort): "null"
+            =(initContainers):
+              - =(ports):
+                  - =(hostPort): "null"
+            =(ephemeralContainers):
+              - =(ports):
+                  - =(hostPort): "null"

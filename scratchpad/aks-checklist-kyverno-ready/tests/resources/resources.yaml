@@ -1,0 +1,393 @@
+# Test resources for resource-management policies
+---
+# Pod with CPU and memory limits - should pass resource limits policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-limits
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Pod without CPU limit - should fail resource limits policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-cpu-limit
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Pod without memory limit - should fail resource limits policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-memory-limit
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Pod with CPU and memory requests - should pass resource requests policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-requests
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Pod without CPU request - should fail resource requests policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-cpu-request
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+        requests:
+          memory: "128Mi"
+---
+# Pod without memory request - should fail resource requests policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-memory-request
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+---
+# Deployment with pdb-configured label - should pass PDB requirement policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-pdb-label
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    pdb-configured: "true"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without pdb-configured label - should fail PDB requirement policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-without-pdb-label
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with single replica - should skip PDB requirement policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-single-replica-pdb
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Pod with reasonable CPU limit/request ratio (5x) - should pass CPU ratio policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-reasonable-cpu-ratio
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "1000m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Pod with excessive CPU limit/request ratio (>10x) - should fail CPU ratio policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-excessive-cpu-ratio
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "2200m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Deployment with autoscaling label - should pass HPA recommendation policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-autoscaling
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    autoscaling: enabled
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with KEDA autoscaling label - should pass HPA recommendation policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-keda
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    autoscaling: keda
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without autoscaling label - should fail HPA recommendation policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-no-autoscaling
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with 2+ replicas - should pass replicas requirement policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-multiple-replicas
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with 1 replica - should fail replicas requirement policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-single-replica
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Pod with requests = limits (Guaranteed QoS) - should pass QoS recommendation policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-guaranteed-qos
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "256Mi"
+---
+# Pod with requests != limits (Burstable QoS) - should fail QoS recommendation policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-burstable-qos
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Pod with ephemeral-storage limits - should pass ephemeral storage policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-ephemeral-limit
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+          ephemeral-storage: "1Gi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"
+---
+# Pod without ephemeral-storage limits - should fail ephemeral storage policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-ephemeral-limit
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+        requests:
+          cpu: "200m"
+          memory: "128Mi"

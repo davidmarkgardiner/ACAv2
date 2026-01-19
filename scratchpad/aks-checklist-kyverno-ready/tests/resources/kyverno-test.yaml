@@ -1,0 +1,149 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-resource-management-test
+policies:
+  - ../../policies/resources/resource-management.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-require-resource-limits tests
+  - kind: Pod
+    policy: aks-check-require-resource-limits
+    rule: require-cpu-limit
+    resources:
+      - pod-with-limits
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-resource-limits
+    rule: require-cpu-limit
+    resources:
+      - pod-without-cpu-limit
+    result: fail
+  - kind: Pod
+    policy: aks-check-require-resource-limits
+    rule: require-memory-limit
+    resources:
+      - pod-with-limits
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-resource-limits
+    rule: require-memory-limit
+    resources:
+      - pod-without-memory-limit
+    result: fail
+  # aks-check-require-resource-requests tests
+  - kind: Pod
+    policy: aks-check-require-resource-requests
+    rule: require-cpu-request
+    resources:
+      - pod-with-requests
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-resource-requests
+    rule: require-cpu-request
+    resources:
+      - pod-without-cpu-request
+    result: fail
+  - kind: Pod
+    policy: aks-check-require-resource-requests
+    rule: require-memory-request
+    resources:
+      - pod-with-requests
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-resource-requests
+    rule: require-memory-request
+    resources:
+      - pod-without-memory-request
+    result: fail
+  # aks-check-require-pdb tests
+  - kind: Deployment
+    policy: aks-check-require-pdb
+    rule: check-pdb-exists
+    resources:
+      - deployment-with-pdb-label
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-pdb
+    rule: check-pdb-exists
+    resources:
+      - deployment-without-pdb-label
+    result: fail
+  - kind: Deployment
+    policy: aks-check-require-pdb
+    rule: check-pdb-exists
+    resources:
+      - deployment-single-replica-pdb
+    result: skip
+  # aks-check-limit-cpu-ratio tests
+  - kind: Pod
+    policy: aks-check-limit-cpu-ratio
+    rule: cpu-limit-ratio
+    resources:
+      - pod-reasonable-cpu-ratio
+    result: pass
+  - kind: Pod
+    policy: aks-check-limit-cpu-ratio
+    rule: cpu-limit-ratio
+    resources:
+      - pod-excessive-cpu-ratio
+    result: fail
+  # aks-check-validate-hpa-exists tests
+  - kind: Deployment
+    policy: aks-check-validate-hpa-exists
+    rule: check-hpa-label
+    resources:
+      - deployment-with-autoscaling
+    result: pass
+  - kind: Deployment
+    policy: aks-check-validate-hpa-exists
+    rule: check-hpa-label
+    resources:
+      - deployment-with-keda
+    result: pass
+  - kind: Deployment
+    policy: aks-check-validate-hpa-exists
+    rule: check-hpa-label
+    resources:
+      - deployment-no-autoscaling
+    result: fail
+  # aks-check-require-replicas tests
+  - kind: Deployment
+    policy: aks-check-require-replicas
+    rule: minimum-replicas
+    resources:
+      - deployment-multiple-replicas
+    result: pass
+  - kind: Deployment
+    policy: aks-check-require-replicas
+    rule: minimum-replicas
+    resources:
+      - deployment-single-replica
+    result: fail
+  # aks-check-require-qos-guaranteed tests
+  - kind: Pod
+    policy: aks-check-require-qos-guaranteed
+    rule: check-qos
+    resources:
+      - pod-guaranteed-qos
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-qos-guaranteed
+    rule: check-qos
+    resources:
+      - pod-burstable-qos
+    result: fail
+  # aks-check-ephemeral-storage-limits tests
+  - kind: Pod
+    policy: aks-check-ephemeral-storage-limits
+    rule: ephemeral-storage-limit
+    resources:
+      - pod-with-ephemeral-limit
+    result: pass
+  - kind: Pod
+    policy: aks-check-ephemeral-storage-limits
+    rule: ephemeral-storage-limit
+    resources:
+      - pod-no-ephemeral-limit
+    result: fail

@@ -1,0 +1,431 @@
+# Test resources for deployment-best-practices policies
+---
+# Pod with liveness probe (httpGet) - should pass liveness policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-liveness-http
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+---
+# Pod with liveness probe (tcpSocket) - should pass liveness policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-liveness-tcp
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      livenessProbe:
+        tcpSocket:
+          port: 8080
+---
+# Pod with liveness probe (exec) - should pass liveness policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-liveness-exec
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      livenessProbe:
+        exec:
+          command:
+            - cat
+            - /tmp/healthy
+---
+# Pod without liveness probe - should fail liveness policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-liveness
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with readiness probe - should pass readiness policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-readiness
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: 8080
+---
+# Pod without readiness probe - should fail readiness policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-readiness
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with startup probe - should pass startup policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-startup
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      startupProbe:
+        httpGet:
+          path: /startup
+          port: 8080
+---
+# Pod without startup probe - should fail startup policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-startup
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Deployment with proper labels - should pass labels policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-labels
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/managed-by: helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without required labels - should fail labels policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-without-labels
+  namespace: test-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Pod in default namespace - should fail default-namespace policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-in-default
+  namespace: default
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with owner references (not naked) - should pass naked pod policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-owner
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: my-replicaset
+      uid: d9607e19-f88f-11e6-a518-42010a800195
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without owner references (naked pod) - should fail naked pod policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: naked-pod
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with prestop hook (exec) - should pass prestop policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-prestop-exec
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      lifecycle:
+        preStop:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - sleep 10
+---
+# Pod with prestop hook (httpGet) - should pass prestop policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-prestop-http
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+      lifecycle:
+        preStop:
+          httpGet:
+            path: /shutdown
+            port: 8080
+---
+# Pod without prestop hook - should fail prestop policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-without-prestop
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: test-app
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Deployment with podAntiAffinity (preferred) - should pass antiaffinity policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-antiaffinity-preferred
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: my-app
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with podAntiAffinity (required) - should pass antiaffinity policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-antiaffinity-required
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: my-app
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without podAntiAffinity (multiple replicas) - should fail antiaffinity policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-without-antiaffinity
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with single replica (no antiaffinity needed) - should pass/skip antiaffinity policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-single-replica
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with topologySpreadConstraints - should pass topology spread policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-with-topology-spread
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: my-app
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment without topologySpreadConstraints (3+ replicas) - should fail topology spread policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-without-topology-spread
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: "1.0.0"
+    team: platform
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19

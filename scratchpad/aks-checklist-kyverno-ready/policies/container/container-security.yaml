@@ -1,0 +1,317 @@
+# Container Security Policies
+# Maps to: Container section of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-image-vulnerability-label
+  annotations:
+    policies.kyverno.io/title: Require Vulnerability Scan Label
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Container
+    aks-checklist/item: "Scan the container image against vulnerabilities"
+    policies.kyverno.io/description: >-
+      Images should be scanned before deployment. This policy checks for scan labels.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-scan-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+      validate:
+        message: "Pods should have 'image-scan' label indicating vulnerability scan status."
+        anyPattern:
+          - metadata:
+              labels:
+                image-scan: "passed | in-progress | acknowledged"
+          - metadata:
+              annotations:
+                trivy.aquasecurity.github.io/scan: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-approved-base-images
+  annotations:
+    policies.kyverno.io/title: Validate Approved Base Images
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Container
+    aks-checklist/item: "Prefer distroless images"
+    policies.kyverno.io/description: >-
+      Images should be based on approved minimal/distroless base images.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: recommend-distroless
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Consider using distroless or minimal base images. Document base image choice."
+        anyPattern:
+          - spec:
+              containers:
+                - image: "*distroless* | *-slim* | *alpine* | *minimal*"
+          - metadata:
+              annotations:
+                base-image-approved: "true"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-runtime-security
+  annotations:
+    policies.kyverno.io/title: Recommend Runtime Security
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Container
+    aks-checklist/item: "Runtime Security of Applications"
+    policies.kyverno.io/description: >-
+      Pods should have runtime security monitoring enabled (Falco, Prisma, etc.).
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: recommend-runtime-security
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              names:
+                - kube-system
+                - kube-public
+      validate:
+        message: "Namespace should have runtime security label (falco-enabled, defender-enabled)."
+        anyPattern:
+          - metadata:
+              labels:
+                runtime-security: "falco | defender | prisma | disabled-acknowledged"
+          - metadata:
+              annotations:
+                security.azure.com/defender: "enabled"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-image-signature
+  annotations:
+    policies.kyverno.io/title: Recommend Image Signing
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Container
+    aks-checklist/item: "Allow deploying containers only from known registries"
+    policies.kyverno.io/description: >-
+      Images should be signed for supply chain security.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: recommend-signed-images
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Consider using signed images. Add 'image-signed' annotation if verified."
+        anyPattern:
+          - spec:
+              containers:
+                - image: "*@sha256:*"
+          - metadata:
+              annotations:
+                image-signed: "true | notary | cosign"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-image-registry-auth
+  annotations:
+    policies.kyverno.io/title: Validate Registry Authentication
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Container
+    aks-checklist/item: "Role-Based Access Contol (RBAC) to Docker Registries"
+    policies.kyverno.io/description: >-
+      Pods pulling from private registries should document authentication method.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-registry-auth
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.containers[].image | [?contains(@, 'azurecr.io')] | length(@) }}"
+            operator: GreaterThan
+            value: 0
+      validate:
+        message: "Pods pulling from ACR should use managed identity (preferred) or imagePullSecrets."
+        anyPattern:
+          - spec:
+              serviceAccountName: "?*"
+          - spec:
+              imagePullSecrets:
+                - name: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-container-allow-privilege-escalation
+  annotations:
+    policies.kyverno.io/title: Disallow Privilege Escalation
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Container
+    aks-checklist/item: "Runtime Security of Applications"
+    policies.kyverno.io/description: >-
+      Containers should not allow privilege escalation.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-privilege-escalation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Privilege escalation is not allowed. Set allowPrivilegeEscalation to false."
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(allowPrivilegeEscalation): false
+            =(initContainers):
+              - =(securityContext):
+                  =(allowPrivilegeEscalation): false
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-proc-mount
+  annotations:
+    policies.kyverno.io/title: Restrict Proc Mount
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Container
+    aks-checklist/item: "Runtime Security of Applications"
+    policies.kyverno.io/description: >-
+      Containers should use the default procMount setting.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: restrict-proc-mount
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "ProcMount should be set to 'Default' (or not set)."
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(procMount): "Default"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-container-user
+  annotations:
+    policies.kyverno.io/title: Require Specific User ID
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Container
+    aks-checklist/item: "Runtime Security of Applications"
+    policies.kyverno.io/description: >-
+      Containers should run as a specific non-root user.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-run-as-user
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Containers should specify runAsUser with a non-root UID (>= 1000)."
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsUser): ">=1000"
+            containers:
+              - =(securityContext):
+                  =(runAsUser): ">=1000"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-acr-private-endpoint
+  annotations:
+    policies.kyverno.io/title: Document ACR Network Configuration
+    policies.kyverno.io/category: Container Security
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Container
+    aks-checklist/item: "Network Segmentation of Docker Registries"
+    policies.kyverno.io/description: >-
+      Namespaces pulling from ACR should document private endpoint usage.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: document-acr-network
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      validate:
+        message: "Namespace should document ACR access method (private-endpoint, service-endpoint, public)."
+        pattern:
+          metadata:
+            annotations:
+              acr-network-access: "private-endpoint | service-endpoint | public"

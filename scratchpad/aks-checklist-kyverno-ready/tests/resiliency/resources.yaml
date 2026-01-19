@@ -1,0 +1,487 @@
+# Test resources for bc-dr-policies
+---
+# Critical deployment with zone topology spread - should pass zone spread policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-deployment-with-zone-spread
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    criticality: high
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      topologySpreadConstraints:
+        - topologyKey: topology.kubernetes.io/zone
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: my-app
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Critical deployment without zone topology spread - should fail zone spread policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-deployment-no-zone-spread
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    criticality: high
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Non-critical deployment - should skip zone spread policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: non-critical-deployment
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    criticality: low
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with 3+ replicas and antiaffinity (preferred) - should pass multi-replica antiaffinity policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-3-replicas-antiaffinity
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: my-app
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with 3+ replicas without antiaffinity - should fail multi-replica antiaffinity policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-3-replicas-no-antiaffinity
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Deployment with 2 replicas - should skip multi-replica antiaffinity policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-2-replicas
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# PDB with minAvailable - should pass PDB config policy
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-with-minavailable
+  namespace: test-ns
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+---
+# PDB with maxUnavailable - should pass PDB config policy
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-with-maxunavailable
+  namespace: test-ns
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+---
+# PDB without minAvailable or maxUnavailable - should fail PDB config policy
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-no-config
+  namespace: test-ns
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+---
+# StatefulSet with 2+ replicas - should pass STS replicas policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-with-replicas
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+    backup-strategy: velero
+spec:
+  serviceName: my-sts
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# StatefulSet with 1 replica - should fail STS replicas policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-single-replica
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+    backup-strategy: velero
+spec:
+  serviceName: my-sts
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Pod without zone in nodeSelector - should pass node selector policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-no-zone-selector
+  namespace: test-ns
+spec:
+  nodeSelector:
+    disktype: ssd
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with zone in nodeSelector - should fail node selector policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-zone-selector
+  namespace: test-ns
+spec:
+  nodeSelector:
+    topology.kubernetes.io/zone: zone-a
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Critical deployment with priorityClassName - should pass priority class policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-deployment-with-priority
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    criticality: high
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      priorityClassName: high-priority
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Critical deployment without priorityClassName - should fail priority class policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-deployment-no-priority
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    criticality: high
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Pod with terminationGracePeriodSeconds >= 30 - should pass grace period policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-grace-period
+  namespace: test-ns
+spec:
+  terminationGracePeriodSeconds: 60
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod with terminationGracePeriodSeconds < 30 - should fail grace period policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-short-grace-period
+  namespace: test-ns
+spec:
+  terminationGracePeriodSeconds: 10
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# Pod without terminationGracePeriodSeconds (uses default) - should pass grace period policy
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-default-grace-period
+  namespace: test-ns
+spec:
+  containers:
+    - name: app
+      image: nginx:1.19
+---
+# StatefulSet with backup-strategy label - should pass backup label policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-with-backup-label
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+    backup-strategy: daily
+spec:
+  serviceName: my-sts
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# StatefulSet with velero annotation - should pass backup label policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-with-velero-annotation
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+  annotations:
+    backup.velero.io/backup-volumes: data-volume
+spec:
+  serviceName: my-sts
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# StatefulSet with backup-exclude label - should pass backup label policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-with-backup-exclude
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+    backup-exclude: "true"
+spec:
+  serviceName: my-sts
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# StatefulSet without backup label - should fail backup label policy
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sts-no-backup-label
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-sts
+spec:
+  serviceName: my-sts
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Critical deployment with acr-georeplication annotation - should pass ACR geo policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-deployment-with-acr-geo
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    criticality: high
+  annotations:
+    acr-georeplication: enabled
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19
+---
+# Critical deployment without acr-georeplication annotation - should fail ACR geo policy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-deployment-no-acr-geo
+  namespace: test-ns
+  labels:
+    app.kubernetes.io/name: my-app
+    criticality: high
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.19

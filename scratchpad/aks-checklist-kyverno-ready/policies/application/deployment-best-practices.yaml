@@ -1,0 +1,405 @@
+# Application Deployment Policies
+# Maps to: Application Deployment section of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-liveness-probe
+  annotations:
+    policies.kyverno.io/title: Require Liveness Probe
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Implement a proper Liveness probe"
+    policies.kyverno.io/description: >-
+      Liveness probes help Kubernetes detect and restart unresponsive containers.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-liveness-probe
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+      validate:
+        message: "Liveness probe is required for all containers."
+        anyPattern:
+          - spec:
+              containers:
+                - livenessProbe:
+                    httpGet:
+                      port: "?*"
+          - spec:
+              containers:
+                - livenessProbe:
+                    tcpSocket:
+                      port: "?*"
+          - spec:
+              containers:
+                - livenessProbe:
+                    exec:
+                      command: "?*"
+          - spec:
+              containers:
+                - livenessProbe:
+                    grpc:
+                      port: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-readiness-probe
+  annotations:
+    policies.kyverno.io/title: Require Readiness Probe
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Implement a proper Readiness probe"
+    policies.kyverno.io/description: >-
+      Readiness probes ensure traffic is only sent to ready pods.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-readiness-probe
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+      validate:
+        message: "Readiness probe is required for all containers."
+        anyPattern:
+          - spec:
+              containers:
+                - readinessProbe:
+                    httpGet:
+                      port: "?*"
+          - spec:
+              containers:
+                - readinessProbe:
+                    tcpSocket:
+                      port: "?*"
+          - spec:
+              containers:
+                - readinessProbe:
+                    exec:
+                      command: "?*"
+          - spec:
+              containers:
+                - readinessProbe:
+                    grpc:
+                      port: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-recommend-startup-probe
+  annotations:
+    policies.kyverno.io/title: Recommend Startup Probe
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Implement a proper Startup probe"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: recommend-startup-probe
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Consider adding a startup probe for slow-starting containers."
+        anyPattern:
+          - spec:
+              containers:
+                - startupProbe:
+                    httpGet:
+                      port: "?*"
+          - spec:
+              containers:
+                - startupProbe:
+                    tcpSocket:
+                      port: "?*"
+          - spec:
+              containers:
+                - startupProbe:
+                    exec:
+                      command: "?*"
+          - spec:
+              containers:
+                - startupProbe:
+                    grpc:
+                      port: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-labels
+  annotations:
+    policies.kyverno.io/title: Require Standard Labels
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Apply tags/labels to all resources"
+    policies.kyverno.io/description: >-
+      Resources should have standard Kubernetes labels for identification.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-app-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+                - DaemonSet
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Resources must have 'app.kubernetes.io/name' label."
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+    - name: require-version-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+      validate:
+        message: "Resources should have 'app.kubernetes.io/version' label."
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/version: "?*"
+    - name: require-team-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+                - DaemonSet
+      validate:
+        message: "Resources should have 'app.kubernetes.io/managed-by' or 'team' label."
+        anyPattern:
+          - metadata:
+              labels:
+                app.kubernetes.io/managed-by: "?*"
+          - metadata:
+              labels:
+                team: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-naked-pods
+  annotations:
+    policies.kyverno.io/title: Disallow Naked Pods
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Don't use naked pods"
+    policies.kyverno.io/description: >-
+      Pods not managed by a controller will not be rescheduled on node failure.
+    pod-policies.kyverno.io/autogen-controllers: none
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-naked-pods
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Naked pods are not allowed. Use Deployment, StatefulSet, or DaemonSet."
+        deny:
+          conditions:
+            all:
+              - key: "{{ request.object.metadata.ownerReferences[] || `[]` | length(@) }}"
+                operator: Equals
+                value: 0
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-disallow-default-namespace
+  annotations:
+    policies.kyverno.io/title: Disallow Default Namespace
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Cluster Operations
+    aks-checklist/item: "Don't use the default namespace"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: disallow-default-namespace
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+                - Deployment
+                - StatefulSet
+                - DaemonSet
+                - Service
+                - ConfigMap
+                - Secret
+              namespaces:
+                - default
+      validate:
+        message: "Resources should not be deployed in the 'default' namespace."
+        deny: {}
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-prestop-hook
+  annotations:
+    policies.kyverno.io/title: Recommend PreStop Hook
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Implement a proper prestop hook"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: recommend-prestop
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Consider adding a preStop hook for graceful shutdown."
+        anyPattern:
+          - spec:
+              containers:
+                - =(lifecycle):
+                    =(preStop):
+                      exec:
+                        command: "?*"
+          - spec:
+              containers:
+                - =(lifecycle):
+                    =(preStop):
+                      httpGet:
+                        port: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-pod-antiaffinity
+  annotations:
+    policies.kyverno.io/title: Require Pod Anti-Affinity
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Avoid Pods being placed into a single node"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-pod-antiaffinity
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.replicas || `1` }}"
+            operator: GreaterThan
+            value: 1
+      validate:
+        message: "Deployments with multiple replicas should have podAntiAffinity to spread pods across nodes."
+        anyPattern:
+          - spec:
+              template:
+                spec:
+                  affinity:
+                    podAntiAffinity:
+                      preferredDuringSchedulingIgnoredDuringExecution:
+                        - weight: "?*"
+          - spec:
+              template:
+                spec:
+                  affinity:
+                    podAntiAffinity:
+                      requiredDuringSchedulingIgnoredDuringExecution:
+                        - topologyKey: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-topology-spread
+  annotations:
+    policies.kyverno.io/title: Recommend Topology Spread Constraints
+    policies.kyverno.io/category: Application
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Biz continuity - disaster recovery
+    aks-checklist/item: "Use Availability Zones if supported in your Azure region"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: recommend-topology-spread
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.replicas || `1` }}"
+            operator: GreaterThan
+            value: 2
+      validate:
+        message: "Consider using topologySpreadConstraints for better availability across zones."
+        pattern:
+          spec:
+            template:
+              spec:
+                topologySpreadConstraints:
+                  - maxSkew: "?*"
+                    topologyKey: "?*"

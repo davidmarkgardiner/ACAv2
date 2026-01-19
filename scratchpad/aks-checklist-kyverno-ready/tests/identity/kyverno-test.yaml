@@ -1,0 +1,117 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aks-identity-policies-test
+policies:
+  - ../../policies/identity/identity-policies.yaml
+resources:
+  - resources.yaml
+results:
+  # aks-check-require-service-account tests
+  - kind: Pod
+    policy: aks-check-require-service-account
+    rule: require-explicit-sa
+    resources:
+      - pod-with-explicit-sa
+    result: pass
+  - kind: Pod
+    policy: aks-check-require-service-account
+    rule: require-explicit-sa
+    resources:
+      - pod-with-default-sa
+    result: fail
+  - kind: Pod
+    policy: aks-check-require-service-account
+    rule: require-explicit-sa
+    resources:
+      - pod-no-sa-specified
+    result: fail
+  # aks-check-sa-token-projection tests
+  - kind: Pod
+    policy: aks-check-sa-token-projection
+    rule: check-token-projection
+    resources:
+      - pod-with-workload-identity
+    result: pass
+  - kind: Pod
+    policy: aks-check-sa-token-projection
+    rule: check-token-projection
+    resources:
+      - pod-workload-identity-no-token
+    result: fail
+  - kind: Pod
+    policy: aks-check-sa-token-projection
+    rule: check-token-projection
+    resources:
+      - pod-no-workload-identity
+    result: skip
+  # aks-check-acr-authentication tests
+  - kind: Pod
+    policy: aks-check-acr-authentication
+    rule: prefer-managed-acr-auth
+    resources:
+      - pod-acr-managed-identity
+    result: pass
+  - kind: Pod
+    policy: aks-check-acr-authentication
+    rule: prefer-managed-acr-auth
+    resources:
+      - pod-acr-with-pullsecret
+    result: fail
+  # aks-check-no-admin-clusterrolebinding tests
+  - kind: ClusterRoleBinding
+    policy: aks-check-no-admin-clusterrolebinding
+    rule: restrict-cluster-admin-binding
+    resources:
+      - admin-binding
+    result: fail
+  - kind: ClusterRoleBinding
+    policy: aks-check-no-admin-clusterrolebinding
+    rule: restrict-cluster-admin-binding
+    resources:
+      - viewer-binding
+    result: pass
+  # aks-check-rbac-least-privilege tests
+  - kind: Role
+    policy: aks-check-rbac-least-privilege
+    rule: no-wildcard-verbs
+    resources:
+      - role-wildcard-secrets
+    result: fail
+  - kind: Role
+    policy: aks-check-rbac-least-privilege
+    rule: no-wildcard-verbs
+    resources:
+      - role-specific-verbs
+    result: pass
+  - kind: ClusterRole
+    policy: aks-check-rbac-least-privilege
+    rule: no-wildcard-verbs
+    resources:
+      - clusterrole-wildcard-configmaps
+    result: fail
+  - kind: ClusterRole
+    policy: aks-check-rbac-least-privilege
+    rule: no-wildcard-verbs
+    resources:
+      - clusterrole-specific
+    result: pass
+  # aks-check-serviceaccount-annotation tests
+  - kind: ServiceAccount
+    policy: aks-check-serviceaccount-annotation
+    rule: require-wi-annotation
+    resources:
+      - sa-with-wi-annotation
+    result: pass
+  - kind: ServiceAccount
+    policy: aks-check-serviceaccount-annotation
+    rule: require-wi-annotation
+    resources:
+      - sa-without-wi-annotation
+    result: fail
+  - kind: ServiceAccount
+    policy: aks-check-serviceaccount-annotation
+    rule: require-wi-annotation
+    resources:
+      - sa-no-workload-identity
+    result: skip

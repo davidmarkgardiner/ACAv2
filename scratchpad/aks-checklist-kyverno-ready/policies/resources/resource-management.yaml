@@ -1,0 +1,294 @@
+# Resource Management Policies
+# Maps to: Resource Management section of AKS Checklist
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Limits
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Set memory limits and requests for all containers"
+    policies.kyverno.io/description: >-
+      Containers must have CPU and memory limits defined.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-cpu-limit
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "CPU limits are required for all containers."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    cpu: "?*"
+    - name: require-memory-limit
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Memory limits are required for all containers."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-resource-requests
+  annotations:
+    policies.kyverno.io/title: Require Resource Requests
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: high
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Set memory limits and requests for all containers"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-cpu-request
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "CPU requests are required for all containers."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+    - name: require-memory-request
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Memory requests are required for all containers."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    memory: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-pdb
+  annotations:
+    policies.kyverno.io/title: Require PodDisruptionBudget
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Use Disruption Budgets in your pod and deployment definitions"
+    policies.kyverno.io/description: >-
+      Deployments with multiple replicas should have a PodDisruptionBudget.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-pdb-exists
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.replicas || `1` }}"
+            operator: GreaterThan
+            value: 1
+      validate:
+        message: "Deployments with >1 replica should have a PodDisruptionBudget."
+        deny:
+          conditions:
+            all:
+              - key: "{{ request.object.metadata.labels.\"pdb-configured\" || 'false' }}"
+                operator: NotEquals
+                value: "true"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-limit-cpu-ratio
+  annotations:
+    policies.kyverno.io/title: Validate CPU Limit-to-Request Ratio
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Set memory limits and requests for all containers"
+    policies.kyverno.io/description: >-
+      CPU limit should not be more than 10x the request to ensure fair scheduling.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: cpu-limit-ratio
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "CPU limit should not exceed 10x the CPU request."
+        foreach:
+          - list: "request.object.spec.containers[]"
+            preconditions:
+              all:
+                - key: "{{ element.resources.requests.cpu || '' }}"
+                  operator: NotEquals
+                  value: ""
+                - key: "{{ element.resources.limits.cpu || '' }}"
+                  operator: NotEquals
+                  value: ""
+            deny:
+              conditions:
+                any:
+                  - key: "{{ divide(element.resources.limits.cpu, element.resources.requests.cpu) }}"
+                    operator: GreaterThan
+                    value: 10
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-validate-hpa-exists
+  annotations:
+    policies.kyverno.io/title: Recommend HorizontalPodAutoscaler
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Implement autoscaling of your applications"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-hpa-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      validate:
+        message: "Production deployments should have HPA configured (add label 'autoscaling: enabled' or 'autoscaling: keda')."
+        pattern:
+          metadata:
+            labels:
+              autoscaling: "enabled | keda | disabled-acknowledged"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-replicas
+  annotations:
+    policies.kyverno.io/title: Require Multiple Replicas
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: medium
+    aks-checklist/section: Application Deployment
+    aks-checklist/item: "Run more than one replica for your Deployment"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: minimum-replicas
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - gatekeeper-system
+                - kyverno
+      validate:
+        message: "Deployments should have at least 2 replicas for high availability."
+        pattern:
+          spec:
+            replicas: ">1"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-require-qos-guaranteed
+  annotations:
+    policies.kyverno.io/title: Recommend Guaranteed QoS
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Resource Management
+    aks-checklist/item: "Set memory limits and requests for all containers"
+    policies.kyverno.io/description: >-
+      For best scheduling and eviction behavior, consider Guaranteed QoS (requests = limits).
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-qos
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+      validate:
+        message: "Consider setting requests equal to limits for Guaranteed QoS class."
+        foreach:
+          - list: "request.object.spec.containers[]"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.resources.requests.memory || 'not-set' }}"
+                    operator: NotEquals
+                    value: "{{ element.resources.limits.memory || 'not-set-limits' }}"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: aks-check-ephemeral-storage-limits
+  annotations:
+    policies.kyverno.io/title: Require Ephemeral Storage Limits
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: low
+    aks-checklist/section: Storage
+    aks-checklist/item: "Use ephemeral OS disks"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: ephemeral-storage-limit
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Consider setting ephemeral-storage limits to prevent node disk exhaustion."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    ephemeral-storage: "?*"
