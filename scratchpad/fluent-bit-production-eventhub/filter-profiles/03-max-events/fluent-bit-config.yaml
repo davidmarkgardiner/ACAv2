@@ -1,0 +1,110 @@
+# Fluent Bit ConfigMap - MAX EVENTS Profile
+#
+# Filtering Strategy:
+# - ALL Warning events (no event reason filtering)
+# - WHITELISTED namespaces only (you choose which namespaces to monitor)
+# - Estimated: ~200-1000+ events/day per cluster (depends on namespace activity)
+#
+# Use this profile for:
+# - Complete visibility into specific namespaces
+# - Debug/investigation mode
+# - Namespaces where you want ALL issues reported
+# - Development/staging environments
+#
+# WARNING: High volume - ensure your Holmes AI and GitLab can handle the load
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+    filter-profile: max-events
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    @INCLUDE inputs.conf
+    @INCLUDE filters.conf
+    @INCLUDE outputs.conf
+
+  inputs.conf: |
+    [INPUT]
+        Name              kubernetes_events
+        Tag               kube.events.*
+        DB                /var/log/flb_kube_events.db
+        Interval_Sec      0.5
+        Kube_URL          https://kubernetes.default.svc:443
+        Kube_CA_File      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File   /var/run/secrets/kubernetes.io/serviceaccount/token
+
+  filters.conf: |
+    # ============================================================
+    # MAX EVENTS PROFILE
+    # ALL Warning events from whitelisted namespaces
+    # ============================================================
+
+    # Step 1: Only Warning events (not Normal)
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        Regex         type Warning
+
+    # Step 2: WHITELIST - Only specific namespaces
+    # CUSTOMIZE THIS LIST for your environment
+    # Example: Application namespaces where you want full visibility
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        Regex         involvedObject.namespace ^(monitoring|holmesgpt|grafana-test|mattermost|default|production|staging|dev)$
+
+    # NO event reason filtering - all Warning events pass through
+
+    # Step 3: Add cluster identifier and metadata
+    [FILTER]
+        Name          modify
+        Match         kube.events.*
+        Add           cluster ${CLUSTER_NAME}
+        Add           filter_profile max-events
+
+    # Step 4: Restructure event for downstream processing
+    [FILTER]
+        Name          nest
+        Match         kube.events.*
+        Operation     nest
+        Wildcard      involvedObject.*
+        Nest_under    involvedObject
+        Remove_prefix involvedObject.
+
+  outputs.conf: |
+    # Azure Event Hub via Kafka protocol (SASL_PLAIN)
+    [OUTPUT]
+        Name                          kafka
+        Match                         kube.events.*
+        Brokers                       ${EVENTHUB_FQDN}:9093
+        Topics                        ${EVENTHUB_NAME}
+
+        # Security: SASL_PLAIN with SAS token
+        rdkafka.security.protocol     SASL_SSL
+        rdkafka.sasl.mechanism        PLAIN
+        rdkafka.sasl.username         $ConnectionString
+        rdkafka.sasl.password         ${EVENTHUB_CONNECTION_STRING}
+
+        # Reliability
+        rdkafka.request.required.acks 1
+        rdkafka.retry.backoff.ms      500
+
+  parsers.conf: |
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    lastTimestamp
+        Time_Format %Y-%m-%dT%H:%M:%SZ

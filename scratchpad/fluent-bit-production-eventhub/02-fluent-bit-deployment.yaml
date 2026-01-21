@@ -1,0 +1,135 @@
+# Fluent Bit Deployment for Production
+# Uses SAS Token from Azure Key Vault via External Secrets
+#
+# Prerequisites:
+# 1. External Secrets Operator installed
+# 2. ClusterSecretStore configured for Azure Key Vault
+# 3. Apply 00-external-secret.yaml first
+#
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+
+---
+# ClusterRole for reading Kubernetes events
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-events
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit-events
+    namespace: monitoring
+
+---
+# ConfigMap with Event Hub details
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eventhub-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+data:
+  EVENTHUB_NAMESPACE: "k8s-events-hub-1334"  # Update with your namespace
+  EVENTHUB_NAME: "kube-events"               # Event Hub (topic) name
+  EVENTHUB_FQDN: "k8s-events-hub-1334.servicebus.windows.net"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit-events
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3.2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2020
+          env:
+            - name: CLUSTER_NAME
+              value: "uk8s-tsshared-weu-gt025-int-dev-public2"
+            # Event Hub Config
+            - name: EVENTHUB_FQDN
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_FQDN
+            - name: EVENTHUB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_NAME
+            # Event Hub SAS connection string
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: eventhub-sas-secret
+                  key: connectionString
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-config

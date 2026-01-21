@@ -1,0 +1,240 @@
+# Filtered EventHub Sensor - Phase 1 Gradual Rollout
+#
+# Filters:
+# 1. Critical events only: CrashLoopBackOff, OOMKilled, NodeNotReady, FailedMount
+# 2. Specific namespaces only (whitelist approach)
+# 3. Excludes system namespaces
+#
+# Payload format from EventHub (Fluent Bit):
+# {
+#   "body": "<base64-encoded-k8s-event>",
+#   "id": "...",
+#   "partitionKey": "..."
+# }
+#
+# Decoded body structure:
+# {
+#   "type": "Warning",
+#   "reason": "CrashLoopBackOff",
+#   "message": "...",
+#   "involvedObject": {"kind": "Pod", "name": "...", "namespace": "..."},
+#   "cluster": "aks-cluster-name"
+# }
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: eventhub-critical-events
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    phase: gradual-rollout
+    filtering: critical-only
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: critical-k8s-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-warnings
+      # Expression-based filters on decoded payload
+      filters:
+        exprs:
+          # FILTER 1: Critical event reasons only
+          - expr: 'reason in ["CrashLoopBackOff", "OOMKilled", "NodeNotReady", "FailedMount", "FailedScheduling", "Evicted"]'
+            fields:
+              - name: reason
+                path: body
+                template: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "" }}'
+
+          # FILTER 2: Exclude system namespaces
+          - expr: '!(namespace in ["kube-system", "kube-public", "kube-node-lease", "cert-manager", "gatekeeper-system", "flux-system", "external-secrets", "azureserviceoperator-system"])'
+            fields:
+              - name: namespace
+                path: body
+                template: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "" }}'
+
+  triggers:
+    - template:
+        name: investigate-critical-event
+        conditions: "critical-k8s-event"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: eh-critical-triage-
+                labels:
+                  app: k8s-event-handler
+                  source: eventhub
+                  filtering: critical-only
+              spec:
+                workflowTemplateRef:
+                  name: multi-cluster-triage
+                serviceAccountName: argo-events-sa
+                # Mutex: Only one investigation per resource at a time
+                synchronization:
+                  mutex:
+                    name: "triage-{{ workflow.parameters.dedupe-key }}"
+                # Auto-cleanup
+                ttlStrategy:
+                  secondsAfterCompletion: 3600
+                  secondsAfterSuccess: 1800
+                  secondsAfterFailure: 86400
+                # Timeout
+                activeDeadlineSeconds: 1800
+                arguments:
+                  parameters:
+                    - name: dedupe-key
+                      value: ""
+                    - name: cluster-name
+                      value: ""
+                    - name: namespace
+                      value: ""
+                    - name: resource-name
+                      value: ""
+                    - name: resource-kind
+                      value: ""
+                    - name: event-reason
+                      value: ""
+                    - name: event-message
+                      value: ""
+                    - name: gitlab-project
+                      value: "xxxmarkgardiner/mcp-test-repo"
+                    - name: holmes-url
+                      value: "http://holmesgpt.holmesgpt.svc.cluster.local:80"
+          parameters:
+            # Dedupe key for mutex (namespace-name-kind-reason)
+            - src:
+                dependencyName: critical-k8s-event
+                dataTemplate: |
+                  {{- $d := (b64dec .Input.body) | mustFromJson -}}
+                  {{ printf "%s-%s-%s-%s" (dig "involvedObject" "namespace" "x" $d) (dig "involvedObject" "name" "x" $d) (dig "involvedObject" "kind" "x" $d) (dig "reason" "x" $d) }}
+              dest: spec.arguments.parameters.0.value
+            # Cluster name
+            - src:
+                dependencyName: critical-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "cluster" "unknown" }}'
+              dest: spec.arguments.parameters.1.value
+            # Namespace
+            - src:
+                dependencyName: critical-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "default" }}'
+              dest: spec.arguments.parameters.2.value
+            # Resource name
+            - src:
+                dependencyName: critical-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "name" "unknown" }}'
+              dest: spec.arguments.parameters.3.value
+            # Resource kind
+            - src:
+                dependencyName: critical-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "kind" "Pod" }}'
+              dest: spec.arguments.parameters.4.value
+            # Event reason
+            - src:
+                dependencyName: critical-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "Unknown" }}'
+              dest: spec.arguments.parameters.5.value
+            # Event message
+            - src:
+                dependencyName: critical-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "message" "" }}'
+              dest: spec.arguments.parameters.6.value
+      retryStrategy:
+        steps: 3
+        duration: 30s
+
+---
+# Debug sensor for EventHub - logs raw events without filtering
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: eventhub-debug
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    purpose: debug
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: any-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-warnings
+
+  triggers:
+    - template:
+        name: log-raw-event
+        conditions: "any-event"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: eh-debug-
+                labels:
+                  purpose: eventhub-debug
+              spec:
+                serviceAccountName: argo-events-sa
+                ttlStrategy:
+                  secondsAfterCompletion: 600
+                entrypoint: log-event
+                arguments:
+                  parameters:
+                    - name: raw-body
+                      value: ""
+                    - name: decoded-body
+                      value: ""
+                    - name: event-reason
+                      value: ""
+                    - name: event-namespace
+                      value: ""
+                templates:
+                  - name: log-event
+                    inputs:
+                      parameters:
+                        - name: raw-body
+                        - name: decoded-body
+                        - name: event-reason
+                        - name: event-namespace
+                    script:
+                      image: alpine:3.18
+                      command: [sh]
+                      source: |
+                        echo "=== EventHub Event Received ==="
+                        echo ""
+                        echo "Reason: {{inputs.parameters.event-reason}}"
+                        echo "Namespace: {{inputs.parameters.event-namespace}}"
+                        echo ""
+                        echo "Decoded body:"
+                        echo "{{inputs.parameters.decoded-body}}"
+                        echo ""
+                        echo "=== End Event ==="
+          parameters:
+            - src:
+                dependencyName: any-event
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: any-event
+                dataTemplate: '{{ b64dec .Input.body }}'
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: any-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "unknown" }}'
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: any-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "unknown" }}'
+              dest: spec.arguments.parameters.3.value

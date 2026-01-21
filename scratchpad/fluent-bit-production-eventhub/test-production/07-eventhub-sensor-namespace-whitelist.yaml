@@ -1,0 +1,132 @@
+# Namespace Whitelist Sensor - Most Restrictive Gradual Rollout
+#
+# Use this sensor when you want to ONLY process events from specific namespaces
+# Ideal for initial production rollout - start with a few namespaces, expand gradually
+#
+# Configuration:
+# - Whitelist specific namespaces (e.g., monitoring, holmesgpt)
+# - Critical events only
+# - Mutex deduplication
+#
+# To expand coverage:
+# 1. Add namespaces to the whitelist filter expression
+# 2. Or switch to 06-eventhub-sensor-filtered.yaml (blacklist approach)
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: eventhub-namespace-whitelist
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    phase: initial-rollout
+    filtering: namespace-whitelist
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: whitelisted-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-warnings
+      filters:
+        exprs:
+          # FILTER 1: WHITELIST - Only these namespaces
+          # Add namespaces here as you expand coverage
+          - expr: 'namespace in ["monitoring", "holmesgpt", "grafana-test", "mattermost"]'
+            fields:
+              - name: namespace
+                path: body
+                template: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "" }}'
+
+          # FILTER 2: Critical event reasons only
+          - expr: 'reason in ["CrashLoopBackOff", "OOMKilled", "NodeNotReady", "FailedMount", "FailedScheduling", "Evicted"]'
+            fields:
+              - name: reason
+                path: body
+                template: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "" }}'
+
+  triggers:
+    - template:
+        name: investigate-whitelisted-event
+        conditions: "whitelisted-event"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: eh-whitelist-triage-
+                labels:
+                  app: k8s-event-handler
+                  source: eventhub
+                  filtering: namespace-whitelist
+              spec:
+                workflowTemplateRef:
+                  name: multi-cluster-triage
+                serviceAccountName: argo-events-sa
+                synchronization:
+                  mutex:
+                    name: "triage-{{ workflow.parameters.dedupe-key }}"
+                ttlStrategy:
+                  secondsAfterCompletion: 3600
+                  secondsAfterSuccess: 1800
+                  secondsAfterFailure: 86400
+                activeDeadlineSeconds: 1800
+                arguments:
+                  parameters:
+                    - name: dedupe-key
+                      value: ""
+                    - name: cluster-name
+                      value: ""
+                    - name: namespace
+                      value: ""
+                    - name: resource-name
+                      value: ""
+                    - name: resource-kind
+                      value: ""
+                    - name: event-reason
+                      value: ""
+                    - name: event-message
+                      value: ""
+                    - name: gitlab-project
+                      value: "xxxmarkgardiner/mcp-test-repo"
+                    - name: holmes-url
+                      value: "http://holmesgpt.holmesgpt.svc.cluster.local:80"
+          parameters:
+            - src:
+                dependencyName: whitelisted-event
+                dataTemplate: |
+                  {{- $d := (b64dec .Input.body) | mustFromJson -}}
+                  {{ printf "%s-%s-%s-%s" (dig "involvedObject" "namespace" "x" $d) (dig "involvedObject" "name" "x" $d) (dig "involvedObject" "kind" "x" $d) (dig "reason" "x" $d) }}
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: whitelisted-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "cluster" "unknown" }}'
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: whitelisted-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "default" }}'
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: whitelisted-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "name" "unknown" }}'
+              dest: spec.arguments.parameters.3.value
+            - src:
+                dependencyName: whitelisted-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "kind" "Pod" }}'
+              dest: spec.arguments.parameters.4.value
+            - src:
+                dependencyName: whitelisted-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "Unknown" }}'
+              dest: spec.arguments.parameters.5.value
+            - src:
+                dependencyName: whitelisted-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "message" "" }}'
+              dest: spec.arguments.parameters.6.value
+      retryStrategy:
+        steps: 3
+        duration: 30s

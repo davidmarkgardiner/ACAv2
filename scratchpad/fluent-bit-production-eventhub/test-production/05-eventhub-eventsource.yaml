@@ -1,0 +1,57 @@
+# EventHub EventSource for Testing
+# Consumes K8s events from Azure Event Hub
+#
+# PREREQUISITE: Create secret first:
+#
+# Manual method:
+#   KEY_NAME="RootManageSharedAccessKey"
+#   KEY_VALUE=$(az eventhubs namespace authorization-rule keys list \
+#     --resource-group $RESOURCE_GROUP \
+#     --namespace-name $EVENTHUB_NAMESPACE \
+#     --name $KEY_NAME --query primaryKey -o tsv)
+#
+#   kubectl create secret generic eventhub-listener-secret \
+#     --namespace argo-events \
+#     --from-literal=sharedAccessKeyName="$KEY_NAME" \
+#     --from-literal=sharedAccessKey="$KEY_VALUE"
+#
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    environment: testing
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+  azureEventsHub:
+    k8s-warnings:
+      # Event Hub FQDN - UPDATE THIS
+      fqdn: "k8s-events-hub-fb.servicebus.windows.net"
+
+      # Event Hub name
+      hubName: "kube-events"
+
+      # Consumer group (Basic tier only supports $Default)
+      consumerGroup: "$Default"
+
+      # Shared Access Key authentication
+      sharedAccessKeyName:
+        name: eventhub-listener-secret
+        key: sharedAccessKeyName
+      sharedAccessKey:
+        name: eventhub-listener-secret
+        key: sharedAccessKey
