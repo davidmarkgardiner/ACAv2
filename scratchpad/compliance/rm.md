@@ -1,14 +1,6 @@
-Dear [Name],
+Explanation for timing of account disclosure
 
-Thank you for your follow-up.
-
-To reiterate my rationale for continuing to trade: I understood the 180-day window communicated on 29th October as the timeframe to wind down my positions and close the accounts. It was not clear to me that I was required to cease all trading activity immediately. My conversations with the compliance team and my line manager did not suggest any urgency, and I was working towards the deadline I believed I had been given.
-
-Regarding pre-clearance: I understood that I was required to move to a pre-approved broker, and I intended to begin following the pre-clearance process once that transition was complete. I recognise now that I misunderstood how these requirements interact, and that pre-clearance applies to trades regardless of which broker is used. This was a genuine misunderstanding on my part, not an attempt to avoid oversight.
-
-As you're aware, I have provided full statements of my trading activity. I have been completely transparent throughout this process and have no intention of concealing anything.
-
-Please let me know if any further clarification is needed.
-
-Kind regards,
-Dave
+I disclosed my personal investment accounts (Interactive Investor and Trading 212) upon becoming a permanent employee in early 2025. Prior to this, I was engaged as external/contractor staff.
+During my time as a contractor, I was not made aware that external staff were subject to the same personal account dealing disclosure requirements as permanent employees. This was not communicated to me during onboarding or at any point during my external engagement, and to my knowledge, other external staff I worked alongside were similarly not informed of any such obligations.
+Upon transitioning to permanent employment, I promptly disclosed all accounts in line with the requirements communicated during my employee onboarding process.
+I have provided full statements from both accounts and am happy to supply any additional information required.
