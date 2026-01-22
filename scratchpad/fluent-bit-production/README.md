@@ -1,111 +1,216 @@
 # Implementation Guide: Fluent Bit + Event Hub (Production)
 
-This directory contains the production-grade manifests for streaming Kubernetes events from multiple AKS clusters to a central Management Cluster using **Fluent Bit** and **Azure Workload Identity**.
+This directory contains the production-grade manifests for streaming Kubernetes events from multiple AKS clusters to a central Management Cluster using **Fluent Bit** and **Azure Key Vault** (via External Secrets).
 
 ## 🏗️ Architecture
 
-1.  **Fluent Bit**: In-cluster agent using `OAUTHBEARER` to authenticate with Azure.
-2.  **Azure Event Hub**: Central message broker.
-3.  **Argo Events**: Consumer on the Management Cluster.
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        AKS Cluster                              │
+│                                                                 │
+│  ┌─────────────┐     ┌─────────────────┐     ┌───────────────┐ │
+│  │ External    │────►│ K8s Secret      │────►│  Fluent Bit   │ │
+│  │ Secrets Op  │     │ (eventhub-sas)  │     │  (Kafka Out)  │ │
+│  └──────┬──────┘     └─────────────────┘     └───────┬───────┘ │
+│         │                                            │         │
+└─────────│────────────────────────────────────────────│─────────┘
+          │                                            │
+          ▼                                            ▼
+   ┌─────────────┐                           ┌─────────────────┐
+   │ Azure Key   │                           │  Azure Event    │
+   │ Vault       │                           │  Hub            │
+   └─────────────┘                           └────────┬────────┘
+                                                      │
+                                                      ▼
+                                            ┌─────────────────┐
+                                            │ Management      │
+                                            │ Cluster (Argo)  │
+                                            └─────────────────┘
+```
+
+1. **External Secrets Operator**: Syncs SAS token from Key Vault to K8s Secret
+2. **Fluent Bit**: Uses SASL_PLAIN with SAS connection string
+3. **Azure Event Hub**: Central message broker
+4. **Argo Events**: Consumer on the Management Cluster
 
 ---
 
 ## 📋 Prerequisites
 
-Execute these commands on each AKS cluster before proceeding:
+1. **External Secrets Operator** installed on the cluster
+2. **ClusterSecretStore** configured for Azure Key Vault
+3. Event Hub connection string stored in Key Vault
+
+### Key Vault Setup
 
 ```bash
-# 1. Enable OIDC Issuer
-az aks update -g $RG -n $CLUSTER --enable-oidc-issuer
-
-# 2. Enable Workload Identity
-az aks update -g $RG -n $CLUSTER --enable-workload-identity
+# Store the Event Hub connection string in Key Vault
+az keyvault secret set \
+  --vault-name YOUR_KEYVAULT \
+  --name eventhub-connection-string \
+  --value "Endpoint=sb://YOUR_NAMESPACE.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=YOUR_KEY"
 ```
 
 ---
 
-## 🚀 Quick Start (Automated)
-
-We have provided a "one-shot" script that handles the Azure resources, Managed Identities, and Kubernetes secrets.
+## 🚀 Quick Start
 
 ```bash
-export RESOURCE_GROUP="your-rg"
-export CLUSTER_NAME="your-aks-cluster"
-export LOCATION="uksouth"
+# 1. Create namespace
+kubectl create namespace monitoring
 
-# Run the setup
-chmod +x 00-setup-workload-identity.sh
-./00-setup-workload-identity.sh
+# 2. Apply External Secret (syncs SAS token from Key Vault)
+kubectl apply -f 00-external-secret.yaml
+
+# 3. Verify secret was created
+kubectl get secret eventhub-sas-secret -n monitoring
+
+# 4. Apply Fluent Bit config and deployment
+kubectl apply -f 01-fluent-bit-config.yaml
+kubectl apply -f 02-fluent-bit-deployment.yaml
+
+# 5. Check logs
+kubectl logs -n monitoring -l app=fluent-bit -f
 ```
-
-**What the script does:**
-*   Creates Event Hub Namespace/Hub if they don't exist.
-*   Creates two Managed Identities (`fluent-bit-events-sender` and `eventhub-receiver-identity`).
-*   Assigns RBAC roles (`Data Sender` / `Data Receiver`).
-*   Establishes Federated Identity credentials for the ServiceAccounts.
-*   Creates the necessary Kubernetes ConfigMaps/Secrets for the logic.
 
 ---
 
-## 🛠️ Manual Configuration (Step-by-Step)
+## 🎚️ Filter Profiles (NEW)
 
-If you prefer not to use the script, follow these steps manually:
+Control event volume at the **source** (Fluent Bit) for reliable filtering and lower costs.
 
-### 1. Create Identities & RBAC
+| Profile | Folder | Use Case | Volume |
+|---------|--------|----------|--------|
+| **Low Noise** | `filter-profiles/01-low-noise/` | Initial rollout, critical alerts only | ~10-50/day |
+| **Medium Noise** | `filter-profiles/02-medium-noise/` | Production monitoring | ~50-200/day |
+| **Max Events** | `filter-profiles/03-max-events/` | Debug/investigation, full visibility | ~200-1000+/day |
+
+See [filter-profiles/README.md](./filter-profiles/README.md) for details.
+
 ```bash
-# Create Identites
-az identity create -g $RG -n fluent-bit-events-sender
-az identity create -g $RG -n eventhub-receiver-identity
-
-# Assign Sender Role
-az role assignment create --assignee <SENDER_PRINCIPAL_ID> \
-    --role "Azure Event Hubs Data Sender" \
-    --scope /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.EventHub/namespaces/<ns>
-
-# Create Federated Credential
-az identity federated-credential create --name fed-fluent-bit \
-    --identity-name fluent-bit-events-sender --resource-group $RG \
-    --issuer "$OIDC_ISSUER" --subject "system:serviceaccount:monitoring:fluent-bit-events"
+# Deploy a filter profile
+kubectl apply -f filter-profiles/01-low-noise/fluent-bit-config.yaml
+kubectl rollout restart daemonset fluent-bit -n monitoring
 ```
 
-### 2. Update Manifests
-After running the script or manual commands, update **`02-fluent-bit-deployment.yaml`** with:
-*   `AZURE_CLIENT_ID`: The ClientID of the sender identity.
-*   `AZURE_TENANT_ID`: Your Azure Tenant ID.
-*   `CLUSTER_NAME`: Unique name for the cluster.
+---
+
+## 🔐 Authentication Method
+
+This setup uses **SAS (Shared Access Signature) tokens** for Event Hub authentication:
+
+| Method | Security | Implementation |
+|--------|----------|----------------|
+| SAS Token | Medium | SASL_PLAIN with connection string |
+| Key Vault | High | External Secrets syncs to K8s Secret |
+| Rotation | 1 hour | ExternalSecret refreshInterval |
+
+### Why Not Workload Identity?
+
+Fluent Bit's Kafka plugin uses librdkafka, which doesn't support Azure AD's OAUTHBEARER mechanism with federated tokens. See [AUTHENTICATION-OPTIONS.md](./AUTHENTICATION-OPTIONS.md) for detailed analysis.
+
+---
+
+## 🛠️ Configuration
+
+### Update for Your Environment
+
+1. **00-external-secret.yaml**: Update `secretStoreRef.name` to match your ClusterSecretStore
+2. **01-fluent-bit-config.yaml**: No changes needed (uses env vars)
+3. **02-fluent-bit-deployment.yaml**: Update:
+   - `CLUSTER_NAME`: Unique identifier for this cluster
+   - `EVENTHUB_NAMESPACE`, `EVENTHUB_NAME`, `EVENTHUB_FQDN` in ConfigMap
 
 ---
 
 ## 🧪 Verification & Troubleshooting
 
-### Check Agent Connection
+### Check External Secret Sync
 ```bash
-# Check Fluent Bit logs for Kafka connection status
+# Check if secret was synced
+kubectl get externalsecret eventhub-sas-secret -n monitoring
+
+# Should show STATUS: SecretSynced
+```
+
+### Check Fluent Bit Logs
+```bash
 kubectl logs -n monitoring -l app=fluent-bit
 
-# Look for: "SASL/OAUTHBEARER authentication succeeded"
+# Look for successful Kafka connection:
+# [2024/01/15 10:00:00] [ info] [output:kafka:kafka.0] brokers=*.servicebus.windows.net:9093
 ```
 
-### Check Data Reception
-On the Management Cluster:
+### Verify Events Flowing
 ```bash
-# Monitor the EventSource for incoming messages
-kubectl logs -n argo-events -l eventsource-name=eventhub-k8s-events
+# Generate a test warning event
+kubectl run test-pod --image=invalid-image-xyz --restart=Never
 
-# Verify Base64 Message Decoding
-# Azure Event Hub payloads are base64 encoded.
-# The Sensor (04-sensor-production.yaml) decodes this automatically.
+# Check Fluent Bit picked it up
+kubectl logs -n monitoring -l app=fluent-bit | grep -i warning
 ```
+
+### On Management Cluster
+```bash
+# Monitor EventSource for incoming messages
+kubectl logs -n argo-events -l eventsource-name=eventhub-k8s-events
+```
+
+---
 
 ## 📂 File Reference
 
+### Manifests
+| File | Purpose | Apply To |
+| :--- | :--- | :--- |
+| `00-external-secret.yaml` | Syncs SAS token from Key Vault | Worker Cluster |
+| `01-fluent-bit-config.yaml` | Fluent Bit configuration | Worker Cluster |
+| `02-fluent-bit-deployment.yaml` | Deployment, RBAC, ConfigMap | Worker Cluster |
+| `02a-mgmt-cluster-rbac.yaml` | **RBAC, ServiceAccount, EventBus** | Management Cluster |
+| `03a-mgmt-cluster-external-secret.yaml` | Event Hub secret for Argo Events | Management Cluster |
+| `03-eventsource-workload-identity.yaml` | Argo Events EventSource | Management Cluster |
+| `04-sensor-production.yaml` | Trigger logic for workflows | Management Cluster |
+| `../workflow-multi-cluster-triage.yaml` | WorkflowTemplate (shared) | Management Cluster |
+
+### Filter Profiles
+| Folder | Purpose | Volume |
+| :--- | :--- | :--- |
+| `filter-profiles/01-low-noise/` | Critical events only, namespace whitelist | ~10-50/day |
+| `filter-profiles/02-medium-noise/` | Critical + health, system NS blacklist | ~50-200/day |
+| `filter-profiles/03-max-events/` | All Warning events, namespace whitelist | ~200-1000+/day |
+
+### Documentation
 | File | Purpose |
 | :--- | :--- |
-| `00-setup-workload-identity.sh` | **Master Setup Script**. Provisions identities and federation. |
-| `01-fluent-bit-config.yaml` | Fluent Bit configuration (Inputs/Filters/Kafka Output). |
-| `02-fluent-bit-deployment.yaml` | Deployment & RBAC for the event-shipping agent. |
-| `03-eventsource-workload-identity.yaml` | Argo Events configuration for the Management Cluster. |
-| `04-sensor-production.yaml` | Trigger logic for HolmesGPT investigation and GitLab. |
+| `TROUBLESHOOTING.md` | **Debug guide when workflows not triggering** |
+| `DEDUPLICATION.md` | **Strategies to prevent duplicate workflows/issues** |
+| `E2E-GUIDE.md` | Complete end-to-end deployment walkthrough |
+| `EVENTHUB-INSPECTION.md` | How to view events in Event Hub without portal |
+| `AUTHENTICATION-OPTIONS.md` | Comparison of authentication methods |
+| `STAKEHOLDERS.md` | High-level overview for stakeholders |
+| `filter-profiles/README.md` | **Filter profiles comparison and deployment** |
+| `todo.md` | Deployment checklist |
 
 ---
+
+## 🔄 Secret Rotation
+
+The ExternalSecret is configured with `refreshInterval: 1h`, meaning:
+- Every hour, ESO checks Key Vault for updates
+- If you rotate the SAS key in Key Vault, it propagates automatically
+- Fluent Bit pods need restart to pick up new secret (or use Reloader)
+
+### Automatic Pod Restart on Secret Change
+
+Consider using [Reloader](https://github.com/stakater/Reloader) for automatic restarts:
+
+```yaml
+# Add annotation to Deployment
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+```
+
+---
+
 *For a high-level overview intended for stakeholders, see [STAKEHOLDERS.md](./STAKEHOLDERS.md).*

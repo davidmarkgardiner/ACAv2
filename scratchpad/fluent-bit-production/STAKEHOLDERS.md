@@ -11,19 +11,24 @@ graph TD
 
     subgraph "Azure"
         EH((Azure Event Hub))
+        AOAI[Azure OpenAI]
     end
 
     subgraph "Management Cluster (AKS)"
         EH -- "Workload Identity" --> AES[Argo EventSource]
         AES --> AS[Argo Sensor]
         AS -- "Submit Workflow" --> WH[HolmesGPT Analyst]
+        WH -- "LLM Requests" --> LL[LiteLLM Gateway]
+        LL -- "API Calls" --> AOAI
         WH -- "Analysis" --> GL[GitLab Issues]
         WH -. "Future: Self-Healing" .-> AM[AKS-MCP]
     end
 
     style EH fill:#0072C6,color:#fff
+    style AOAI fill:#0072C6,color:#fff
     style WH fill:#54299c,color:#fff
     style FB fill:#e16c2a,color:#fff
+    style LL fill:#10a37f,color:#fff
 ```
 
 ![Autonomous Event Pipeline](./assets/architecture.png)
@@ -64,7 +69,75 @@ Unlike standard implementations, this setup is designed for strict enterprise en
 | **Fluent Bit** | Event Shipper | High-performance agent with `kubernetes_events` input. |
 | **Azure Event Hub** | Central Collector | Scalable message hub with Kafka interface enabled. |
 | **Argo Events** | Event Bus | Orchestrates the bridge between Event Hub and Workflows. |
+| **LiteLLM Gateway** | AI Proxy | Routes LLM requests with rate limiting and load balancing. |
+| **Azure OpenAI** | LLM Provider | GPT-4 inference for AI-powered analysis. |
 | **HolmesGPT** | AI Analyst | The brain that investigates and triages the root cause. |
+
+---
+
+## 🔄 Component Alternatives & Roadmap
+
+This architecture is designed to be **modular**. Several components may be swapped based on cost, performance, or operational requirements.
+
+```mermaid
+graph TD
+    subgraph "Event Collection (Choose One)"
+        FB_ALT[Fluent Bit<br/>Current]
+        ALLOY[Grafana Alloy Operator<br/>Alternative]
+    end
+
+    subgraph "Message Bus (Choose One)"
+        EH_ALT[Azure Event Hub<br/>Current]
+        KAFKA[Self-Hosted Kafka<br/>Alternative]
+    end
+
+    subgraph "LLM Backend (Choose One)"
+        LITELLM[LiteLLM + Azure OpenAI<br/>Current ~$250k/year]
+        KAITO[Self-Hosted KAITO<br/>Alternative ~$12k/year]
+    end
+
+    FB_ALT -.-> EH_ALT
+    ALLOY -.-> KAFKA
+    EH_ALT -.-> LITELLM
+    KAFKA -.-> KAITO
+
+    style FB_ALT fill:#e16c2a,color:#fff
+    style ALLOY fill:#f46800,color:#fff
+    style EH_ALT fill:#0072C6,color:#fff
+    style KAFKA fill:#231f20,color:#fff
+    style LITELLM fill:#10a37f,color:#fff
+    style KAITO fill:#6b21a8,color:#fff
+```
+
+### Alternative Components Under Evaluation
+
+| Current | Alternative | Rationale |
+| :--- | :--- | :--- |
+| **Fluent Bit** | **Grafana Alloy Operator** | Unified observability agent with native Kubernetes operator support. Better integration with Grafana stack. |
+| **Azure Event Hub** | **Self-Hosted Kafka** | Full control over message retention and partitioning. Eliminates Azure vendor lock-in. |
+| **LiteLLM + Azure OpenAI** | **Self-Hosted KAITO** | **Massive cost reduction** (~$250k/year → ~$12k/year). Improved latency (no external API calls). Data sovereignty (LLM runs in-cluster). |
+
+### KAITO: The Cost-Effective LLM Alternative
+
+> [!NOTE]
+> **KAITO (Kubernetes AI Toolchain Operator)** enables running open-source LLMs (Llama, Mistral, etc.) directly on AKS GPU nodes.
+
+**Cost Comparison (Annual Estimate)**:
+| Approach | Compute | API Costs | Total |
+| :--- | :--- | :--- | :--- |
+| LiteLLM + Azure OpenAI | ~$5k (Gateway) | ~$245k (Token usage) | **~$250,000** |
+| Self-Hosted KAITO | ~$12k (GPU Node) | $0 | **~$12,000** |
+
+**Benefits of KAITO**:
+- **95% cost reduction** for high-volume AI workloads
+- **Sub-second latency** (in-cluster inference vs. external API)
+- **Data privacy** (sensitive cluster data never leaves the environment)
+- **No rate limits** (scale horizontally with GPU nodes)
+
+**Trade-offs**:
+- Requires GPU node pool management
+- Model capabilities may differ from GPT-4
+- Initial setup complexity
 
 ---
 

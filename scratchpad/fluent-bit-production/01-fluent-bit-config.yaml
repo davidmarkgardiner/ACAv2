@@ -1,5 +1,5 @@
 # Fluent Bit ConfigMap - Kubernetes Events to Azure Event Hub
-# PRODUCTION configuration using OAUTHBEARER with Workload Identity
+# Using SASL_PLAIN with SAS token authentication
 #
 apiVersion: v1
 kind: ConfigMap
@@ -40,13 +40,16 @@ data:
         Match         kube.events.*
         Regex         type Warning
 
-    # Add cluster identifier
+    # Add cluster identifier and metadata
+    # Using 'record_modifier' which properly supports env var expansion
     [FILTER]
-        Name          modify
+        Name          record_modifier
         Match         kube.events.*
-        Add           cluster ${CLUSTER_NAME}
+        Record        cluster ${CLUSTER_NAME}
+        Record        cluster_region ${CLUSTER_REGION}
+        Record        cluster_environment ${CLUSTER_ENVIRONMENT}
 
-    # Restructure event
+    # Restructure involvedObject fields
     [FILTER]
         Name          nest
         Match         kube.events.*
@@ -56,25 +59,20 @@ data:
         Remove_prefix involvedObject.
 
   outputs.conf: |
-    # Azure Event Hub via Kafka protocol (OAUTHBEARER)
+    # Azure Event Hub via Kafka protocol (SASL_PLAIN)
     [OUTPUT]
         Name                          kafka
         Match                         kube.events.*
         Brokers                       ${EVENTHUB_FQDN}:9093
         Topics                        ${EVENTHUB_NAME}
-        
-        # Security: OAUTHBEARER
+
+        # Security: SASL_PLAIN with SAS token
         rdkafka.security.protocol     SASL_SSL
-        rdkafka.sasl.mechanism        OAUTHBEARER
-        rdkafka.sasl.oauthbearer.method                   oidc
-        rdkafka.sasl.oauthbearer.client.id                ${AZURE_CLIENT_ID}
-        rdkafka.sasl.oauthbearer.token.endpoint.url       https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token
-        rdkafka.sasl.oauthbearer.scope                    https://${EVENTHUB_FQDN}/.default
-        # Important: Extensions for managed identity
-        rdkafka.sasl.oauthbearer.extensions               logicalCluster=${EVENTHUB_FQDN},identityPoolId=${AZURE_CLIENT_ID}
-        
-        # Partitioning & Reliability
-        rdkafka.message.key           ${involvedObject.namespace}
+        rdkafka.sasl.mechanism        PLAIN
+        rdkafka.sasl.username         $ConnectionString
+        rdkafka.sasl.password         ${EVENTHUB_CONNECTION_STRING}
+
+        # Reliability
         rdkafka.request.required.acks 1
         rdkafka.retry.backoff.ms      500
 

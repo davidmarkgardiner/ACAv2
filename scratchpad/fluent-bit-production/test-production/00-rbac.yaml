@@ -1,0 +1,87 @@
+# RBAC for Production Testing of Argo Events + HolmesGPT + GitLab
+# Includes: Namespace, ServiceAccount, Role, RoleBinding, and EventBus
+#
+# Apply FIRST before other test resources:
+#   kubectl apply -f 00-rbac.yaml
+#
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-events
+---
+# Service Account used by EventSource, Sensor, and Workflows
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-events-sa
+  namespace: argo-events
+  labels:
+    app: argo-events
+---
+# Role for Argo Events components
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-events-role
+  namespace: argo-events
+rules:
+  # Workflow submission
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows", "workflowtemplates", "cronworkflows"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # Sensor needs to read eventsources
+  - apiGroups: ["argoproj.io"]
+    resources: ["eventsources", "sensors", "eventbus"]
+    verbs: ["get", "list", "watch"]
+  # Pod management for workflow pods
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # ConfigMaps and Secrets access
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  # Events for status updates
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Service accounts
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list"]
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-events-role-binding
+  namespace: argo-events
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-events-role
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+---
+# EventBus (REQUIRED for Argo Events communication)
+apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: argo-events
+spec:
+  jetstream:
+    version: "2.10.10"
+    replicas: 3
+    containerTemplate:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi

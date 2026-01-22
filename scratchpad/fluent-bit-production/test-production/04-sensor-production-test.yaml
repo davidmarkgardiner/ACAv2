@@ -1,24 +1,21 @@
-# Argo Events Sensor - Consumes Fluent Bit events from Event Hub
-# Creates GitLab issues for Kubernetes Warning events
+# Production Test Sensor
+# Processes Event Hub format payloads (base64 encoded body)
+# Triggers multi-cluster-triage workflow -> Holmes -> GitLab
 #
-# IMPORTANT: Azure Event Hub wraps payload as {"body": "<base64>", "id": "", "partitionKey": ""}
-# Fluent Bit event structure inside body:
+# Payload format (simulating Event Hub):
 # {
-#   "type": "Warning",
-#   "reason": "BackOff",
-#   "message": "...",
-#   "involvedObject": {"kind": "Pod", "name": "...", "namespace": "..."},
-#   "cluster": "kind-argo-workflow"
+#   "body": "<base64-encoded-k8s-event>",
+#   "id": "test-123",
+#   "partitionKey": "test"
 # }
 #
 apiVersion: argoproj.io/v1alpha1
 kind: Sensor
 metadata:
-  name: fluent-bit-gitlab-issues
+  name: prod-test-gitlab-issues
   namespace: argo-events
   labels:
-    app: k8s-event-consumer
-    sender: fluent-bit
+    purpose: production-testing
 spec:
   eventBusName: default
   template:
@@ -26,8 +23,8 @@ spec:
 
   dependencies:
     - name: k8s-warning-event
-      eventSourceName: eventhub-k8s-events
-      eventName: k8s-warnings
+      eventSourceName: webhook-prod-test
+      eventName: k8s-event
 
   triggers:
     - template:
@@ -40,10 +37,10 @@ spec:
               apiVersion: argoproj.io/v1alpha1
               kind: Workflow
               metadata:
-                generateName: fb-gitlab-issue-
+                generateName: prod-test-triage-
                 labels:
                   app: k8s-event-handler
-                  sender: fluent-bit
+                  purpose: production-testing
               spec:
                 workflowTemplateRef:
                   name: multi-cluster-triage
@@ -64,49 +61,49 @@ spec:
                       value: ""
                     - name: gitlab-project
                       value: "xxxmarkgardiner/mcp-test-repo"
+                    - name: holmes-url
+                      value: "http://holmesgpt.holmesgpt.svc.cluster.local:80"
           parameters:
             # Map Event Hub payload to workflow parameters
             # Event Hub body is Base64 encoded - use b64dec function
-            # Fluent Bit uses slightly different field names
+            # Same parsing as production sensor
             - src:
                 dependencyName: k8s-warning-event
-                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "cluster" "unknown" }}'
+                dataTemplate: '{{ (b64dec .Input.body.body) | mustFromJson | dig "cluster" "unknown" }}'
               dest: spec.arguments.parameters.0.value
             - src:
                 dependencyName: k8s-warning-event
-                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "default" }}'
+                dataTemplate: '{{ (b64dec .Input.body.body) | mustFromJson | dig "involvedObject" "namespace" "default" }}'
               dest: spec.arguments.parameters.1.value
             - src:
                 dependencyName: k8s-warning-event
-                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "name" "unknown" }}'
+                dataTemplate: '{{ (b64dec .Input.body.body) | mustFromJson | dig "involvedObject" "name" "unknown" }}'
               dest: spec.arguments.parameters.2.value
             - src:
                 dependencyName: k8s-warning-event
-                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "kind" "Pod" }}'
+                dataTemplate: '{{ (b64dec .Input.body.body) | mustFromJson | dig "involvedObject" "kind" "Pod" }}'
               dest: spec.arguments.parameters.3.value
             - src:
                 dependencyName: k8s-warning-event
-                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "Unknown" }}'
+                dataTemplate: '{{ (b64dec .Input.body.body) | mustFromJson | dig "reason" "Unknown" }}'
               dest: spec.arguments.parameters.4.value
             - src:
                 dependencyName: k8s-warning-event
-                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "message" "" }}'
+                dataTemplate: '{{ (b64dec .Input.body.body) | mustFromJson | dig "message" "" }}'
               dest: spec.arguments.parameters.5.value
       retryStrategy:
         steps: 3
         duration: 10s
 
 ---
-# Debug sensor to log raw events (useful for testing)
+# Debug sensor to see raw payloads (helpful for troubleshooting)
 apiVersion: argoproj.io/v1alpha1
 kind: Sensor
 metadata:
-  name: fluent-bit-debug
+  name: prod-test-debug
   namespace: argo-events
   labels:
-    app: k8s-event-consumer
-    sender: fluent-bit
-    purpose: debug
+    purpose: production-testing-debug
 spec:
   eventBusName: default
   template:
@@ -114,8 +111,8 @@ spec:
 
   dependencies:
     - name: any-event
-      eventSourceName: eventhub-k8s-events
-      eventName: k8s-warnings
+      eventSourceName: webhook-prod-test
+      eventName: k8s-event
 
   triggers:
     - template:
@@ -128,16 +125,17 @@ spec:
               apiVersion: argoproj.io/v1alpha1
               kind: Workflow
               metadata:
-                generateName: fb-debug-
+                generateName: prod-test-debug-
                 labels:
-                  app: k8s-event-handler
-                  purpose: debug
+                  purpose: production-testing-debug
               spec:
                 serviceAccountName: argo-events-sa
                 entrypoint: log-event
                 arguments:
                   parameters:
-                    - name: raw-body
+                    - name: raw-payload
+                      value: ""
+                    - name: encoded-body
                       value: ""
                     - name: decoded-body
                       value: ""
@@ -145,16 +143,20 @@ spec:
                   - name: log-event
                     inputs:
                       parameters:
-                        - name: raw-body
+                        - name: raw-payload
+                        - name: encoded-body
                         - name: decoded-body
                     script:
                       image: alpine:3.18
                       command: [sh]
                       source: |
-                        echo "=== Fluent Bit Event via Event Hub ==="
+                        echo "=== Production Test - Event Received ==="
                         echo ""
-                        echo "Raw body (base64):"
-                        echo "{{inputs.parameters.raw-body}}"
+                        echo "Raw payload:"
+                        echo "{{inputs.parameters.raw-payload}}"
+                        echo ""
+                        echo "Encoded body (base64):"
+                        echo "{{inputs.parameters.encoded-body}}"
                         echo ""
                         echo "Decoded body:"
                         echo "{{inputs.parameters.decoded-body}}"
@@ -167,5 +169,9 @@ spec:
               dest: spec.arguments.parameters.0.value
             - src:
                 dependencyName: any-event
-                dataTemplate: '{{ b64dec .Input.body }}'
+                dataKey: body.body
               dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: any-event
+                dataTemplate: '{{ b64dec .Input.body.body }}'
+              dest: spec.arguments.parameters.2.value

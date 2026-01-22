@@ -1,13 +1,24 @@
-# Fluent Bit Deployment for Production
-# Uses SAS Token from Azure Key Vault via External Secrets
+# =============================================================================
+# Fluent Bit Test Deployment - LOCAL FILTER TESTING
+# =============================================================================
 #
-# Prerequisites:
-# 1. External Secrets Operator installed
-# 2. ClusterSecretStore configured for Azure Key Vault
-# 3. Apply 00-external-secret.yaml first
+# PURPOSE:
+#   Deploy Fluent Bit for local testing without EventHub dependency.
+#   Use with fluent-bit-test-config.yaml which outputs to stdout.
 #
-
----
+# PREREQUISITES:
+#   1. monitoring namespace exists
+#   2. fluent-bit-test-config.yaml applied
+#
+# USAGE:
+#   kubectl apply -f fluent-bit-test-deployment.yaml
+#   kubectl wait --for=condition=ready pod -l app=fluent-bit -n monitoring
+#   kubectl logs -n monitoring -l app=fluent-bit -f
+#
+# CLEANUP:
+#   kubectl delete -f fluent-bit-test-deployment.yaml
+#
+# =============================================================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -15,9 +26,7 @@ metadata:
   namespace: monitoring
   labels:
     app: fluent-bit
-
 ---
-# ClusterRole for reading Kubernetes events
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -31,7 +40,6 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces", "pods"]
     verbs: ["get", "list", "watch"]
-
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -47,21 +55,6 @@ subjects:
   - kind: ServiceAccount
     name: fluent-bit-events
     namespace: monitoring
-
----
-# ConfigMap with Event Hub details
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: eventhub-config
-  namespace: monitoring
-  labels:
-    app: fluent-bit
-data:
-  EVENTHUB_NAMESPACE: "k8s-events-hub-1334"  # Update with your namespace
-  EVENTHUB_NAME: "kube-events"               # Event Hub (topic) name
-  EVENTHUB_FQDN: "k8s-events-hub-1334.servicebus.windows.net"
-
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -70,15 +63,19 @@ metadata:
   namespace: monitoring
   labels:
     app: fluent-bit
+    component: k8s-events
+    purpose: filter-testing
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: fluent-bit
+      component: k8s-events
   template:
     metadata:
       labels:
         app: fluent-bit
+        component: k8s-events
     spec:
       serviceAccountName: fluent-bit-events
       containers:
@@ -86,35 +83,17 @@ spec:
           image: fluent/fluent-bit:3.2
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 2020
+            - name: http
+              containerPort: 2020
+              protocol: TCP
           env:
-            # Cluster identification - UPDATE THESE FOR EACH CLUSTER
             - name: CLUSTER_NAME
-              value: "uk8s-tsshared-weu-gt025-int-dev-public2"
-            - name: CLUSTER_REGION
-              value: "westeurope"
-            - name: CLUSTER_ENVIRONMENT
-              value: "dev"
-            # Event Hub Config
-            - name: EVENTHUB_FQDN
-              valueFrom:
-                configMapKeyRef:
-                  name: eventhub-config
-                  key: EVENTHUB_FQDN
-            - name: EVENTHUB_NAME
-              valueFrom:
-                configMapKeyRef:
-                  name: eventhub-config
-                  key: EVENTHUB_NAME
-            # Event Hub SAS connection string
-            - name: EVENTHUB_CONNECTION_STRING
-              valueFrom:
-                secretKeyRef:
-                  name: eventhub-sas-secret
-                  key: connectionString
+              value: "kind-argo-workflow"
           volumeMounts:
             - name: config
               mountPath: /fluent-bit/etc/
+            - name: varlog
+              mountPath: /var/log
           resources:
             requests:
               cpu: 50m
@@ -125,16 +104,19 @@ spec:
           livenessProbe:
             httpGet:
               path: /
-              port: 2020
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /api/v1/health
-              port: 2020
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 10
       volumes:
         - name: config
           configMap:
             name: fluent-bit-config
+        - name: varlog
+          emptyDir: {}
+      terminationGracePeriodSeconds: 10

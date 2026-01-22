@@ -1,0 +1,195 @@
+# =============================================================================
+# Fluent Bit ConfigMap - MAX EVENTS Profile
+# =============================================================================
+#
+# PURPOSE:
+#   Capture ALL Warning events from WHITELISTED namespaces.
+#   Designed for complete visibility into specific namespaces.
+#
+# FILTERING STRATEGY:
+#   1. Event Type:      Warning only (Normal events ignored)
+#   2. Namespaces:      WHITELIST - only explicitly listed namespaces pass
+#   3. Event Reasons:   NO FILTERING - all Warning reasons pass through
+#
+# EXPECTED VOLUME: ~200-1000+ events/day per cluster (highly variable)
+#
+# USE THIS PROFILE FOR:
+#   - Debug/investigation mode
+#   - Namespaces where you want FULL visibility (every warning)
+#   - Development/staging environments
+#   - Specific namespaces with critical workloads
+#
+# WARNING:
+#   - High volume - ensure downstream systems can handle the load
+#   - Consider rate limiting in Argo Events Sensor
+#   - May generate many HolmesGPT calls and GitLab issues
+#   - Use sparingly and for specific namespaces only
+#
+# RATE LIMITING RECOMMENDATION:
+#   With max-events profile, you SHOULD add sensor rate limiting:
+#
+#   triggers:
+#     - template:
+#         rateLimit:
+#           requestsPerUnit: 3   # Max 3 workflows per minute
+#           unit: Minute
+#
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+    # Label identifies which filter profile is deployed
+    filter-profile: max-events
+data:
+  # ---------------------------------------------------------------------------
+  # MAIN CONFIG
+  # ---------------------------------------------------------------------------
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    @INCLUDE inputs.conf
+    @INCLUDE filters.conf
+    @INCLUDE outputs.conf
+
+  # ---------------------------------------------------------------------------
+  # INPUT: Kubernetes Events
+  # ---------------------------------------------------------------------------
+  inputs.conf: |
+    [INPUT]
+        Name              kubernetes_events
+        Tag               kube.events.*
+        DB                /var/log/flb_kube_events.db
+        Interval_Sec      0.5
+        Kube_URL          https://kubernetes.default.svc:443
+        Kube_CA_File      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File   /var/run/secrets/kubernetes.io/serviceaccount/token
+
+  # ---------------------------------------------------------------------------
+  # FILTERS: Event filtering pipeline
+  # ---------------------------------------------------------------------------
+  filters.conf: |
+    # ============================================================
+    # MAX EVENTS PROFILE
+    # ALL Warning events from whitelisted namespaces
+    # ============================================================
+
+    # ---------------------------------------------------------
+    # FILTER 1: Event Type
+    # ---------------------------------------------------------
+    # Only Warning events pass through
+    # Normal events are still dropped (these are informational only)
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        Regex         type Warning
+
+    # ---------------------------------------------------------
+    # FILTER 2: Namespace WHITELIST
+    # ---------------------------------------------------------
+    # ONLY events from these namespaces will pass through
+    # Since we're not filtering event reasons, this is the ONLY
+    # control over which events reach EventHub.
+    #
+    # CUSTOMIZE THIS LIST CAREFULLY:
+    #   - Only add namespaces where you need FULL visibility
+    #   - Production namespaces with critical workloads
+    #   - Namespaces you're actively debugging
+    #
+    # DO NOT add system namespaces (kube-system, etc.) here
+    # unless you specifically need to debug them.
+    #
+    # EXAMPLE namespaces:
+    #   - monitoring: Your observability stack
+    #   - holmesgpt: HolmesGPT itself (meta-debugging)
+    #   - production: Your production application
+    #   - staging: Staging environment
+    #   - dev: Development environment
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        # CUSTOMIZE THIS LIST for your environment
+        Regex         involvedObject.namespace ^(monitoring|holmesgpt|grafana-test|mattermost|default|production|staging|dev)$
+
+    # ---------------------------------------------------------
+    # NO EVENT REASON FILTERING
+    # ---------------------------------------------------------
+    # Unlike low-noise and medium-noise profiles, we do NOT
+    # filter by event reason. ALL Warning events pass through.
+    #
+    # This means you'll see:
+    #   - CrashLoopBackOff, OOMKilled, NodeNotReady (critical)
+    #   - Unhealthy, ProbeWarning, BackOff (health)
+    #   - ImagePullBackOff, ErrImagePull (image issues)
+    #   - FailedCreate, Killing (lifecycle)
+    #   - PolicyViolation (if using Kyverno/OPA)
+    #   - ... and ANY other Warning reason
+    #
+    # If volume is too high, consider:
+    #   1. Reducing namespace whitelist
+    #   2. Switching to medium-noise profile
+    #   3. Adding sensor rate limiting
+    # ---------------------------------------------------------
+
+    # ---------------------------------------------------------
+    # FILTER 3: Add Metadata
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          modify
+        Match         kube.events.*
+        Add           cluster ${CLUSTER_NAME}
+        # Mark profile as max-events so downstream can identify
+        Add           filter_profile max-events
+
+    # ---------------------------------------------------------
+    # FILTER 4: Restructure nested fields
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          nest
+        Match         kube.events.*
+        Operation     nest
+        Wildcard      involvedObject.*
+        Nest_under    involvedObject
+        Remove_prefix involvedObject.
+
+  # ---------------------------------------------------------------------------
+  # OUTPUT: Azure Event Hub via Kafka protocol
+  # ---------------------------------------------------------------------------
+  outputs.conf: |
+    [OUTPUT]
+        Name                          kafka
+        Match                         kube.events.*
+        Brokers                       ${EVENTHUB_FQDN}:9093
+        Topics                        ${EVENTHUB_NAME}
+
+        # SASL_PLAIN authentication
+        rdkafka.security.protocol     SASL_SSL
+        rdkafka.sasl.mechanism        PLAIN
+        rdkafka.sasl.username         $ConnectionString
+        rdkafka.sasl.password         ${EVENTHUB_CONNECTION_STRING}
+
+        # Reliability
+        rdkafka.request.required.acks 1
+        rdkafka.retry.backoff.ms      500
+
+  # ---------------------------------------------------------------------------
+  # PARSERS
+  # ---------------------------------------------------------------------------
+  parsers.conf: |
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    lastTimestamp
+        Time_Format %Y-%m-%dT%H:%M:%SZ

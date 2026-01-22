@@ -1,0 +1,280 @@
+# HolmesGPT Local Deployment for Testing
+# Deploy this to verify the workflow can connect to Holmes
+#
+# Prerequisites:
+# - Set OPENAI_API_KEY or ANTHROPIC_API_KEY in the secret below
+#
+# Usage:
+#   1. Edit the secret below with your API key
+#   2. kubectl apply -f 06-holmes-local-deployment.yaml
+#   3. Wait for pod to be ready: kubectl get pods -n holmesgpt -w
+#   4. Test: curl http://holmesgpt.holmesgpt.svc.cluster.local:80/health
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: holmesgpt
+  labels:
+    app: holmesgpt
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: holmes
+  namespace: holmesgpt
+  labels:
+    app: holmesgpt
+---
+# ClusterRole with read-only access to investigate resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: holmes-cluster-role
+  labels:
+    app: holmesgpt
+rules:
+  # Core resources
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - endpoints
+      - events
+      - namespaces
+      - nodes
+      - persistentvolumeclaims
+      - persistentvolumes
+      - pods
+      - pods/log
+      - pods/status
+      - replicationcontrollers
+      - secrets
+      - serviceaccounts
+      - services
+    verbs: [get, list, watch]
+  # Apps resources
+  - apiGroups: ["apps"]
+    resources: [daemonsets, deployments, replicasets, statefulsets]
+    verbs: [get, list, watch]
+  # Batch resources
+  - apiGroups: ["batch"]
+    resources: [cronjobs, jobs]
+    verbs: [get, list, watch]
+  # Networking
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch]
+  # Storage
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  # Autoscaling
+  - apiGroups: ["autoscaling"]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  # RBAC
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: [clusterroles, clusterrolebindings, roles, rolebindings]
+    verbs: [get, list, watch]
+  # Metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [pods, nodes]
+    verbs: [get, list]
+  # Events API
+  - apiGroups: ["events.k8s.io"]
+    resources: [events]
+    verbs: [get, list, watch]
+  # Policy
+  - apiGroups: ["policy"]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: holmes-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: holmes-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: holmes
+    namespace: holmesgpt
+---
+# API Key Secret - EDIT THIS!
+apiVersion: v1
+kind: Secret
+metadata:
+  name: holmes-secrets
+  namespace: holmesgpt
+type: Opaque
+stringData:
+  # Uncomment and set ONE of these:
+  # OPENAI_API_KEY: "sk-your-openai-key-here"
+  ANTHROPIC_API_KEY: "your-anthropic-key-here"
+---
+# Holmes Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-config
+  namespace: holmesgpt
+data:
+  config.yaml: |
+    max_steps: 40
+---
+# Toolsets Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-toolsets
+  namespace: holmesgpt
+data:
+  custom_toolset.yaml: |
+    toolsets:
+      kubernetes/core:
+        enabled: true
+      kubernetes/logs:
+        enabled: true
+      robusta:
+        enabled: false
+      internet:
+        enabled: true
+      prometheus/metrics:
+        enabled: false
+---
+# Runbooks for common issues
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-runbooks
+  namespace: holmesgpt
+data:
+  aks-troubleshooting.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(OOMKilled)|(memory)"
+        instructions: >
+          Container was killed due to Out of Memory.
+          1. Check current memory usage: kubectl top pod <pod> -n <namespace>
+          2. Review memory limits in pod spec
+          3. Check for memory leaks in application
+          4. Consider increasing memory limits
+      - match:
+          issue_name: "(CrashLoop)|(BackOff)|(restart)"
+        instructions: >
+          Pod is crash looping.
+          1. Check pod logs: kubectl logs <pod> -n <namespace> --previous
+          2. Check pod events: kubectl describe pod <pod> -n <namespace>
+          3. Review liveness/readiness probes
+          4. Check application startup dependencies
+      - match:
+          issue_name: "(ImagePull)|(ErrImagePull)"
+        instructions: >
+          Cannot pull container image.
+          1. Verify image name and tag exist in registry
+          2. Check image pull secrets
+          3. Verify registry credentials
+          4. Check network connectivity to registry
+---
+# Holmes Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: holmes
+  namespace: holmesgpt
+  labels:
+    app: holmes
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: holmes
+  template:
+    metadata:
+      labels:
+        app: holmes
+    spec:
+      serviceAccountName: holmes
+      containers:
+        - name: holmes
+          image: robustadev/holmes:0.18.2
+          imagePullPolicy: Always
+          command: ["python3", "-u", "server.py"]
+          ports:
+            - containerPort: 5050
+              name: http
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: ENABLE_TELEMETRY
+              value: "false"
+            # Model to use (claude-sonnet-4-20250514 is the current Claude Sonnet model)
+            - name: MODEL
+              value: "claude-sonnet-4-20250514"
+            # Uncomment the one you're using:
+            # - name: OPENAI_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: holmes-secrets
+            #       key: OPENAI_API_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: holmes-secrets
+                  key: ANTHROPIC_API_KEY
+          volumeMounts:
+            - name: config
+              mountPath: /root/.holmes
+            - name: toolsets
+              mountPath: /etc/holmes/config
+            - name: runbooks
+              mountPath: /etc/holmes/runbooks
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            tcpSocket:
+              port: 5050
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 5050
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: holmes-config
+            optional: true
+        - name: toolsets
+          configMap:
+            name: holmes-toolsets
+            optional: true
+        - name: runbooks
+          configMap:
+            name: holmes-runbooks
+            optional: true
+---
+# Service to expose Holmes
+apiVersion: v1
+kind: Service
+metadata:
+  name: holmesgpt
+  namespace: holmesgpt
+  labels:
+    app: holmes
+spec:
+  selector:
+    app: holmes
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 5050

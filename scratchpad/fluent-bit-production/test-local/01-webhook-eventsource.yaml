@@ -1,0 +1,42 @@
+# Webhook EventSource for LOCAL TESTING
+# Allows manual HTTP POST to simulate Event Hub events
+#
+# Usage:
+#   1. kubectl apply -f 01-webhook-eventsource.yaml
+#   2. kubectl port-forward -n argo-events svc/eventsource-webhook-svc 12000:12000
+#   3. curl -X POST http://localhost:12000/test-k8s-event -H "Content-Type: application/json" -d @test-payload.json
+#
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: webhook-test
+  namespace: argo-events
+  labels:
+    purpose: local-testing
+spec:
+  eventBusName: default
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    test-k8s-event:
+      port: "12000"
+      endpoint: /test-k8s-event
+      method: POST
+
+---
+# Service to expose the webhook (for port-forwarding)
+apiVersion: v1
+kind: Service
+metadata:
+  name: eventsource-webhook-svc
+  namespace: argo-events
+  labels:
+    purpose: local-testing
+spec:
+  selector:
+    eventsource-name: webhook-test
+  ports:
+    - port: 12000
+      targetPort: 12000

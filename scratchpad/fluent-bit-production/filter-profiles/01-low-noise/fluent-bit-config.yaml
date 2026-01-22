@@ -1,0 +1,248 @@
+# =============================================================================
+# Fluent Bit ConfigMap - LOW NOISE Profile
+# =============================================================================
+#
+# PURPOSE:
+#   Capture only CRITICAL events from WHITELISTED namespaces.
+#   Designed for initial rollout and production clusters where minimal noise
+#   is required.
+#
+# FILTERING STRATEGY:
+#   1. Event Type:      Warning only (Normal events ignored)
+#   2. Namespaces:      WHITELIST - only explicitly listed namespaces pass
+#   3. Event Reasons:   CRITICAL only - CrashLoopBackOff, OOMKilled, etc.
+#
+# EXPECTED VOLUME: ~10-50 events/day per cluster (varies by cluster health)
+#
+# USE THIS PROFILE FOR:
+#   - Initial rollout / testing
+#   - Production clusters where you want minimal noise
+#   - High-value alerts only (things that MUST be investigated)
+#
+# RATE LIMITING NOTE:
+#   This profile filters at the SOURCE (Fluent Bit). Events that don't match
+#   the filters are DROPPED and never reach EventHub. This is different from
+#   Argo Events Sensor rate limiting which drops events AFTER they reach EventHub.
+#
+# TESTED: 2026-01-21 on kind-argo-workflow cluster
+#   - Namespace filtering: VERIFIED (excluded namespaces show 0 events)
+#   - Reason filtering: VERIFIED (only matching reasons captured)
+#   - Metadata enrichment: VERIFIED (cluster and filter_profile added)
+#
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+    # Label identifies which filter profile is deployed
+    # Useful for: kubectl get cm -l filter-profile=low-noise
+    filter-profile: low-noise
+data:
+  # ---------------------------------------------------------------------------
+  # MAIN CONFIG: Service settings and includes
+  # ---------------------------------------------------------------------------
+  fluent-bit.conf: |
+    [SERVICE]
+        # Flush interval in seconds - how often to send data to outputs
+        Flush         1
+        # Log level: error, warning, info, debug, trace
+        Log_Level     info
+        # Run in foreground (required for container)
+        Daemon        off
+        # Parser definitions file
+        Parsers_File  parsers.conf
+        # Enable HTTP server for health checks and metrics
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    # Include modular config files
+    @INCLUDE inputs.conf
+    @INCLUDE filters.conf
+    @INCLUDE outputs.conf
+
+  # ---------------------------------------------------------------------------
+  # INPUT: Kubernetes Events
+  # ---------------------------------------------------------------------------
+  # Watches the Kubernetes API for cluster events (NOT pod logs)
+  # Events include: Pod crashes, scheduling failures, node issues, etc.
+  # ---------------------------------------------------------------------------
+  inputs.conf: |
+    [INPUT]
+        # kubernetes_events plugin watches K8s API for events
+        Name              kubernetes_events
+        # Tag prefix for matching in filters/outputs
+        Tag               kube.events.*
+        # SQLite DB to track which events have been processed
+        # Prevents re-sending events after Fluent Bit restart
+        DB                /var/log/flb_kube_events.db
+        # How often to poll for new events (0.5 = 500ms)
+        Interval_Sec      0.5
+        # Kubernetes API server URL (uses in-cluster DNS)
+        Kube_URL          https://kubernetes.default.svc:443
+        # Service account credentials (auto-mounted in pod)
+        Kube_CA_File      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File   /var/run/secrets/kubernetes.io/serviceaccount/token
+
+  # ---------------------------------------------------------------------------
+  # FILTERS: Event filtering pipeline
+  # ---------------------------------------------------------------------------
+  # Filters are applied IN ORDER. Each filter can:
+  #   - PASS: Event continues to next filter
+  #   - DROP: Event is discarded (never reaches output)
+  #
+  # IMPORTANT: Events dropped here are GONE - they don't reach EventHub
+  # ---------------------------------------------------------------------------
+  filters.conf: |
+    # ============================================================
+    # LOW NOISE PROFILE
+    # Only critical events from whitelisted namespaces
+    # ============================================================
+
+    # ---------------------------------------------------------
+    # FILTER 1: Event Type
+    # ---------------------------------------------------------
+    # Only Warning events pass through
+    # Normal events (Scheduled, Pulled, Started, etc.) are dropped
+    #
+    # K8s event types:
+    #   - Normal: Informational (pod scheduled, image pulled)
+    #   - Warning: Something unexpected (crash, OOM, failed mount)
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        # Regex matches the 'type' field at root level of event JSON
+        Regex         type Warning
+
+    # ---------------------------------------------------------
+    # FILTER 2: Namespace WHITELIST
+    # ---------------------------------------------------------
+    # ONLY events from these namespaces will pass through
+    # All other namespaces are DROPPED
+    #
+    # HOW TO CUSTOMIZE:
+    #   Add your namespaces inside the parentheses, separated by |
+    #   Example: ^(namespace1|namespace2|namespace3)$
+    #
+    # IMPORTANT: Use ^ and $ anchors to match exact namespace names
+    # Without anchors, "test" would also match "test-staging"
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        # ADD YOUR NAMESPACES HERE (pipe-separated regex)
+        # Current whitelist: monitoring, holmesgpt, grafana-test, mattermost
+        Regex         involvedObject.namespace ^(monitoring|holmesgpt|grafana-test|mattermost)$
+
+    # ---------------------------------------------------------
+    # FILTER 3: Event Reason (CRITICAL only)
+    # ---------------------------------------------------------
+    # Only these specific event reasons will pass through:
+    #
+    # | Reason            | Description                        |
+    # |-------------------|------------------------------------|
+    # | CrashLoopBackOff  | Container keeps crashing           |
+    # | OOMKilled         | Container killed due to OOM        |
+    # | NodeNotReady      | Node health issue                  |
+    # | FailedMount       | Volume mount failure               |
+    # | FailedScheduling  | Cannot schedule pod to any node    |
+    # | Evicted           | Pod evicted (disk pressure, etc.)  |
+    #
+    # Events with other reasons (BackOff, Failed, Unhealthy) are dropped
+    # Use medium-noise or max-events profile for more coverage
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        Regex         reason ^(CrashLoopBackOff|OOMKilled|NodeNotReady|FailedMount|FailedScheduling|Evicted)$
+
+    # ---------------------------------------------------------
+    # FILTER 4: Add Metadata
+    # ---------------------------------------------------------
+    # Enriches events with additional fields for downstream processing
+    #
+    # Added fields:
+    #   - cluster: Identifies which K8s cluster the event came from
+    #   - filter_profile: Identifies which filter profile was active
+    #
+    # These are useful for:
+    #   - Multi-cluster environments (which cluster had the issue?)
+    #   - Debugging (which filter profile was in use?)
+    #   - Dashboards and alerting rules
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          modify
+        Match         kube.events.*
+        # ${CLUSTER_NAME} is set via environment variable in deployment
+        Add           cluster ${CLUSTER_NAME}
+        Add           filter_profile low-noise
+
+    # ---------------------------------------------------------
+    # FILTER 5: Restructure nested fields
+    # ---------------------------------------------------------
+    # The kubernetes_events plugin outputs involvedObject fields
+    # in a flat structure. This filter nests them properly.
+    #
+    # Before: involvedObject.namespace, involvedObject.name
+    # After:  involvedObject: { namespace: ..., name: ... }
+    #
+    # This makes the JSON structure consistent for downstream
+    # processing in Argo Events sensors.
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          nest
+        Match         kube.events.*
+        Operation     nest
+        Wildcard      involvedObject.*
+        Nest_under    involvedObject
+        Remove_prefix involvedObject.
+
+  # ---------------------------------------------------------------------------
+  # OUTPUT: Azure Event Hub via Kafka protocol
+  # ---------------------------------------------------------------------------
+  # Sends filtered events to Azure Event Hub using Kafka protocol
+  #
+  # AUTHENTICATION:
+  #   This config uses SASL_PLAIN with SAS connection string
+  #   For production with Workload Identity, use OAUTHBEARER instead
+  #   (see fluent-bit-production/04-sensor-production.yaml for example)
+  # ---------------------------------------------------------------------------
+  outputs.conf: |
+    # Azure Event Hub via Kafka protocol (SASL_PLAIN)
+    [OUTPUT]
+        Name                          kafka
+        Match                         kube.events.*
+        # Event Hub FQDN (e.g., my-eventhub.servicebus.windows.net:9093)
+        Brokers                       ${EVENTHUB_FQDN}:9093
+        # Event Hub name (topic)
+        Topics                        ${EVENTHUB_NAME}
+
+        # Security: SASL_PLAIN with SAS token
+        # For Workload Identity, change to OAUTHBEARER
+        rdkafka.security.protocol     SASL_SSL
+        rdkafka.sasl.mechanism        PLAIN
+        # Literal "$ConnectionString" is the username for Event Hub
+        rdkafka.sasl.username         $ConnectionString
+        # Full SAS connection string from environment variable
+        rdkafka.sasl.password         ${EVENTHUB_CONNECTION_STRING}
+
+        # Reliability settings
+        # acks=1: Leader acknowledgment (balanced reliability/performance)
+        rdkafka.request.required.acks 1
+        # Retry backoff if send fails
+        rdkafka.retry.backoff.ms      500
+
+  # ---------------------------------------------------------------------------
+  # PARSERS: JSON parsing for timestamp extraction
+  # ---------------------------------------------------------------------------
+  parsers.conf: |
+    [PARSER]
+        Name        json
+        Format      json
+        # Extract timestamp from lastTimestamp field
+        Time_Key    lastTimestamp
+        Time_Format %Y-%m-%dT%H:%M:%SZ

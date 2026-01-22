@@ -1,0 +1,110 @@
+# Simple EventHub Sensor - No Filters (for testing)
+#
+# This sensor triggers on ANY event from EventHub to verify the integration works.
+# Use this to test EventHub → Sensor → Workflow before adding filters.
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: eventhub-simple
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    purpose: testing
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: any-k8s-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-warnings
+      # No filters - accept all events
+
+  triggers:
+    - template:
+        name: triage-event
+        conditions: "any-k8s-event"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: eh-triage-
+                labels:
+                  app: k8s-event-handler
+                  source: eventhub
+              spec:
+                workflowTemplateRef:
+                  name: multi-cluster-triage
+                serviceAccountName: argo-events-sa
+                ttlStrategy:
+                  secondsAfterCompletion: 600
+                  secondsAfterSuccess: 300
+                  secondsAfterFailure: 3600
+                activeDeadlineSeconds: 1800
+                arguments:
+                  parameters:
+                    - name: dedupe-key
+                      value: ""
+                    - name: cluster-name
+                      value: ""
+                    - name: namespace
+                      value: ""
+                    - name: resource-name
+                      value: ""
+                    - name: resource-kind
+                      value: ""
+                    - name: event-reason
+                      value: ""
+                    - name: event-message
+                      value: ""
+                    - name: gitlab-project
+                      value: "xxxmarkgardiner/mcp-test-repo"
+                    - name: holmes-url
+                      value: "http://holmesgpt.holmesgpt.svc.cluster.local:80"
+          parameters:
+            # Dedupe key
+            - src:
+                dependencyName: any-k8s-event
+                dataTemplate: |
+                  {{- $d := (b64dec .Input.body) | mustFromJson -}}
+                  {{ printf "%s-%s-%s-%s" (dig "involvedObject" "namespace" "x" $d) (dig "involvedObject" "name" "x" $d) (dig "involvedObject" "kind" "x" $d) (dig "reason" "x" $d) }}
+              dest: spec.arguments.parameters.0.value
+            # Cluster name
+            - src:
+                dependencyName: any-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "cluster" "unknown" }}'
+              dest: spec.arguments.parameters.1.value
+            # Namespace
+            - src:
+                dependencyName: any-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "default" }}'
+              dest: spec.arguments.parameters.2.value
+            # Resource name
+            - src:
+                dependencyName: any-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "name" "unknown" }}'
+              dest: spec.arguments.parameters.3.value
+            # Resource kind
+            - src:
+                dependencyName: any-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "kind" "Pod" }}'
+              dest: spec.arguments.parameters.4.value
+            # Event reason
+            - src:
+                dependencyName: any-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "Unknown" }}'
+              dest: spec.arguments.parameters.5.value
+            # Event message
+            - src:
+                dependencyName: any-k8s-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "message" "" }}'
+              dest: spec.arguments.parameters.6.value
+      retryStrategy:
+        steps: 3
+        duration: 30s

@@ -1,0 +1,201 @@
+# =============================================================================
+# Fluent Bit ConfigMap - MEDIUM NOISE Profile
+# =============================================================================
+#
+# PURPOSE:
+#   Capture CRITICAL + HEALTH events, excluding system namespaces.
+#   Designed for production monitoring with balanced coverage vs noise.
+#
+# FILTERING STRATEGY:
+#   1. Event Type:      Warning only (Normal events ignored)
+#   2. Namespaces:      BLACKLIST - system namespaces excluded, all others pass
+#   3. Event Reasons:   CRITICAL + HEALTH events
+#
+# EXPECTED VOLUME: ~50-200 events/day per cluster
+#
+# USE THIS PROFILE FOR:
+#   - After successful low-noise testing (Week 3-4)
+#   - Application namespaces monitoring
+#   - Balanced noise vs coverage
+#
+# KEY DIFFERENCE FROM LOW-NOISE:
+#   - Uses BLACKLIST instead of WHITELIST for namespaces
+#   - Includes more event reasons (Unhealthy, ProbeWarning, BackOff)
+#   - Higher volume but better coverage of application issues
+#
+# RATE LIMITING NOTE:
+#   Events filtered here are DROPPED at source. To control downstream
+#   processing rate, also configure Argo Events Sensor rateLimit.
+#
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+    # Label identifies which filter profile is deployed
+    filter-profile: medium-noise
+data:
+  # ---------------------------------------------------------------------------
+  # MAIN CONFIG: Service settings and includes
+  # ---------------------------------------------------------------------------
+  fluent-bit.conf: |
+    [SERVICE]
+        # Flush interval in seconds
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        # Health check endpoint: http://localhost:2020/api/v1/health
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    @INCLUDE inputs.conf
+    @INCLUDE filters.conf
+    @INCLUDE outputs.conf
+
+  # ---------------------------------------------------------------------------
+  # INPUT: Kubernetes Events
+  # ---------------------------------------------------------------------------
+  inputs.conf: |
+    [INPUT]
+        Name              kubernetes_events
+        Tag               kube.events.*
+        # Track processed events to avoid duplicates after restart
+        DB                /var/log/flb_kube_events.db
+        Interval_Sec      0.5
+        Kube_URL          https://kubernetes.default.svc:443
+        Kube_CA_File      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File   /var/run/secrets/kubernetes.io/serviceaccount/token
+
+  # ---------------------------------------------------------------------------
+  # FILTERS: Event filtering pipeline
+  # ---------------------------------------------------------------------------
+  filters.conf: |
+    # ============================================================
+    # MEDIUM NOISE PROFILE
+    # Critical + health events, exclude system namespaces
+    # ============================================================
+
+    # ---------------------------------------------------------
+    # FILTER 1: Event Type
+    # ---------------------------------------------------------
+    # Only Warning events pass through
+    # Normal events (Scheduled, Pulled, Started) are dropped
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        Regex         type Warning
+
+    # ---------------------------------------------------------
+    # FILTER 2: Namespace BLACKLIST
+    # ---------------------------------------------------------
+    # EXCLUDE system namespaces - all other namespaces pass through
+    # This is the opposite of low-noise profile which uses whitelist
+    #
+    # BLACKLISTED NAMESPACES (events from these are DROPPED):
+    #   - kube-system: K8s core components
+    #   - kube-public: Public cluster info
+    #   - kube-node-lease: Node heartbeats
+    #   - cert-manager: TLS certificate management
+    #   - gatekeeper-system: OPA Gatekeeper
+    #   - flux-system: Flux GitOps
+    #   - external-secrets: External Secrets Operator
+    #   - azureserviceoperator-system: ASO controller
+    #   - argo-events: Argo Events (avoid recursion)
+    #   - argo: Argo Workflows controller
+    #   - argocd: ArgoCD
+    #   - istio-system: Istio service mesh
+    #   - linkerd: Linkerd service mesh
+    #
+    # HOW TO CUSTOMIZE:
+    #   Add namespaces to exclude inside the parentheses
+    #   The 'Exclude' keyword inverts the match (drops matching events)
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        # Exclude (drop) events from these system namespaces
+        Exclude       involvedObject.namespace ^(kube-system|kube-public|kube-node-lease|cert-manager|gatekeeper-system|flux-system|external-secrets|azureserviceoperator-system|argo-events|argo|argocd|istio-system|linkerd)$
+
+    # ---------------------------------------------------------
+    # FILTER 3: Event Reason (CRITICAL + HEALTH)
+    # ---------------------------------------------------------
+    # More comprehensive than low-noise profile
+    #
+    # CRITICAL (also in low-noise):
+    # | Reason            | Description                        |
+    # |-------------------|------------------------------------|
+    # | CrashLoopBackOff  | Container keeps crashing           |
+    # | OOMKilled         | Container killed due to OOM        |
+    # | NodeNotReady      | Node health issue                  |
+    # | FailedMount       | Volume mount failure               |
+    # | FailedScheduling  | Cannot schedule pod to any node    |
+    # | Evicted           | Pod evicted                        |
+    #
+    # HEALTH (additional in medium-noise):
+    # | Reason            | Description                        |
+    # |-------------------|------------------------------------|
+    # | Unhealthy         | Liveness/readiness probe failed    |
+    # | ProbeWarning      | Probe timeout or intermittent fail |
+    # | FailedKillPod     | Cannot terminate pod gracefully    |
+    # | BackOff           | Container restart backoff          |
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          grep
+        Match         kube.events.*
+        Regex         reason ^(CrashLoopBackOff|OOMKilled|NodeNotReady|FailedMount|FailedScheduling|Evicted|Unhealthy|ProbeWarning|FailedKillPod|BackOff)$
+
+    # ---------------------------------------------------------
+    # FILTER 4: Add Metadata
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          modify
+        Match         kube.events.*
+        Add           cluster ${CLUSTER_NAME}
+        Add           filter_profile medium-noise
+
+    # ---------------------------------------------------------
+    # FILTER 5: Restructure nested fields
+    # ---------------------------------------------------------
+    [FILTER]
+        Name          nest
+        Match         kube.events.*
+        Operation     nest
+        Wildcard      involvedObject.*
+        Nest_under    involvedObject
+        Remove_prefix involvedObject.
+
+  # ---------------------------------------------------------------------------
+  # OUTPUT: Azure Event Hub via Kafka protocol
+  # ---------------------------------------------------------------------------
+  outputs.conf: |
+    [OUTPUT]
+        Name                          kafka
+        Match                         kube.events.*
+        Brokers                       ${EVENTHUB_FQDN}:9093
+        Topics                        ${EVENTHUB_NAME}
+
+        # SASL_PLAIN authentication with SAS connection string
+        rdkafka.security.protocol     SASL_SSL
+        rdkafka.sasl.mechanism        PLAIN
+        rdkafka.sasl.username         $ConnectionString
+        rdkafka.sasl.password         ${EVENTHUB_CONNECTION_STRING}
+
+        # Reliability
+        rdkafka.request.required.acks 1
+        rdkafka.retry.backoff.ms      500
+
+  # ---------------------------------------------------------------------------
+  # PARSERS
+  # ---------------------------------------------------------------------------
+  parsers.conf: |
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    lastTimestamp
+        Time_Format %Y-%m-%dT%H:%M:%SZ
