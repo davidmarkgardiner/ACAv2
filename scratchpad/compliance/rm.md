@@ -1,14 +1,14 @@
-**Subject:** Response — Personal Account Dealing Query
-
 Dear [Name],
 
-Thank you for the opportunity to explain my understanding of the situation.
+Thank you for your follow-up.
 
-When I received the email on 29th October advising I had 180 days to liquidate my personal trading accounts, I understood this as the timeframe within which I needed to close my positions and transfer the funds. The email did not explicitly state that I was required to cease trading immediately, and I interpreted the 180-day window as time to manage this transition in an orderly way — including closing out existing positions without incurring unnecessary financial losses.
+To reiterate my rationale for continuing to trade: I understood the 180-day window communicated on 29th October as the timeframe to wind down my positions and close the accounts. It was not clear to me that I was required to cease all trading activity immediately. My conversations with the compliance team and my line manager did not suggest any urgency, and I was working towards the deadline I believed I had been given.
 
-My subsequent conversations with the compliance team were administrative in tone and focused on timelines for closing the accounts. At no point was it indicated to me that this was an urgent matter or that I was under investigation. I also discussed the situation with my line manager, who did not raise any concerns about the severity.
+Regarding pre-clearance: I understood that I was required to move to a pre-approved broker, and I intended to begin following the pre-clearance process once that transition was complete. I recognise now that I misunderstood how these requirements interact, and that pre-clearance applies to trades regardless of which broker is used. This was a genuine misunderstanding on my part, not an attempt to avoid oversight.
 
-I want to be clear: I was not intentionally disregarding the policy. I genuinely misunderstood what was required of me. Had it been made explicit that all trading activity needed to stop immediately, I would have complied.
+As you're aware, I have provided full statements of my trading activity. I have been completely transparent throughout this process and have no intention of concealing anything.
 
-I remain committed to resolving this matter fully and closing the accounts within the agreed timeframe. Please let me know if you need any further information.
+Please let me know if any further clarification is needed.
 
+Kind regards,
+Dave
