@@ -1,0 +1,37 @@
+# Namespaces for AKS Management Stack
+# Apply these first on the AKS cluster
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo
+  labels:
+    app.kubernetes.io/part-of: argo
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-events
+  labels:
+    app.kubernetes.io/part-of: argo
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: holmesgpt
+  labels:
+    app: holmesgpt
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mattermost
+  labels:
+    app: mattermost
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app: monitoring

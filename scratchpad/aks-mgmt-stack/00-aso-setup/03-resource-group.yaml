@@ -1,0 +1,13 @@
+# ResourceGroup for AKS Management Stack
+# Create this first before deploying any other Azure resources
+apiVersion: resources.azure.com/v1api20200601
+kind: ResourceGroup
+metadata:
+  name: at39473-weu-dev-public
+  namespace: uk8s-nextgen
+spec:
+  location: westeurope
+  tags:
+    environment: dev
+    managed-by: aso
+    purpose: aks-mgmt-stack

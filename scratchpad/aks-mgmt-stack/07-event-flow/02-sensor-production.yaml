@@ -1,0 +1,172 @@
+# Argo Events Sensor - Consumes Fluent Bit events from Event Hub
+# Triggers multi-cluster triage workflow with HolmesGPT + GitLab + Mattermost
+#
+# IMPORTANT: Azure Event Hub wraps payload as {"body": "<base64>", "id": "", "partitionKey": ""}
+# Fluent Bit event structure inside body:
+# {
+#   "type": "Warning",
+#   "reason": "BackOff",
+#   "message": "...",
+#   "involvedObject": {"kind": "Pod", "name": "...", "namespace": "..."},
+#   "cluster": "kind-local"
+# }
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: fluent-bit-multi-cluster-triage
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: k8s-warning-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-warnings
+
+  triggers:
+    - template:
+        name: trigger-triage
+        conditions: "k8s-warning-event"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: triage-
+                labels:
+                  app: multi-cluster-triage
+                  sender: fluent-bit
+              spec:
+                workflowTemplateRef:
+                  name: multi-cluster-triage
+                serviceAccountName: argo-events-sa
+                arguments:
+                  parameters:
+                    - name: cluster-name
+                      value: ""
+                    - name: namespace
+                      value: ""
+                    - name: resource-name
+                      value: ""
+                    - name: resource-kind
+                      value: ""
+                    - name: event-reason
+                      value: ""
+                    - name: event-message
+                      value: ""
+                    - name: gitlab-project
+                      value: "xxxmarkgardiner/mcp-test-repo"
+          parameters:
+            # Map Event Hub payload to workflow parameters
+            # Event Hub body is Base64 encoded - use b64dec function
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "cluster" "unknown" }}'
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "namespace" "default" }}'
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "name" "unknown" }}'
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "involvedObject" "kind" "Pod" }}'
+              dest: spec.arguments.parameters.3.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "reason" "Unknown" }}'
+              dest: spec.arguments.parameters.4.value
+            - src:
+                dependencyName: k8s-warning-event
+                dataTemplate: '{{ (b64dec .Input.body) | mustFromJson | dig "message" "" }}'
+              dest: spec.arguments.parameters.5.value
+      retryStrategy:
+        steps: 3
+        duration: 10s
+
+---
+# Debug sensor to log raw events (useful for testing)
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: fluent-bit-debug
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    purpose: debug
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: any-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-warnings
+
+  triggers:
+    - template:
+        name: log-raw-event
+        conditions: "any-event"
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: debug-
+                labels:
+                  app: k8s-event-handler
+                  purpose: debug
+              spec:
+                serviceAccountName: argo-events-sa
+                entrypoint: log-event
+                ttlStrategy:
+                  secondsAfterCompletion: 60
+                arguments:
+                  parameters:
+                    - name: raw-body
+                      value: ""
+                    - name: decoded-body
+                      value: ""
+                templates:
+                  - name: log-event
+                    inputs:
+                      parameters:
+                        - name: raw-body
+                        - name: decoded-body
+                    script:
+                      image: alpine:3.18
+                      command: [sh]
+                      source: |
+                        echo "=== Fluent Bit Event via Event Hub ==="
+                        echo ""
+                        echo "Raw body (base64):"
+                        echo "{{inputs.parameters.raw-body}}"
+                        echo ""
+                        echo "Decoded body:"
+                        echo "{{inputs.parameters.decoded-body}}"
+                        echo ""
+                        echo "=== End Event ==="
+          parameters:
+            - src:
+                dependencyName: any-event
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: any-event
+                dataTemplate: '{{ b64dec .Input.body }}'
+              dest: spec.arguments.parameters.1.value
