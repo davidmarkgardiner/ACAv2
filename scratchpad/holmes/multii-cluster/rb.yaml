@@ -1,0 +1,534 @@
+# =============================================================================
+# HolmesGPT Multi-Cluster AKS Configuration
+# =============================================================================
+# This file contains ALL Kubernetes resources needed to deploy HolmesGPT
+# with multi-cluster AKS support using MCP protocol.
+#
+# Prerequisites:
+# 1. Run the Azure setup script first (see azure-setup.sh)
+# 2. Have kubectl access to your management cluster
+# 3. AKS MCP server image deployed (or use VS Code extension locally)
+#
+# Deploy with:
+#   kubectl apply -f holmesgpt-multi-cluster-complete.yaml
+# =============================================================================
+
+---
+# =============================================================================
+# NAMESPACE
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: holmesgpt
+  labels:
+    app.kubernetes.io/name: holmesgpt
+    app.kubernetes.io/component: ai-troubleshooting
+
+---
+# =============================================================================
+# CLUSTER REGISTRY - Define your target clusters here
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aks-clusters-config
+  namespace: holmesgpt
+data:
+  clusters.sh: |
+    #!/bin/bash
+    # =================================================================
+    # EDIT THIS: Add your AKS clusters
+    # Format: "SUBSCRIPTION_ID|RESOURCE_GROUP|CLUSTER_NAME"
+    # =================================================================
+    CLUSTERS=(
+      "00000000-0000-0000-0000-000000000000|rg-prod-westeurope|aks-prod-westeurope"
+      "00000000-0000-0000-0000-000000000000|rg-staging-westeurope|aks-staging-westeurope"
+      "00000000-0000-0000-0000-000000000000|rg-dev-westeurope|aks-dev-westeurope"
+    )
+
+---
+# =============================================================================
+# SERVICE ACCOUNT - For credential sync CronJob
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aks-credential-sync
+  namespace: holmesgpt
+  annotations:
+    # EDIT: Replace with your managed identity client ID
+    azure.workload.identity/client-id: "YOUR_MANAGED_IDENTITY_CLIENT_ID"
+  labels:
+    azure.workload.identity/use: "true"
+
+---
+# =============================================================================
+# RBAC - Allow CronJob to manage secrets
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secret-manager
+  namespace: holmesgpt
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aks-credential-sync-secret-manager
+  namespace: holmesgpt
+subjects:
+- kind: ServiceAccount
+  name: aks-credential-sync
+  namespace: holmesgpt
+roleRef:
+  kind: Role
+  name: secret-manager
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# =============================================================================
+# INITIAL SECRET - Bootstrap kubeconfig (CronJob will populate it)
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aks-mcp-kubeconfig
+  namespace: holmesgpt
+type: Opaque
+stringData:
+  config: |
+    apiVersion: v1
+    kind: Config
+    clusters: []
+    contexts: []
+    users: []
+    current-context: ""
+
+---
+# =============================================================================
+# CRONJOB - Syncs credentials from all AKS clusters every 4 hours
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: aks-credential-sync
+  namespace: holmesgpt
+spec:
+  schedule: "0 */4 * * *"
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            azure.workload.identity/use: "true"
+        spec:
+          serviceAccountName: aks-credential-sync
+          restartPolicy: OnFailure
+          containers:
+          - name: sync
+            image: mcr.microsoft.com/azure-cli:latest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              echo "=== AKS Credential Sync Started ==="
+              echo "Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+              # Login using workload identity
+              echo "Logging in with workload identity..."
+              az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                --service-principal \
+                -u $AZURE_CLIENT_ID \
+                -t $AZURE_TENANT_ID
+
+              # Initialize kubeconfig file
+              export KUBECONFIG=/tmp/kubeconfig
+              touch $KUBECONFIG
+
+              # Source cluster configuration
+              source /config/clusters.sh
+
+              # Fetch credentials for each cluster
+              SUCCESS_COUNT=0
+              FAIL_COUNT=0
+              for cluster_def in "${CLUSTERS[@]}"; do
+                IFS='|' read -r SUB_ID RG_NAME CLUSTER_NAME <<< "$cluster_def"
+                echo "Fetching credentials for: $CLUSTER_NAME"
+
+                if az aks get-credentials \
+                  --subscription "$SUB_ID" \
+                  --resource-group "$RG_NAME" \
+                  --name "$CLUSTER_NAME" \
+                  --file "$KUBECONFIG" \
+                  --overwrite-existing 2>/dev/null; then
+                  echo "  ✓ Success: $CLUSTER_NAME"
+                  ((SUCCESS_COUNT++))
+                else
+                  echo "  ✗ Failed: $CLUSTER_NAME"
+                  ((FAIL_COUNT++))
+                fi
+              done
+
+              # Show available contexts
+              echo ""
+              echo "=== Available Contexts ==="
+              kubectl config get-contexts --kubeconfig=$KUBECONFIG -o name 2>/dev/null || echo "(none)"
+
+              # Create or update the secret
+              echo ""
+              echo "=== Updating Secret ==="
+              kubectl create secret generic aks-mcp-kubeconfig \
+                --from-file=config=$KUBECONFIG \
+                --namespace=holmesgpt \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo ""
+              echo "=== Sync Complete ==="
+              echo "Succeeded: $SUCCESS_COUNT | Failed: $FAIL_COUNT"
+
+              # Trigger AKS MCP restart to pick up new config
+              kubectl rollout restart deployment/aks-mcp -n holmesgpt 2>/dev/null || true
+            volumeMounts:
+            - name: cluster-config
+              mountPath: /config
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+          volumes:
+          - name: cluster-config
+            configMap:
+              name: aks-clusters-config
+              defaultMode: 0755
+
+---
+# =============================================================================
+# AKS MCP SERVER - Provides kubectl tools to Holmes via MCP protocol
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aks-mcp
+  namespace: holmesgpt
+  labels:
+    app: aks-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aks-mcp
+  template:
+    metadata:
+      labels:
+        app: aks-mcp
+    spec:
+      containers:
+      - name: aks-mcp
+        # Option 1: Use the VS Code AKS MCP server image (recommended)
+        # Build from: https://github.com/Azure/aks-mcp
+        image: ghcr.io/azure/aks-mcp:latest
+        args:
+        - "--transport"
+        - "sse"
+        - "--port"
+        - "8000"
+        ports:
+        - containerPort: 8000
+          name: mcp
+        env:
+        - name: KUBECONFIG
+          value: /home/mcp/.kube/config
+        volumeMounts:
+        - name: kubeconfig
+          mountPath: /home/mcp/.kube
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: kubeconfig
+        secret:
+          secretName: aks-mcp-kubeconfig
+          items:
+          - key: config
+            path: config
+          defaultMode: 0644
+      - name: tmp
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aks-mcp
+  namespace: holmesgpt
+spec:
+  selector:
+    app: aks-mcp
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: mcp
+  type: ClusterIP
+
+---
+# =============================================================================
+# NETWORK POLICY - Restrict AKS MCP access to Holmes only
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aks-mcp-isolation
+  namespace: holmesgpt
+spec:
+  podSelector:
+    matchLabels:
+      app: aks-mcp
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: holmes
+    ports:
+    - protocol: TCP
+      port: 8000
+
+---
+# =============================================================================
+# HOLMES SECRETS - API Keys
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: holmes-secrets
+  namespace: holmesgpt
+type: Opaque
+stringData:
+  # EDIT: Add your API keys
+  ANTHROPIC_API_KEY: "your-anthropic-api-key"
+  OPENAI_API_KEY: "your-openai-api-key"  # Optional
+
+---
+# =============================================================================
+# AKS RUNBOOKS CONFIGMAP - Multiple runbooks for different scenarios
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aks-runbooks
+  namespace: holmesgpt
+data:
+  # -------------------------------------------------------------------------
+  # CREDENTIALS RUNBOOK - Matches ALL investigations (always runs first)
+  # -------------------------------------------------------------------------
+  aks-credentials.yaml: |
+    runbooks:
+      - match:
+          issue_name: ".*"
+          source: ".*"
+        instructions: |
+          ## MANDATORY: Multi-Cluster AKS Authentication
+
+          Before running ANY kubectl command, complete these steps:
+
+          ### Step 1: Identify Target Cluster
+          Determine which cluster from the alert or request:
+          - "prod", "production" → aks-prod-westeurope (rg-prod-westeurope)
+          - "staging", "stg" → aks-staging-westeurope (rg-staging-westeurope)
+          - "dev", "development" → aks-dev-westeurope (rg-dev-westeurope)
+
+          If unclear, ASK the user which cluster.
+
+          ### Step 2: Get Credentials (REQUIRED)
+          az aks get-credentials --name <CLUSTER> --resource-group <RG> --overwrite-existing
+
+          ### Step 3: Verify Connection
+          kubectl config current-context
+          Output MUST match target cluster before proceeding.
+
+          NEVER skip the credential step. NEVER assume you're connected.
+
+  # -------------------------------------------------------------------------
+  # MEMORY/OOM RUNBOOK - Additional steps for memory issues
+  # -------------------------------------------------------------------------
+  aks-memory.yaml: |
+    runbooks:
+      - match:
+          issue_name: ".*OOM.*|.*MemoryPressure.*|.*Evicted.*|.*memory.*"
+        instructions: |
+          ## Memory Issue Investigation
+
+          After connecting to the cluster:
+          1. Check pod resource limits: kubectl describe pod <name> -n <ns>
+          2. Check node memory: kubectl top nodes
+          3. Check pod memory: kubectl top pod <name> -n <ns>
+          4. Check events: kubectl get events -n <ns> --sort-by='.lastTimestamp'
+          5. Check if HPA is configured: kubectl get hpa -n <ns>
+
+  # -------------------------------------------------------------------------
+  # CRASH/RESTART RUNBOOK - Additional steps for crash loops
+  # -------------------------------------------------------------------------
+  aks-crashloop.yaml: |
+    runbooks:
+      - match:
+          issue_name: ".*CrashLoop.*|.*BackOff.*|.*Restart.*|.*crash.*"
+        instructions: |
+          ## CrashLoopBackOff Investigation
+
+          After connecting to the cluster:
+          1. Get pod status: kubectl get pod <name> -n <ns> -o wide
+          2. Get current logs: kubectl logs <name> -n <ns>
+          3. Get previous logs: kubectl logs <name> -n <ns> --previous
+          4. Describe pod: kubectl describe pod <name> -n <ns>
+          5. Check for image issues, resource limits, liveness probes
+
+  # -------------------------------------------------------------------------
+  # NETWORKING RUNBOOK - Additional steps for network issues
+  # -------------------------------------------------------------------------
+  aks-networking.yaml: |
+    runbooks:
+      - match:
+          issue_name: ".*Network.*|.*DNS.*|.*Connection.*|.*timeout.*|.*unreachable.*"
+        instructions: |
+          ## Network Issue Investigation
+
+          After connecting to the cluster:
+          1. Check service: kubectl get svc <name> -n <ns> -o wide
+          2. Check endpoints: kubectl get endpoints <name> -n <ns>
+          3. Check network policies: kubectl get networkpolicy -n <ns>
+          4. Test DNS: kubectl run -it --rm debug --image=busybox -- nslookup <service>
+          5. Check CoreDNS: kubectl logs -n kube-system -l k8s-app=kube-dns
+
+  # -------------------------------------------------------------------------
+  # REMEDIATION RUNBOOK - ONLY runs when explicitly authorized
+  # Requires source="remediation-authorized" to trigger
+  # -------------------------------------------------------------------------
+  aks-remediation.yaml: |
+    runbooks:
+      - match:
+          source: "remediation-authorized"
+        instructions: |
+          ## AUTHORIZED REMEDIATION MODE
+
+          ⚠️ You are authorized to make changes to fix this issue.
+
+          ### Workflow
+          1. First, investigate and identify the root cause (use the credential workflow)
+          2. Propose your fix and explain exactly what you will change
+          3. Execute the fix
+          4. Verify the fix worked
+          5. Report what was changed
+
+          ### Allowed Actions
+          - kubectl delete pod <name> -n <ns>  (trigger restart)
+          - kubectl scale deployment <name> -n <ns> --replicas=N
+          - kubectl rollout restart deployment <name> -n <ns>
+          - kubectl patch deployment <name> -n <ns> -p '{"spec":...}'
+          - kubectl set resources deployment <name> -n <ns> --limits=memory=X
+          - kubectl apply -f <manifest>  (for config changes)
+
+          ### FORBIDDEN Actions (never do these)
+          - NEVER delete namespaces
+          - NEVER modify RBAC (roles, rolebindings, clusterroles)
+          - NEVER modify or delete secrets
+          - NEVER touch kube-system namespace
+          - NEVER run kubectl delete --all
+          - NEVER use --force --grace-period=0 unless explicitly requested
+
+          ### Safety Checks
+          Before making any change:
+          1. Confirm you're on the correct cluster: kubectl config current-context
+          2. Confirm the resource exists: kubectl get <resource> <name> -n <ns>
+          3. State what you're about to do
+          4. Execute
+          5. Verify with: kubectl get <resource> <name> -n <ns>
+
+---
+# =============================================================================
+# HOLMES CONFIGMAP - Main configuration including MCP servers
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-config
+  namespace: holmesgpt
+data:
+  config.yaml: |
+    # Model configuration
+    model: anthropic/claude-sonnet-4-20250514
+
+    # Custom runbooks - loaded in order, all matching runbooks are combined
+    custom_runbooks:
+      - /etc/holmes/runbooks/aks-credentials.yaml   # Always matches - runs first
+      - /etc/holmes/runbooks/aks-memory.yaml        # OOM/memory issues
+      - /etc/holmes/runbooks/aks-crashloop.yaml     # CrashLoopBackOff
+      - /etc/holmes/runbooks/aks-networking.yaml    # Network/DNS issues
+      - /etc/holmes/runbooks/aks-remediation.yaml   # ONLY when source="remediation-authorized"
+
+    # Toolsets - disable built-in kubernetes (we use AKS MCP instead)
+    toolsets:
+      kubernetes/core:
+        enabled: false
+      kubernetes/logs:
+        enabled: false
+      prometheus/metrics:
+        enabled: true
+      internet:
+        enabled: true
+
+    # MCP Servers - AKS MCP provides multi-cluster kubectl access
+    mcp_servers:
+      aks-mcp:
+        description: "Azure Kubernetes Service MCP server with multi-cluster access"
+        url: "http://aks-mcp.holmesgpt.svc.cluster.local:8000/sse"
+        llm_instructions: |
+          This MCP server provides access to multiple AKS clusters.
+
+          IMPORTANT MULTI-CLUSTER INSTRUCTIONS:
+          1. ALWAYS start by listing available contexts with kubectl config get-contexts
+          2. ALWAYS switch to the correct cluster context BEFORE running any commands
+          3. Use: kubectl config use-context <cluster-name>
+          4. Verify the context switch with: kubectl config current-context
+          5. NEVER assume you're on the correct cluster - always verify
+
+          Available operations:
+          - Cluster discovery and context switching
+          - Pod, deployment, service inspection
+          - Log retrieval and analysis
+          - Event investigation
+          - Resource usage queries
+          - Network policy analysis
