@@ -1,0 +1,150 @@
+# Grafana Alloy ConfigMap - Kubernetes Events to Azure Event Hub
+# Deploy this on the KIND cluster (or any source cluster)
+#
+# Replaces Fluent Bit for sending K8s Warning events to Event Hub where
+# the AKS management cluster receives them via Argo Events
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-events-config
+  namespace: monitoring
+  labels:
+    app: alloy-events
+data:
+  config.alloy: |
+    // =============================================================================
+    // Grafana Alloy Configuration - Kubernetes Events to Azure Event Hub
+    // =============================================================================
+    //
+    // Data flow:
+    //   K8s Events API -> loki.source.kubernetes_events -> loki.process (filter/enrich)
+    //   -> otelcol.receiver.loki (bridge) -> otelcol.exporter.kafka (Event Hub)
+    //
+    // Expected JSON output (must match Fluent Bit format for Argo Events sensor):
+    // {
+    //   "type": "Warning",
+    //   "reason": "BackOff",
+    //   "message": "...",
+    //   "involvedObject": {"kind": "Pod", "name": "...", "namespace": "..."},
+    //   "cluster": "kind-local",
+    //   "cluster_region": "local",
+    //   "cluster_environment": "dev"
+    // }
+    // =============================================================================
+
+    // -----------------------------------------------------------------------------
+    // Stage 1: Collect Kubernetes Events
+    // -----------------------------------------------------------------------------
+    // Watches namespaces specified in WATCH_NAMESPACES env var
+    // Default: dg-demo namespace only
+    loki.source.kubernetes_events "k8s_events" {
+      namespaces = ["dg-demo"]  // Updated via deploy script
+      job_name   = "kubernetes-events"
+      log_format = "json"
+
+      forward_to = [loki.process.filter_and_enrich.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Stage 2: Filter Warning Events + Enrich with Cluster Metadata
+    // -----------------------------------------------------------------------------
+    // Combined processing: filter to Warning events only, then add cluster metadata
+    loki.process "filter_and_enrich" {
+      // Drop anything that's not a Warning event
+      stage.match {
+        selector = "{type!=\"Warning\"}"
+        action   = "drop"
+      }
+
+      // Parse the JSON to extract key fields for the output
+      stage.json {
+        expressions = {
+          event_type      = "type",
+          event_reason    = "reason",
+          event_message   = "message",
+          obj_kind        = "involvedObject.kind",
+          obj_name        = "involvedObject.name",
+          obj_namespace   = "involvedObject.namespace",
+        }
+      }
+
+      // Add cluster identification as labels (will be included in output)
+      stage.static_labels {
+        values = {
+          cluster             = env("CLUSTER_NAME"),
+          cluster_region      = env("CLUSTER_REGION"),
+          cluster_environment = env("CLUSTER_ENVIRONMENT"),
+        }
+      }
+
+      forward_to = [otelcol.receiver.loki.bridge.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Stage 3: Bridge Loki Logs to OpenTelemetry
+    // -----------------------------------------------------------------------------
+    // Convert Loki log entries to OTLP format for Kafka export
+    otelcol.receiver.loki "bridge" {
+      output {
+        logs = [otelcol.processor.batch.events.input]
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Stage 4: Batch Events Before Sending
+    // -----------------------------------------------------------------------------
+    // Reduces API calls by batching events
+    otelcol.processor.batch "events" {
+      timeout             = "10s"
+      send_batch_size     = 5
+      send_batch_max_size = 10
+
+      output {
+        logs = [otelcol.exporter.kafka.eventhub.input]
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Stage 5: Export to Azure Event Hub via Kafka Protocol
+    // -----------------------------------------------------------------------------
+    // Azure Event Hub supports Kafka protocol - use SASL_SSL with connection string
+    otelcol.exporter.kafka "eventhub" {
+      protocol_version = "2.0.0"
+
+      // Event Hub endpoint with port 9093 for Kafka/SASL
+      brokers = [env("EVENTHUB_FQDN") + ":9093"]
+      topic   = env("EVENTHUB_NAME")
+
+      // Use JSON encoding for log messages
+      encoding = "json"
+
+      // SASL authentication for Azure Event Hub
+      auth {
+        sasl {
+          mechanism = "PLAIN"
+          username  = "$ConnectionString"
+          password  = env("EVENTHUB_CONNECTION_STRING")
+        }
+        tls {
+          insecure = false
+        }
+      }
+
+      // Retry configuration for reliability
+      retry_on_failure {
+        enabled          = true
+        initial_interval = "500ms"
+        max_interval     = "30s"
+        max_elapsed_time = "5m"
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Health & Debugging
+    // -----------------------------------------------------------------------------
+    // Expose Alloy's internal metrics and health endpoints
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }

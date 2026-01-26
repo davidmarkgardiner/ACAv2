@@ -1,0 +1,19 @@
+# Mattermost Webhook ConfigMap
+# Update WEBHOOK_URL after creating the incoming webhook in Mattermost
+#
+# To create a webhook:
+# 1. Port-forward: kubectl port-forward -n mattermost svc/mattermost 8065:8065
+# 2. Login to Mattermost at http://localhost:8065
+# 3. Go to: Menu > Integrations > Incoming Webhooks > Add
+# 4. Select a channel and create the webhook
+# 5. Copy the webhook URL and update this ConfigMap
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mattermost-webhook-config
+  namespace: argo-events
+data:
+  # Update this URL after creating the webhook in Mattermost
+  # Format: http://mattermost.mattermost.svc.cluster.local:8065/hooks/<HOOK_ID>
+  WEBHOOK_URL: "http://mattermost.mattermost.svc.cluster.local:8065/hooks/REPLACE_WITH_HOOK_ID"

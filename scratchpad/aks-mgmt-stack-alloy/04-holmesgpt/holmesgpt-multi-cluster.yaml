@@ -1,0 +1,578 @@
+# HolmesGPT Multi-Cluster Deployment
+#
+# CRITICAL: This deployment is designed to run on the MANAGEMENT cluster
+# and investigate REMOTE target clusters only - never the local cluster.
+#
+# How it works:
+# 1. Workflow passes cluster-name parameter
+# 2. kubectl-wrapper script switches to target cluster context
+# 3. If context doesn't exist, uses `az aks get-credentials` to fetch it
+# 4. Holmes uses kubectl commands against the TARGET cluster only
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: holmesgpt
+  labels:
+    app: holmesgpt
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: holmes
+  namespace: holmesgpt
+  labels:
+    azure.workload.identity/use: "true"
+  annotations:
+    # REQUIRED: Federated identity for az aks get-credentials
+    azure.workload.identity/client-id: "${AZURE_CLIENT_ID}"
+    azure.workload.identity/tenant-id: "${AZURE_TENANT_ID}"
+---
+# Cluster Registry ConfigMap
+# Maps cluster names to their Azure resource details for credential fetching
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-registry
+  namespace: holmesgpt
+data:
+  # Format: cluster-name: resourceGroup|subscriptionId
+  # Add all target clusters here
+  clusters.yaml: |
+    clusters:
+      # Example clusters - update with your actual cluster details
+      aks-prod-westeurope:
+        resource_group: "rg-aks-prod-westeurope"
+        subscription: "prod-subscription-id"
+        display_name: "Production West Europe"
+      aks-staging-westeurope:
+        resource_group: "rg-aks-staging-westeurope"
+        subscription: "staging-subscription-id"
+        display_name: "Staging West Europe"
+      aks-dev-westeurope:
+        resource_group: "rg-aks-dev-westeurope"
+        subscription: "dev-subscription-id"
+        display_name: "Development West Europe"
+      # kind-local is for local testing only - NEVER investigate production from kind
+      kind-local:
+        resource_group: ""
+        subscription: ""
+        display_name: "Local Kind Cluster (Testing Only)"
+        local: true
+---
+# kubectl wrapper script that enforces cluster context
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubectl-wrapper
+  namespace: holmesgpt
+data:
+  kubectl-wrapper.sh: |
+    #!/bin/bash
+    # Multi-cluster kubectl wrapper for HolmesGPT
+    #
+    # This script ensures kubectl commands run against the TARGET cluster
+    # passed via HOLMES_TARGET_CLUSTER environment variable, never the local cluster.
+    #
+    set -e
+
+    CLUSTER_NAME="${HOLMES_TARGET_CLUSTER:-}"
+    CLUSTER_REGISTRY="/etc/holmes/clusters/clusters.yaml"
+    KUBECONFIG_DIR="/home/holmes/.kube"
+    KUBECONFIG_FILE="${KUBECONFIG_DIR}/config"
+
+    # Color output for logging
+    log_info() { echo "[INFO] $*" >&2; }
+    log_warn() { echo "[WARN] $*" >&2; }
+    log_error() { echo "[ERROR] $*" >&2; }
+
+    # SAFETY CHECK: Refuse to run without a target cluster
+    if [ -z "$CLUSTER_NAME" ]; then
+      log_error "HOLMES_TARGET_CLUSTER environment variable not set!"
+      log_error "This HolmesGPT instance is configured for multi-cluster operation."
+      log_error "Every investigation MUST specify a target cluster."
+      exit 1
+    fi
+
+    # SAFETY CHECK: Never investigate the management cluster itself
+    CURRENT_CONTEXT=$(kubectl config current-context 2>/dev/null || echo "none")
+    MGMT_CLUSTER_NAME="${HOLMES_MGMT_CLUSTER:-management-cluster}"
+
+    if [ "$CLUSTER_NAME" = "$MGMT_CLUSTER_NAME" ]; then
+      log_error "Refusing to investigate the management cluster!"
+      log_error "HolmesGPT on the management cluster should only investigate remote clusters."
+      exit 1
+    fi
+
+    # Check if context exists, if not fetch credentials
+    ensure_cluster_context() {
+      local cluster="$1"
+
+      # Check if context already exists
+      if kubectl config get-contexts "$cluster" &>/dev/null; then
+        log_info "Context '$cluster' already exists"
+        return 0
+      fi
+
+      log_info "Context '$cluster' not found, fetching credentials..."
+
+      # Parse cluster registry to get resource details
+      if [ ! -f "$CLUSTER_REGISTRY" ]; then
+        log_error "Cluster registry not found at $CLUSTER_REGISTRY"
+        exit 1
+      fi
+
+      # Extract cluster details using yq or python
+      RESOURCE_GROUP=$(python3 -c "
+    import yaml
+    with open('$CLUSTER_REGISTRY') as f:
+        data = yaml.safe_load(f)
+    cluster = data.get('clusters', {}).get('$cluster', {})
+    print(cluster.get('resource_group', ''))
+    " 2>/dev/null || echo "")
+
+      SUBSCRIPTION=$(python3 -c "
+    import yaml
+    with open('$CLUSTER_REGISTRY') as f:
+        data = yaml.safe_load(f)
+    cluster = data.get('clusters', {}).get('$cluster', {})
+    print(cluster.get('subscription', ''))
+    " 2>/dev/null || echo "")
+
+      IS_LOCAL=$(python3 -c "
+    import yaml
+    with open('$CLUSTER_REGISTRY') as f:
+        data = yaml.safe_load(f)
+    cluster = data.get('clusters', {}).get('$cluster', {})
+    print(cluster.get('local', False))
+    " 2>/dev/null || echo "False")
+
+      if [ "$IS_LOCAL" = "True" ]; then
+        log_warn "Cluster '$cluster' is marked as local - skipping az aks get-credentials"
+        log_warn "For local clusters, ensure context is pre-configured"
+        return 1
+      fi
+
+      if [ -z "$RESOURCE_GROUP" ] || [ -z "$SUBSCRIPTION" ]; then
+        log_error "Cluster '$cluster' not found in registry or missing resource_group/subscription"
+        log_error "Add cluster to /etc/holmes/clusters/clusters.yaml ConfigMap"
+        exit 1
+      fi
+
+      log_info "Fetching credentials for cluster '$cluster'"
+      log_info "  Resource Group: $RESOURCE_GROUP"
+      log_info "  Subscription: $SUBSCRIPTION"
+
+      # Use az aks get-credentials with Workload Identity
+      az aks get-credentials \
+        --resource-group "$RESOURCE_GROUP" \
+        --name "$cluster" \
+        --subscription "$SUBSCRIPTION" \
+        --overwrite-existing \
+        --file "$KUBECONFIG_FILE" \
+        2>&1 || {
+          log_error "Failed to get credentials for cluster '$cluster'"
+          exit 1
+        }
+
+      log_info "Successfully fetched credentials for '$cluster'"
+    }
+
+    # Ensure kubeconfig directory exists
+    mkdir -p "$KUBECONFIG_DIR"
+
+    # Export KUBECONFIG for all kubectl commands
+    export KUBECONFIG="$KUBECONFIG_FILE"
+
+    # Ensure we have the context for the target cluster
+    ensure_cluster_context "$CLUSTER_NAME"
+
+    # Switch to target cluster context
+    log_info "Switching to cluster context: $CLUSTER_NAME"
+    kubectl config use-context "$CLUSTER_NAME" 2>&1 || {
+      log_error "Failed to switch to context '$CLUSTER_NAME'"
+      exit 1
+    }
+
+    # Verify we're on the correct cluster (double-check)
+    ACTIVE_CONTEXT=$(kubectl config current-context)
+    if [ "$ACTIVE_CONTEXT" != "$CLUSTER_NAME" ]; then
+      log_error "Context mismatch! Expected '$CLUSTER_NAME', got '$ACTIVE_CONTEXT'"
+      exit 1
+    fi
+
+    log_info "Executing kubectl command against cluster: $CLUSTER_NAME"
+
+    # Execute the actual kubectl command
+    exec kubectl "$@"
+
+  # Helper script to validate cluster before investigation
+  validate-cluster.sh: |
+    #!/bin/bash
+    # Validates that a cluster is reachable before starting investigation
+    set -e
+
+    CLUSTER_NAME="${1:-$HOLMES_TARGET_CLUSTER}"
+
+    if [ -z "$CLUSTER_NAME" ]; then
+      echo "Usage: validate-cluster.sh <cluster-name>"
+      exit 1
+    fi
+
+    # Source the wrapper to set up context
+    export HOLMES_TARGET_CLUSTER="$CLUSTER_NAME"
+    source /etc/holmes/scripts/kubectl-wrapper.sh
+
+    # Test connectivity
+    echo "Testing connectivity to cluster: $CLUSTER_NAME"
+    if kubectl cluster-info &>/dev/null; then
+      echo "Cluster '$CLUSTER_NAME' is reachable"
+      kubectl get nodes --no-headers 2>/dev/null | head -3
+      exit 0
+    else
+      echo "ERROR: Cannot reach cluster '$CLUSTER_NAME'"
+      exit 1
+    fi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: holmes-cluster-role
+rules:
+  # Minimal permissions on management cluster (for Holmes to function)
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list]
+  # Note: All investigation permissions are used on TARGET clusters via kubeconfig
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: holmes-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: holmes-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: holmes
+    namespace: holmesgpt
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-toolsets
+  namespace: holmesgpt
+data:
+  custom_toolset.yaml: |
+    # Multi-cluster toolset configuration
+    # IMPORTANT: Built-in kubernetes toolsets are DISABLED
+    # All kubectl operations go through the cluster-aware wrapper
+    toolsets:
+      kubernetes/core:
+        enabled: false  # DISABLED - use wrapper instead
+      kubernetes/logs:
+        enabled: false  # DISABLED - use wrapper instead
+      robusta:
+        enabled: false
+      internet:
+        enabled: true   # Keep for documentation lookups
+      prometheus/metrics:
+        enabled: false
+  model_list.yaml: |
+    {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-config
+  namespace: holmesgpt
+data:
+  config.yaml: |
+    max_steps: 10
+---
+# Multi-cluster aware runbooks
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holmes-runbooks
+  namespace: holmesgpt
+data:
+  multi-cluster-troubleshooting.yaml: |
+    runbooks:
+      - match:
+          issue_name: ".*"
+        instructions: >
+          IMPORTANT: You are investigating a REMOTE cluster, not the local cluster.
+          The target cluster name is provided in the investigation context.
+
+          Always verify you're investigating the correct cluster by checking
+          the 'cluster' field in the subject/context of the investigation request.
+
+          Standard investigation steps:
+          1. Check pod status: kubectl get pods -n <namespace>
+          2. Get pod details: kubectl describe pod <pod> -n <namespace>
+          3. Check logs: kubectl logs <pod> -n <namespace> --tail=200
+          4. Check events: kubectl get events -n <namespace> --sort-by='.lastTimestamp'
+
+  aks-troubleshooting.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(AKS)|(Azure.*Kubernetes)|(node.*not.*ready)"
+        instructions: >
+          Diagnose AKS issues on the TARGET cluster.
+          1. Check node status: kubectl get nodes -o wide
+          2. Check node conditions: kubectl describe nodes
+          3. Review system pods: kubectl get pods -n kube-system
+          4. Check for node pressure: kubectl describe nodes | grep -A5 Conditions
+
+  oom-troubleshooting.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(OOM)|(OutOfMemory)|(memory.*limit)"
+        instructions: >
+          Diagnose OOMKilled issues on the TARGET cluster.
+          1. Check current resource usage: kubectl top pods -n <namespace>
+          2. Review pod resource limits: kubectl describe pod <pod> -n <namespace>
+          3. Check for memory leaks in container logs
+          4. Recommend increasing memory limits if appropriate
+
+  crashloop-troubleshooting.yaml: |
+    runbooks:
+      - match:
+          issue_name: "(CrashLoopBackOff)|(crash.*loop)|(restart)"
+        instructions: >
+          Diagnose CrashLoopBackOff on the TARGET cluster.
+          1. Check pod status and restart count: kubectl get pod <pod> -n <namespace>
+          2. Get previous container logs: kubectl logs <pod> -n <namespace> --previous
+          3. Check current logs: kubectl logs <pod> -n <namespace> --tail=200
+          4. Describe pod for events: kubectl describe pod <pod> -n <namespace>
+          5. Check if image pull issues: look for ImagePullBackOff events
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: holmes
+  namespace: holmesgpt
+  labels:
+    app: holmes
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: holmes
+  template:
+    metadata:
+      labels:
+        app: holmes
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: holmes
+
+      # Init container to set up kubeconfig directory
+      initContainers:
+        - name: setup-kubeconfig
+          image: mcr.microsoft.com/azure-cli:2.64.0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Setting up kubeconfig directory..."
+              mkdir -p /home/holmes/.kube
+              touch /home/holmes/.kube/config
+              chmod 600 /home/holmes/.kube/config
+              echo "Kubeconfig directory ready"
+
+              # Optionally pre-fetch credentials for commonly used clusters
+              # This speeds up first investigation to each cluster
+              if [ -f /etc/holmes/clusters/clusters.yaml ]; then
+                echo "Cluster registry found, pre-fetching credentials..."
+                # Parse and fetch credentials for non-local clusters
+                python3 << 'EOF'
+              import yaml
+              import subprocess
+              import os
+
+              with open('/etc/holmes/clusters/clusters.yaml') as f:
+                  data = yaml.safe_load(f)
+
+              clusters = data.get('clusters', {})
+              for name, details in clusters.items():
+                  if details.get('local', False):
+                      print(f"Skipping local cluster: {name}")
+                      continue
+
+                  rg = details.get('resource_group')
+                  sub = details.get('subscription')
+
+                  if not rg or not sub:
+                      print(f"Skipping {name}: missing resource_group or subscription")
+                      continue
+
+                  print(f"Fetching credentials for: {name}")
+                  try:
+                      result = subprocess.run([
+                          'az', 'aks', 'get-credentials',
+                          '--resource-group', rg,
+                          '--name', name,
+                          '--subscription', sub,
+                          '--overwrite-existing',
+                          '--file', '/home/holmes/.kube/config'
+                      ], capture_output=True, text=True, timeout=60)
+
+                      if result.returncode == 0:
+                          print(f"  Success: {name}")
+                      else:
+                          print(f"  Warning: Failed to fetch {name}: {result.stderr}")
+                  except Exception as e:
+                      print(f"  Error fetching {name}: {e}")
+              EOF
+              fi
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /home/holmes/.kube
+            - name: cluster-registry
+              mountPath: /etc/holmes/clusters
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      containers:
+        - name: holmes
+          # Use custom image with Azure CLI, or mount azure-cli as sidecar
+          image: robustadev/holmes:0.18.2
+          imagePullPolicy: Always
+          command: ["python3", "-u", "server.py"]
+          ports:
+            - containerPort: 5050
+              name: http
+          livenessProbe:
+            tcpSocket:
+              port: 5050
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: 5050
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: ENABLE_TELEMETRY
+              value: "false"
+            # ANTHROPIC CLAUDE CONFIGURATION
+            - name: MODEL
+              value: "claude-sonnet-4-20250514"
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: holmes-secrets
+                  key: ANTHROPIC_API_KEY
+            # Multi-cluster configuration
+            - name: KUBECONFIG
+              value: "/home/holmes/.kube/config"
+            # Safety: Name of management cluster to prevent self-investigation
+            - name: HOLMES_MGMT_CLUSTER
+              value: "aks-mgmt-cluster"
+            # Target cluster will be set per-request via investigation API
+            # HOLMES_TARGET_CLUSTER is set dynamically
+          lifecycle:
+            preStop:
+              exec:
+                command: ["bash", "-c", "kill -SIGINT 1"]
+          volumeMounts:
+            - name: custom-toolsets
+              mountPath: /etc/holmes/config
+            - name: runbooks
+              mountPath: /etc/holmes/runbooks
+            - name: config
+              mountPath: /root/.holmes
+            - name: kubeconfig
+              mountPath: /home/holmes/.kube
+            - name: kubectl-wrapper
+              mountPath: /etc/holmes/scripts
+            - name: cluster-registry
+              mountPath: /etc/holmes/clusters
+          resources:
+            requests:
+              cpu: 100m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+
+        # Sidecar for Azure CLI operations (credential refresh)
+        - name: azure-cli-sidecar
+          image: mcr.microsoft.com/azure-cli:2.64.0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Azure CLI sidecar started"
+              echo "This sidecar handles credential refresh for multi-cluster access"
+              # Keep container running
+              while true; do
+                sleep 3600
+                echo "Azure CLI sidecar heartbeat"
+              done
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /home/holmes/.kube
+            - name: cluster-registry
+              mountPath: /etc/holmes/clusters
+            - name: kubectl-wrapper
+              mountPath: /etc/holmes/scripts
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 256Mi
+
+      volumes:
+        - name: custom-toolsets
+          configMap:
+            name: holmes-toolsets
+            optional: true
+        - name: runbooks
+          configMap:
+            name: holmes-runbooks
+            optional: true
+        - name: config
+          configMap:
+            name: holmes-config
+            optional: true
+        - name: kubeconfig
+          emptyDir: {}
+        - name: kubectl-wrapper
+          configMap:
+            name: kubectl-wrapper
+            defaultMode: 0755
+        - name: cluster-registry
+          configMap:
+            name: cluster-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: holmesgpt
+  namespace: holmesgpt
+  labels:
+    app: holmes
+spec:
+  selector:
+    app: holmes
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 5050

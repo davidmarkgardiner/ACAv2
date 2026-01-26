@@ -1,0 +1,124 @@
+apiVersion: collectors.grafana.com/v1alpha1
+kind: Alloy
+metadata:
+  name: k8s-events-eventhub
+  namespace: monitoring
+spec:
+  controller:
+    type: deployment
+    replicas: 1
+
+  alloy:
+    stabilityLevel: "public-preview"
+
+    # Reference secrets for Event Hub connection string
+    envFrom:
+      - secretRef:
+          name: eventhub-credentials
+
+    configMap:
+      create: true
+      content: |
+        //
+        // Kubernetes Events -> Azure Event Hub
+        // Namespace: dg-demo | Severity: Warning | Rate: 5/min
+        //
+
+        // Collect Warning events from dg-demo namespace
+        loki.source.kubernetes_events "events" {
+          namespaces = ["dg-demo"]
+          job_name   = "k8s-events-dg-demo"
+          forward_to = [loki.process.filter_and_limit.receiver]
+        }
+
+        // Filter to Warning only + rate limit
+        loki.process "filter_and_limit" {
+          // Drop anything that's not a Warning
+          stage.match {
+            selector = "{type!=\"Warning\"}"
+            action   = "drop"
+          }
+
+          // Structure the log line as JSON for Event Hub consumers
+          stage.json {
+            expressions = {
+              uid         = "metadata.uid",
+              name        = "metadata.name",
+              namespace   = "metadata.namespace",
+              reason      = "reason",
+              message     = "message",
+              count       = "count",
+              kind        = "involvedObject.kind",
+              object_name = "involvedObject.name",
+              first_time  = "firstTimestamp",
+              last_time   = "lastTimestamp",
+            }
+          }
+
+          // Rate limit: 5 events/minute with burst of 5
+          stage.limit {
+            rate  = 5
+            burst = 5
+          }
+
+          forward_to = [otelcol.receiver.loki.bridge.receiver]
+        }
+
+        // Bridge from Loki format to OTEL format for Kafka export
+        otelcol.receiver.loki "bridge" {
+          output {
+            logs = [otelcol.processor.batch.events.input]
+          }
+        }
+
+        // Batch events before sending (reduces API calls)
+        otelcol.processor.batch "events" {
+          timeout             = "10s"
+          send_batch_size     = 5
+          send_batch_max_size = 10
+
+          output {
+            logs = [otelcol.exporter.kafka.eventhub.input]
+          }
+        }
+
+        // Export to Azure Event Hub (Kafka-compatible)
+        otelcol.exporter.kafka "eventhub" {
+          protocol_version = "2.0.0"
+
+          // Event Hub namespace endpoint
+          brokers = [env("EVENTHUB_NAMESPACE") + ".servicebus.windows.net:9093"]
+          topic   = env("EVENTHUB_NAME")
+
+          encoding = "json"
+
+          auth {
+            sasl {
+              mechanism = "PLAIN"
+              username  = "$ConnectionString"
+              password  = env("EVENTHUB_CONNECTION_STRING")
+            }
+            tls {
+              insecure = false
+            }
+          }
+
+          retry_on_failure {
+            enabled          = true
+            initial_interval = "5s"
+            max_interval     = "30s"
+            max_elapsed_time = "5m"
+          }
+        }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: eventhub-credentials
+  namespace: monitoring
+type: Opaque
+stringData:
+  # Replace these with your actual Azure Event Hub values
+  EVENTHUB_NAMESPACE: "your-eventhub-namespace"
+  EVENTHUB_NAME: "k8s-warning-events"
+  EVENTHUB_CONNECTION_STRING: "Endpoint=sb://your-namespace.servicebus.windows.net/;SharedAccessKeyName=send;SharedAccessKey=YOUR_KEY;EntityPath=k8s-warning-events"

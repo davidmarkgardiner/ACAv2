@@ -1,0 +1,160 @@
+---
+# Workflow Template - K8s Event Triage with AI + Telegram
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-event-triage
+  namespace: argo-events
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  arguments:
+    parameters:
+      - name: cluster
+      - name: environment
+      - name: event-type
+      - name: event-reason
+      - name: event-message
+      - name: object-kind
+      - name: object-name
+      - name: object-namespace
+      - name: event-time
+      - name: event-count
+        default: "1"
+  templates:
+    - name: triage-pipeline
+      steps:
+        # Step 1: Filter and classify event severity
+        - - name: classify-event
+            template: classify-severity
+            arguments:
+              parameters:
+                - name: event-reason
+                  value: "{{workflow.parameters.event-reason}}"
+                - name: event-type
+                  value: "{{workflow.parameters.event-type}}"
+        
+        # Step 2: Send alert (conditional based on severity)
+        - - name: send-alert
+            template: telegram-alert
+            when: "{{steps.classify-event.outputs.parameters.should-alert}} == true"
+            arguments:
+              parameters:
+                - name: severity
+                  value: "{{steps.classify-event.outputs.parameters.severity}}"
+
+    - name: classify-severity
+      inputs:
+        parameters:
+          - name: event-reason
+          - name: event-type
+      outputs:
+        parameters:
+          - name: severity
+            valueFrom:
+              path: /tmp/severity.txt
+          - name: should-alert
+            valueFrom:
+              path: /tmp/should-alert.txt
+      script:
+        image: python:3.11-alpine
+        command: [python]
+        source: |
+          import json
+          
+          reason = "{{inputs.parameters.event-reason}}"
+          event_type = "{{inputs.parameters.event-type}}"
+          
+          # Severity classification
+          critical_reasons = ["OOMKilled", "CrashLoopBackOff", "FailedScheduling", "NodeNotReady"]
+          high_reasons = ["BackOff", "Failed", "Unhealthy", "FailedMount", "FailedAttachVolume"]
+          medium_reasons = ["Killing", "Evicted", "FailedCreate"]
+          
+          if reason in critical_reasons:
+              severity = "critical"
+              should_alert = "true"
+          elif reason in high_reasons:
+              severity = "high"
+              should_alert = "true"
+          elif reason in medium_reasons:
+              severity = "medium"
+              should_alert = "true"
+          elif event_type == "Warning":
+              severity = "low"
+              should_alert = "true"  # Alert all warnings, filter in Telegram if needed
+          else:
+              severity = "info"
+              should_alert = "false"
+          
+          with open("/tmp/severity.txt", "w") as f:
+              f.write(severity)
+          with open("/tmp/should-alert.txt", "w") as f:
+              f.write(should_alert)
+          
+          print(f"Event classified: severity={severity}, alert={should_alert}")
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    - name: telegram-alert
+      inputs:
+        parameters:
+          - name: severity
+      container:
+        image: curlimages/curl:8.5.0
+        command: [sh, -c]
+        args:
+          - |
+            # Severity emoji mapping
+            case "{{inputs.parameters.severity}}" in
+              critical) EMOJI="🔴" ;;
+              high)     EMOJI="🟠" ;;
+              medium)   EMOJI="🟡" ;;
+              *)        EMOJI="⚪" ;;
+            esac
+            
+            MESSAGE="${EMOJI} *K8s Event - {{workflow.parameters.cluster}}*
+            
+            *Severity:* {{inputs.parameters.severity}}
+            *Environment:* {{workflow.parameters.environment}}
+            *Type:* {{workflow.parameters.event-type}}
+            *Reason:* {{workflow.parameters.event-reason}}
+            
+            *Object:* {{workflow.parameters.object-kind}}/{{workflow.parameters.object-name}}
+            *Namespace:* {{workflow.parameters.object-namespace}}
+            *Count:* {{workflow.parameters.event-count}}
+            *Time:* {{workflow.parameters.event-time}}
+            
+            *Message:*
+            {{workflow.parameters.event-message}}"
+            
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"chat_id\": \"${CHAT_ID}\",
+                \"text\": \"${MESSAGE}\",
+                \"parse_mode\": \"Markdown\",
+                \"disable_web_page_preview\": true
+              }"
+        env:
+          - name: BOT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: telegram-credentials
+                key: bot-token
+          - name: CHAT_ID
+            valueFrom:
+              secretKeyRef:
+                name: telegram-credentials
+                key: chat-id
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

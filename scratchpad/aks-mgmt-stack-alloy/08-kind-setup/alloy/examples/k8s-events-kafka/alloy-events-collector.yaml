@@ -1,0 +1,166 @@
+apiVersion: collectors.grafana.com/v1alpha1
+kind: Alloy
+metadata:
+  name: k8s-events-collector
+  namespace: monitoring  # Deploy in your monitoring namespace
+spec:
+  controller:
+    type: deployment  # Single instance is fine for event collection
+    replicas: 1
+
+  alloy:
+    stabilityLevel: "public-preview"  # Required for loki.source.kubernetes_events
+
+    configMap:
+      create: true
+      content: |
+        //
+        // Kubernetes Events Collector for DG Demo Namespace
+        // - Filters: Warning events only from 'dg-demo' namespace
+        // - Deduplication: Tracks events by UID to prevent duplicates
+        // - Rate Limiting: Max 5 events per minute
+        //
+
+        // ============================================================
+        // STEP 1: Collect Kubernetes Events
+        // ============================================================
+        loki.source.kubernetes_events "warning_events" {
+          // Only watch events from the target namespace
+          namespaces = ["dg-demo"]
+
+          // Job label for identification
+          job_name = "kubernetes-events"
+
+          // Forward to the deduplication/processing stage
+          forward_to = [loki.process.dedupe_and_filter.receiver]
+        }
+
+        // ============================================================
+        // STEP 2: Filter, Deduplicate, and Rate Limit
+        // ============================================================
+        loki.process "dedupe_and_filter" {
+          // Filter to only Warning events (drop Normal events)
+          stage.match {
+            selector = "{type!=\"Warning\"}"
+            action   = "drop"
+          }
+
+          // Add useful labels for downstream processing
+          stage.labels {
+            values = {
+              event_type   = "type",
+              event_reason = "reason",
+              involved_kind = "involvedObject_kind",
+              involved_name = "involvedObject_name",
+            }
+          }
+
+          // Extract event UID for deduplication tracking
+          stage.json {
+            expressions = {
+              event_uid = "metadata.uid",
+              event_count = "count",
+              first_timestamp = "firstTimestamp",
+              last_timestamp = "lastTimestamp",
+            }
+          }
+
+          // Rate limit: burst of 5, refill 5 per minute (0.083/sec)
+          // This prevents event storms from overwhelming downstream systems
+          stage.limit {
+            rate  = 5        // events per minute
+            burst = 5        // max burst size
+            by_label_name = "event_uid"  // dedupe by unique event ID
+          }
+
+          // Add a label to track that this passed rate limiting
+          stage.static_labels {
+            values = {
+              collector = "alloy-k8s-events",
+              severity  = "warning",
+            }
+          }
+
+          forward_to = [loki.write.kafka_or_http.receiver]
+        }
+
+        // ============================================================
+        // STEP 3: Output to Kafka / Event Hub
+        // ============================================================
+        // Option A: Send to Kafka (uncomment and configure)
+        /*
+        otelcol.receiver.loki "from_loki" {
+          output {
+            logs = [otelcol.exporter.kafka.events.input]
+          }
+        }
+
+        otelcol.exporter.kafka "events" {
+          protocol_version = "2.0.0"
+          brokers          = ["kafka-broker-1:9092", "kafka-broker-2:9092"]
+          topic            = "k8s-warning-events"
+          encoding         = "json"
+
+          // For Azure Event Hub, use:
+          // brokers = ["<namespace>.servicebus.windows.net:9093"]
+          // authentication {
+          //   sasl {
+          //     mechanism = "PLAIN"
+          //     username  = "$ConnectionString"
+          //     password  = "<your-connection-string>"
+          //   }
+          //   tls {
+          //     insecure = false
+          //   }
+          // }
+        }
+        */
+
+        // Option B: Send to HTTP endpoint (webhook) - ACTIVE
+        // Replace with your actual endpoint
+        loki.write "kafka_or_http" {
+          endpoint {
+            // Placeholder - replace with your actual endpoint
+            // For testing, you can use a service like webhook.site
+            url = "http://your-event-receiver:8080/api/events"
+
+            // Optional: Add authentication headers
+            // headers = {
+            //   "Authorization" = "Bearer <token>",
+            //   "X-Source"      = "k8s-events-collector",
+            // }
+          }
+
+          // Batching settings to control throughput
+          external_labels = {
+            cluster   = "your-cluster-name",
+            namespace = "dg-demo",
+          }
+        }
+
+        // ============================================================
+        // OPTIONAL: Send to Loki for querying/alerting
+        // ============================================================
+        /*
+        loki.write "loki" {
+          endpoint {
+            url = "http://loki:3100/loki/api/v1/push"
+          }
+        }
+        */
+
+        // ============================================================
+        // OPTIONAL: Prometheus metrics export for monitoring the collector
+        // ============================================================
+        prometheus.exporter.self "alloy_metrics" {}
+
+        prometheus.scrape "self" {
+          targets    = prometheus.exporter.self.alloy_metrics.targets
+          forward_to = [prometheus.remote_write.monitoring.receiver]
+        }
+
+        prometheus.remote_write "monitoring" {
+          endpoint {
+            url = "http://prometheus:9090/api/v1/write"
+          }
+        }

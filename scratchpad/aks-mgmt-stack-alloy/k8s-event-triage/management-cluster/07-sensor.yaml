@@ -1,0 +1,135 @@
+---
+# Sensor - Route Event Hub events to triage workflow
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: k8s-event-triage
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  dependencies:
+    - name: k8s-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-events
+      # Filter: Only Warning events
+      filters:
+        data:
+          - path: body.type
+            type: string
+            value:
+              - "Warning"
+        # Optional: Filter specific namespaces
+        # - path: body.involvedObject.namespace
+        #   type: string
+        #   value:
+        #     - "production"
+        #     - "staging"
+  triggers:
+    - template:
+        name: triage-workflow
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: k8s-triage-
+                namespace: argo-events
+                labels:
+                  app.kubernetes.io/part-of: k8s-event-triage
+              spec:
+                workflowTemplateRef:
+                  name: k8s-event-triage
+                arguments:
+                  parameters:
+                    - name: cluster
+                    - name: environment
+                    - name: event-type
+                    - name: event-reason
+                    - name: event-message
+                    - name: object-kind
+                    - name: object-name
+                    - name: object-namespace
+                    - name: event-time
+                    - name: event-count
+          parameters:
+            # Map Event Hub message fields to workflow parameters
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.cluster
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.environment
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.type
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.reason
+              dest: spec.arguments.parameters.3.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.message
+              dest: spec.arguments.parameters.4.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.involvedObject.kind
+              dest: spec.arguments.parameters.5.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.involvedObject.name
+              dest: spec.arguments.parameters.6.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.involvedObject.namespace
+              dest: spec.arguments.parameters.7.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.lastTimestamp
+              dest: spec.arguments.parameters.8.value
+            - src:
+                dependencyName: k8s-event
+                dataKey: body.count
+              dest: spec.arguments.parameters.9.value
+              # Default if count not present
+      retryStrategy:
+        steps: 3
+        duration: 10s
+---
+# RBAC for Sensor to create workflows
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows", "workflowtemplates"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: sensor-workflow-creator
+  apiGroup: rbac.authorization.k8s.io

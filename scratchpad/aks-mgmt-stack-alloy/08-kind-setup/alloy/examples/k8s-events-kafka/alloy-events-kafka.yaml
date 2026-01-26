@@ -1,0 +1,111 @@
+apiVersion: collectors.grafana.com/v1alpha1
+kind: Alloy
+metadata:
+  name: k8s-events-kafka
+  namespace: monitoring
+spec:
+  controller:
+    type: deployment
+    replicas: 1
+
+  alloy:
+    stabilityLevel: "public-preview"
+
+    configMap:
+      create: true
+      content: |
+        //
+        // Kubernetes Events -> Kafka
+        // Namespace: dg-demo | Severity: Warning | Rate: 5/min
+        //
+
+        // Collect Warning events from dg-demo namespace
+        loki.source.kubernetes_events "events" {
+          namespaces = ["dg-demo"]
+          job_name   = "k8s-events-dg-demo"
+          forward_to = [loki.process.filter_and_limit.receiver]
+        }
+
+        // Filter to Warning only + rate limit
+        loki.process "filter_and_limit" {
+          // Drop anything that's not a Warning
+          stage.match {
+            selector = "{type!=\"Warning\"}"
+            action   = "drop"
+          }
+
+          // Parse and enrich event data
+          stage.json {
+            expressions = {
+              uid         = "metadata.uid",
+              name        = "metadata.name",
+              namespace   = "metadata.namespace",
+              reason      = "reason",
+              message     = "message",
+              count       = "count",
+              kind        = "involvedObject.kind",
+              object_name = "involvedObject.name",
+              first_time  = "firstTimestamp",
+              last_time   = "lastTimestamp",
+            }
+          }
+
+          // Deduplication: use event UID to track unique events
+          // Events with same UID within the time window are deduplicated
+          stage.label_keep {
+            values = ["uid", "namespace", "kind", "object_name", "reason"]
+          }
+
+          // Rate limit: 5 events/minute, burst of 5
+          stage.limit {
+            rate  = 5
+            burst = 5
+          }
+
+          forward_to = [otelcol.receiver.loki.bridge.receiver]
+        }
+
+        // Convert Loki logs to OTEL logs for Kafka export
+        otelcol.receiver.loki "bridge" {
+          output {
+            logs = [otelcol.processor.batch.events.input]
+          }
+        }
+
+        // Batch before sending
+        otelcol.processor.batch "events" {
+          timeout             = "10s"
+          send_batch_size     = 5
+          send_batch_max_size = 10
+
+          output {
+            logs = [otelcol.exporter.kafka.main.input]
+          }
+        }
+
+        // Export to Kafka
+        otelcol.exporter.kafka "main" {
+          protocol_version = "2.0.0"
+
+          // Your Kafka broker addresses
+          brokers = ["kafka-bootstrap.kafka:9092"]
+          topic   = "k8s-warning-events"
+
+          encoding = "json"
+
+          // Optional: SASL authentication
+          // auth {
+          //   sasl {
+          //     mechanism = "SCRAM-SHA-512"
+          //     username  = "kafka-user"
+          //     password  = "kafka-password"
+          //   }
+          // }
+
+          retry_on_failure {
+            enabled          = true
+            initial_interval = "5s"
+            max_interval     = "30s"
+            max_elapsed_time = "5m"
+          }
+        }

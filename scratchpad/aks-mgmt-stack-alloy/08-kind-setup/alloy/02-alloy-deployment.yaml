@@ -1,0 +1,181 @@
+# Grafana Alloy Deployment for Kind Cluster
+# Sends Kubernetes Warning events to Azure Event Hub
+#
+# Prerequisites:
+# 1. Create monitoring namespace
+# 2. Create eventhub-sas-secret with connectionString
+# 3. Update CLUSTER_NAME to identify this cluster
+#
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy-events
+  namespace: monitoring
+  labels:
+    app: alloy-events
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy-events
+  labels:
+    app: alloy-events
+rules:
+  # Required for loki.source.kubernetes_events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Required for namespace filtering and metadata
+  - apiGroups: [""]
+    resources: ["namespaces", "pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy-events
+  labels:
+    app: alloy-events
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy-events
+subjects:
+  - kind: ServiceAccount
+    name: alloy-events
+    namespace: monitoring
+
+---
+# ConfigMap with Event Hub connection details - UPDATE THESE VALUES
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-eventhub-config
+  namespace: monitoring
+  labels:
+    app: alloy-events
+data:
+  # Event Hub namespace (without .servicebus.windows.net)
+  EVENTHUB_NAMESPACE: "k8s-events-hub-4808"
+  # Event Hub (topic) name - use kube-events-alloy for testing, kube-events for production
+  EVENTHUB_NAME: "kube-events"
+  # Fully qualified domain name
+  EVENTHUB_FQDN: "k8s-events-hub-4808.servicebus.windows.net"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy-events
+  namespace: monitoring
+  labels:
+    app: alloy-events
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alloy-events
+  template:
+    metadata:
+      labels:
+        app: alloy-events
+      annotations:
+        # Restart on config changes
+        checksum/config: "{{ .Values.config | sha256sum }}"
+    spec:
+      serviceAccountName: alloy-events
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.5.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --server.http.listen-addr=0.0.0.0:12345
+            - --storage.path=/var/lib/alloy/data
+          ports:
+            - name: http
+              containerPort: 12345
+              protocol: TCP
+          env:
+            # Cluster identification - UPDATE THESE FOR EACH CLUSTER
+            - name: CLUSTER_NAME
+              value: "kind-local"  # UPDATE: Set your cluster identifier
+            - name: CLUSTER_REGION
+              value: "local"
+            - name: CLUSTER_ENVIRONMENT
+              value: "dev"
+            # Namespace filtering - comma-separated list
+            - name: WATCH_NAMESPACES
+              value: "dg-demo"
+            # Event Hub Config
+            - name: EVENTHUB_FQDN
+              valueFrom:
+                configMapKeyRef:
+                  name: alloy-eventhub-config
+                  key: EVENTHUB_FQDN
+            - name: EVENTHUB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: alloy-eventhub-config
+                  key: EVENTHUB_NAME
+            # Event Hub SAS connection string (from secret)
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: eventhub-sas-secret
+                  key: connectionString
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+            - name: data
+              mountPath: /var/lib/alloy/data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 12345
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 12345
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-events-config
+        - name: data
+          emptyDir: {}
+
+---
+# Service for accessing Alloy UI and metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy-events
+  namespace: monitoring
+  labels:
+    app: alloy-events
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 12345
+      targetPort: 12345
+      protocol: TCP
+  selector:
+    app: alloy-events

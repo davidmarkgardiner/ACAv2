@@ -1,0 +1,48 @@
+# Argo Events EventSource for Azure Event Hub - AKS Management Stack
+# Receives Kubernetes events from remote clusters via Fluent Bit
+#
+# Prerequisites:
+# 1. Create the eventhub-listener-secret in argo-events namespace
+# 2. Configure Event Hub namespace and hub name below
+#
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+  labels:
+    app: k8s-event-consumer
+    sender: fluent-bit
+    environment: production
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+  azureEventsHub:
+    k8s-warnings:
+      # Event Hub FQDN
+      # Format: <namespace>.servicebus.windows.net
+      fqdn: "k8s-events-hub-4808.servicebus.windows.net"
+
+      # Event Hub name (topic)
+      hubName: "kube-events"
+
+      # Consumer group
+      consumerGroup: "argo-events"
+
+      # Shared Access Key authentication
+      sharedAccessKeyName:
+        name: eventhub-listener-secret
+        key: sharedAccessKeyName
+      sharedAccessKey:
+        name: eventhub-listener-secret
+        key: sharedAccessKey

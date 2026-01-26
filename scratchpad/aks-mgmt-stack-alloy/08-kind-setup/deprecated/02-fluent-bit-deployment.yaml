@@ -1,0 +1,139 @@
+# Fluent Bit Deployment for Kind Cluster
+# Sends Kubernetes Warning events to Azure Event Hub
+#
+# Prerequisites:
+# 1. Create monitoring namespace
+# 2. Create eventhub-sas-secret with connectionString
+# 3. Update CLUSTER_NAME to identify this cluster
+#
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-events
+  labels:
+    app: fluent-bit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-events
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit-events
+    namespace: monitoring
+
+---
+# ConfigMap with Event Hub details - UPDATE THESE VALUES
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eventhub-config
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+data:
+  EVENTHUB_NAMESPACE: "k8s-events-hub-4808"
+  # Event Hub (topic) name
+  EVENTHUB_NAME: "kube-events"
+  EVENTHUB_FQDN: "k8s-events-hub-4808.servicebus.windows.net"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit-events
+  namespace: monitoring
+  labels:
+    app: fluent-bit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit-events
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3.2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2020
+          env:
+            # Cluster identification - UPDATE THESE FOR EACH CLUSTER
+            - name: CLUSTER_NAME
+              value: "kind-local"  # UPDATE: Set your cluster identifier
+            - name: CLUSTER_REGION
+              value: "local"
+            - name: CLUSTER_ENVIRONMENT
+              value: "dev"
+            # Event Hub Config
+            - name: EVENTHUB_FQDN
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_FQDN
+            - name: EVENTHUB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: eventhub-config
+                  key: EVENTHUB_NAME
+            # Event Hub SAS connection string
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: eventhub-sas-secret
+                  key: connectionString
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-config
