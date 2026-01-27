@@ -1,0 +1,38 @@
+# Demo 4: Stuck/Failed Job
+# This job fails immediately and stays in Failed state
+# Expected: HolmesGPT detects and runs `kubectl delete job` to clean up
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: failed-job-demo
+  namespace: demo-autohealer
+  labels:
+    app: failed-job-demo
+    demo: failed-job
+spec:
+  backoffLimit: 1  # Fail fast after 1 retry
+  ttlSecondsAfterFinished: 3600  # Keep around for demo (1 hour)
+  template:
+    metadata:
+      labels:
+        app: failed-job-demo
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: job-failer
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Job starting..."
+              echo "Simulating job failure..."
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

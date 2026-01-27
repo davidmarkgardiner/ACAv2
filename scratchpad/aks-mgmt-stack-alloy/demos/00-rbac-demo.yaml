@@ -1,0 +1,41 @@
+# RBAC: Allow argo-events-sa to manage resources in demo-autohealer namespace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: demo-autohealer-manager
+  namespace: demo-autohealer
+rules:
+  # Pod operations (delete for restart, get/list for inspection)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  # Deployment operations (rollout restart)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["patch"]
+  # Job operations (delete failed jobs)
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "delete"]
+  # Events (read only, for watching)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-autohealer-manager
+  namespace: demo-autohealer
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: demo-autohealer-manager
+  apiGroup: rbac.authorization.k8s.io

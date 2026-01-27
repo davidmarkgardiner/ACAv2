@@ -1,0 +1,61 @@
+# Demo 5: Deployment Unhealthy (Readiness Probe Failure)
+# This deployment has a readiness probe that fails after initial success
+# Expected: HolmesGPT detects Unhealthy event and runs `kubectl rollout restart deployment`
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unhealthy-demo
+  namespace: demo-autohealer
+  labels:
+    app: unhealthy-demo
+    demo: unhealthy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unhealthy-demo
+  template:
+    metadata:
+      labels:
+        app: unhealthy-demo
+    spec:
+      containers:
+        - name: unhealthy-app
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # Create health file initially
+              touch /tmp/healthy
+              echo "App started, healthy..."
+              # After 30 seconds, become unhealthy
+              sleep 30
+              echo "Simulating health degradation..."
+              rm -f /tmp/healthy
+              # Keep running so probe keeps failing
+              sleep 3600
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /tmp/healthy
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - cat
+                - /tmp/healthy
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

@@ -1,0 +1,40 @@
+# Demo 1: CrashLoopBackOff
+# This deployment will immediately crash and enter CrashLoopBackOff
+# Expected: HolmesGPT detects and runs `kubectl delete pod` to restart
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-autohealer
+  labels:
+    demo: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crashloop-demo
+  namespace: demo-autohealer
+  labels:
+    app: crashloop-demo
+    demo: crashloop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crashloop-demo
+  template:
+    metadata:
+      labels:
+        app: crashloop-demo
+    spec:
+      containers:
+        - name: crasher
+          image: busybox:1.36
+          command: ["sh", "-c", "echo 'Starting...' && sleep 2 && exit 1"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

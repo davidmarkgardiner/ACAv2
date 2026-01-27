@@ -1,0 +1,41 @@
+# Demo 3: Failed/Evicted Pods
+# This creates pods that fail after running, leaving Failed pods behind
+# Expected: HolmesGPT detects and runs `kubectl delete pod` to clean up
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: failed-pod-demo
+  namespace: demo-autohealer
+  labels:
+    app: failed-pod-demo
+    demo: failed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: failed-pod-demo
+  template:
+    metadata:
+      labels:
+        app: failed-pod-demo
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: failer
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Pod starting..."
+              sleep 5
+              echo "Simulating failure..."
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
