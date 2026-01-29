@@ -1,0 +1,146 @@
+---
+# Grafana Alloy - Workload Cluster → Event Hub
+# Replaces Fluent Bit for K8s event collection
+#
+# IMPORTANT: Requires Alloy v1.12.x+ and Event Hub Standard/Premium tier (Basic doesn't support Kafka)
+# IMPORTANT: Uses otelcol.exporter.kafka (not kafka.write which doesn't exist in Alloy)
+#
+# Pipeline: loki.source.kubernetes_events → loki.process → otelcol.receiver.loki → otelcol.exporter.kafka
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: monitoring
+  labels:
+    app: alloy
+    app.kubernetes.io/part-of: k8s-event-triage
+data:
+  config.alloy: |
+    // =============================================================================
+    // Grafana Alloy - K8s Events → Azure Event Hub
+    // Workload Cluster Configuration
+    //
+    // Validated: Alloy v1.12.2 → Azure Event Hub (Standard tier, Kafka protocol)
+    // =============================================================================
+
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+
+    // -----------------------------------------------------------------------------
+    // Kubernetes Events Collection
+    // -----------------------------------------------------------------------------
+    loki.source.kubernetes_events "cluster_events" {
+      namespaces = []  // All namespaces
+      job_name   = "kubernetes-events"
+      log_format = "json"
+
+      forward_to = [loki.process.enrich.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Event Enrichment - Add cluster metadata
+    // -----------------------------------------------------------------------------
+    loki.process "enrich" {
+      // Add cluster identification
+      stage.static_labels {
+        values = {
+          cluster     = "{{CLUSTER_NAME}}",
+          environment = "{{ENVIRONMENT}}",
+          region      = "{{AZURE_REGION}}",
+          source      = "alloy",
+        }
+      }
+
+      // Parse event JSON
+      stage.json {
+        expressions = {
+          event_type     = "type",
+          event_reason   = "reason",
+          event_message  = "message",
+          event_count    = "count",
+          obj_kind       = "involvedObject.kind",
+          obj_name       = "involvedObject.name",
+          obj_namespace  = "involvedObject.namespace",
+          obj_uid        = "involvedObject.uid",
+          first_time     = "firstTimestamp",
+          last_time      = "lastTimestamp",
+          source_comp    = "source.component",
+          source_host    = "source.host",
+        }
+      }
+
+      // Promote useful fields to labels
+      stage.labels {
+        values = {
+          event_type    = "",
+          event_reason  = "",
+          obj_kind      = "",
+          obj_namespace = "",
+        }
+      }
+
+      // Bridge from Loki pipeline to OpenTelemetry pipeline
+      // (loki components cannot write directly to Kafka in Alloy)
+      forward_to = [otelcol.receiver.loki.bridge.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Loki → OpenTelemetry Bridge
+    // Converts Loki log entries to OTLP log format for Kafka export
+    // -----------------------------------------------------------------------------
+    otelcol.receiver.loki "bridge" {
+      output {
+        logs = [otelcol.processor.batch.default.input]
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Batch Processor - Efficient delivery to Event Hub
+    // -----------------------------------------------------------------------------
+    otelcol.processor.batch "default" {
+      timeout         = "2s"
+      send_batch_size = 100
+      output {
+        logs = [otelcol.exporter.kafka.eventhub.input]
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Azure Event Hub Output (Kafka protocol)
+    //
+    // Event Hub requires:
+    //   - Standard or Premium tier (Basic does NOT support Kafka)
+    //   - Port 9093 (TLS)
+    //   - SASL PLAIN auth with $ConnectionString as username
+    //
+    // NOTE: The logs {} block with explicit topic and encoding is REQUIRED
+    //       in Alloy v1.12.x+. Using only the top-level topic argument
+    //       results in "telemetry type is not supported" errors.
+    // -----------------------------------------------------------------------------
+    otelcol.exporter.kafka "eventhub" {
+      brokers          = ["{{EVENTHUB_NAMESPACE}}.servicebus.windows.net:9093"]
+      protocol_version = "1.0.0"
+
+      logs {
+        topic    = "{{EVENTHUB_NAME}}"
+        encoding = "otlp_json"
+      }
+
+      authentication {
+        tls {
+          insecure = false
+        }
+        sasl {
+          username  = "$ConnectionString"
+          password  = sys.env("EVENTHUB_CONNECTION_STRING")
+          mechanism = "PLAIN"
+        }
+      }
+
+      sending_queue {
+        enabled    = true
+        queue_size = 1000
+      }
+    }

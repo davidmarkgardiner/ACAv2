@@ -1,0 +1,55 @@
+---
+# EventSource - Consume K8s events from Azure Event Hub
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  kafka:
+    # Event Hub exposes Kafka-compatible endpoint
+    k8s-events:
+      url: "{{EVENTHUB_NAMESPACE}}.servicebus.windows.net:9093"
+      topic: "{{EVENTHUB_NAME}}"
+      consumerGroup:
+        groupName: "{{EVENTHUB_CONSUMER_GROUP}}"
+      tls:
+        caCertSecret:
+          name: ""  # Use system CA for Azure
+          key: ""
+      sasl:
+        mechanism: "PLAIN"
+        userSecret:
+          name: eventhub-credentials
+          key: username  # Value: "$ConnectionString"
+        passwordSecret:
+          name: eventhub-credentials
+          key: connection-string
+      # Parse JSON event body
+      jsonBody: true
+      # Partition handling
+      partition: ""  # Empty = all partitions
+      # Connection settings
+      version: "2.1.0"
+---
+# Additional secret for SASL username (static value)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: eventhub-credentials
+  namespace: argo-events
+type: Opaque
+stringData:
+  username: "$ConnectionString"
+  # connection-string will be populated by External Secrets
+  connection-string: "{{EVENTHUB_CONNECTION_STRING}}"

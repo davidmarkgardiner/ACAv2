@@ -1,0 +1,27 @@
+---
+# EventBus - Message broker for Argo Events
+# Uses NATS Streaming for reliable event delivery
+apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: argo-events
+spec:
+  nats:
+    native:
+      replicas: 3
+      auth: token
+      persistence:
+        storageClassName: managed-premium  # Azure Premium SSD
+        accessMode: ReadWriteOnce
+        volumeSize: 10Gi
+      # Anti-affinity for HA
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    eventbus-name: default
+                topologyKey: kubernetes.io/hostname
