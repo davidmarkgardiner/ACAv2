@@ -1,0 +1,57 @@
+# Demo 7: CrashLoopBackOff - Create Missing ConfigMap (Root Cause Fix)
+#
+# Problem: Pod crash-loops because it mounts a ConfigMap that doesn't exist.
+#          Restarting does nothing - the ConfigMap is still missing.
+#
+# Holmes Diagnosis:
+#   - Sees: Pod status CrashLoopBackOff / CreateContainerConfigError
+#   - Reads events: "MountVolume.SetUp failed: configmap "app-settings" not found"
+#   - Insight: "The pod references configmap 'app-settings' which does not exist.
+#              Creating the ConfigMap with default values will resolve this."
+#
+# Expected Fix:
+#   kubectl create configmap app-settings -n demo-autohealer \
+#     --from-literal=DATABASE_HOST=localhost \
+#     --from-literal=DATABASE_PORT=5432 \
+#     --from-literal=LOG_LEVEL=info \
+#     --from-literal=APP_ENV=development
+#
+# Why This Is Different:
+#   The pod is structurally fine. The missing dependency must be created.
+#   No restart or patch to the deployment helps - the ConfigMap must exist.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: missing-configmap-demo
+  namespace: demo-autohealer
+  labels:
+    app: missing-configmap-demo
+    demo: missing-configmap
+  annotations:
+    demo/description: "Pod mounts a ConfigMap that does not exist"
+    demo/expected-fix: "kubectl create configmap app-settings with default values"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: missing-configmap-demo
+  template:
+    metadata:
+      labels:
+        app: missing-configmap-demo
+    spec:
+      containers:
+        - name: webapp
+          image: busybox:1.36
+          command: ["sh", "-c", "echo Config loaded: $DATABASE_HOST && sleep 3600"]
+          envFrom:
+            - configMapRef:
+                name: app-settings  # This ConfigMap does NOT exist
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

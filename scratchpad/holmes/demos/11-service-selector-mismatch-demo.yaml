@@ -1,0 +1,75 @@
+# Demo 11: Service Selector Mismatch - Patch Service (Root Cause Fix)
+#
+# Problem: Service selector says `app: myapp` but pod labels say `app: my-app`.
+#          Traffic returns 503. The pod is running fine, the service exists,
+#          but they're not connected because of a label typo.
+#
+# Holmes Diagnosis:
+#   - Sees: Service has 0 endpoints
+#   - Checks: Service selector `app: myapp` vs Pod labels `app: my-app`
+#   - Insight: "Service selector does not match any pods. The selector label
+#              'app: myapp' should be 'app: my-app' to match the running pods."
+#
+# Expected Fix:
+#   kubectl patch svc broken-service-demo -n demo-autohealer \
+#     -p '{"spec":{"selector":{"app":"my-app"}}}'
+#
+# Why This Is Different:
+#   Everything appears to be working (pods Running, service exists).
+#   But traffic fails silently because nothing is wired together.
+#   Holmes must compare selectors against pod labels to find the mismatch.
+---
+# The Deployment - pods have label app: my-app
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-mismatch-demo
+  namespace: demo-autohealer
+  labels:
+    app: my-app
+    demo: service-mismatch
+  annotations:
+    demo/description: "Service selector doesn't match pod labels (typo)"
+    demo/expected-fix: "kubectl patch svc to fix selector to match pod labels"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app    # Pod label: my-app (with hyphen)
+    spec:
+      containers:
+        - name: webapp
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+---
+# The Service - selector says myapp (WITHOUT hyphen) = mismatch!
+apiVersion: v1
+kind: Service
+metadata:
+  name: broken-service-demo
+  namespace: demo-autohealer
+  labels:
+    app: broken-service-demo
+    demo: service-mismatch
+  annotations:
+    demo/description: "Selector 'myapp' does not match pod label 'my-app'"
+spec:
+  selector:
+    app: myapp         # BUG: should be 'my-app' to match the pods
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,93 @@
+# Demo 9: Liveness Probe Misconfigured - Patch Probe Path (Root Cause Fix)
+#
+# Problem: App serves health at /health but the liveness probe checks /healthz.
+#          Pod gets killed every 30s by the liveness probe returning 404.
+#          The app is perfectly healthy - the probe config is just wrong.
+#
+# Holmes Diagnosis:
+#   - Sees: Pod repeatedly restarting (RestartCount climbing)
+#   - Reads events: "Liveness probe failed: HTTP probe failed with statuscode: 404"
+#   - Checks: Container port 8080 is correct, but probe path /healthz returns 404
+#   - Insight: "The app exposes health on /health, but the liveness probe
+#              checks /healthz. Patching the probe path will stop the kills."
+#
+# Expected Fix:
+#   kubectl patch deployment liveness-misconfigured-demo -n demo-autohealer \
+#     --type=json -p '[
+#       {"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe/httpGet/path","value":"/health"}
+#     ]'
+#
+# Why This Is Different:
+#   The app works fine. Kubernetes is actively killing a healthy app.
+#   Restarting makes things WORSE (more unnecessary kills).
+#   Holmes must recognize the probe path mismatch and patch it.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: liveness-misconfigured-demo
+  namespace: demo-autohealer
+  labels:
+    app: liveness-misconfigured-demo
+    demo: liveness-probe-fix
+  annotations:
+    demo/description: "Liveness probe path wrong - app is healthy but keeps getting killed"
+    demo/expected-fix: "kubectl patch deployment to fix livenessProbe.httpGet.path"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: liveness-misconfigured-demo
+  template:
+    metadata:
+      labels:
+        app: liveness-misconfigured-demo
+    spec:
+      containers:
+        - name: webapp
+          image: python:3.11-slim
+          command:
+            - python
+            - -c
+            - |
+              from http.server import HTTPServer, BaseHTTPRequestHandler
+
+              class HealthHandler(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path == '/health':
+                          self.send_response(200)
+                          self.end_headers()
+                          self.wfile.write(b'{"status": "ok"}')
+                      else:
+                          self.send_response(404)
+                          self.end_headers()
+                          self.wfile.write(b'{"error": "not found"}')
+                  def log_message(self, format, *args):
+                      pass  # Suppress request logs
+
+              print("App starting on port 8080, health endpoint at /health")
+              server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
+              server.serve_forever()
+          ports:
+            - containerPort: 8080
+          # BUG: Probe checks /healthz but app serves on /health
+          livenessProbe:
+            httpGet:
+              path: /healthz    # WRONG - should be /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health     # This one is correct (for contrast)
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

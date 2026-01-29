@@ -1,0 +1,53 @@
+# Demo 8: ImagePullBackOff - Fix Image Tag (Root Cause Fix)
+#
+# Problem: Deployment references nginx:99.99.99 which doesn't exist.
+#          Pod is stuck in ImagePullBackOff forever.
+#          Restarting does nothing - the image still doesn't exist.
+#
+# Holmes Diagnosis:
+#   - Sees: Pod status ImagePullBackOff
+#   - Reads events: "Failed to pull image 'nginx:99.99.99': manifest unknown"
+#   - Insight: "Image tag 'nginx:99.99.99' does not exist. Rolling back to
+#              the latest stable tag 'nginx:1.27' will resolve this."
+#
+# Expected Fix:
+#   kubectl set image deployment/wrong-image-demo \
+#     webapp=nginx:1.27-alpine -n demo-autohealer
+#
+# Why This Is Different:
+#   The image reference itself is wrong. No amount of restarts or pod
+#   deletions will pull a non-existent tag. Holmes must patch the image.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wrong-image-demo
+  namespace: demo-autohealer
+  labels:
+    app: wrong-image-demo
+    demo: wrong-image-tag
+  annotations:
+    demo/description: "Deployment references a non-existent image tag"
+    demo/expected-fix: "kubectl set image deployment to a valid tag"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wrong-image-demo
+  template:
+    metadata:
+      labels:
+        app: wrong-image-demo
+    spec:
+      containers:
+        - name: webapp
+          image: nginx:99.99.99  # This tag does NOT exist
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi

@@ -1,0 +1,68 @@
+# Demo 6: OOMKilled - Patch Memory Limits (Root Cause Fix)
+#
+# Problem: Pod keeps OOMKilled because memory limit is 32Mi but the app needs ~128Mi.
+#          Restarting does nothing - it just OOMs again immediately.
+#
+# Holmes Diagnosis:
+#   - Sees: Pod terminated with reason: OOMKilled
+#   - Checks: Container memory limits (32Mi) are too low for workload
+#   - Insight: "Restarting won't help. The memory limit must be increased."
+#
+# Expected Fix:
+#   kubectl patch deployment oom-patch-demo -n demo-autohealer \
+#     --type=json -p '[
+#       {"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"256Mi"},
+#       {"op":"replace","path":"/spec/template/spec/containers/0/resources/requests/memory","value":"128Mi"}
+#     ]'
+#
+# Why This Is Different:
+#   Demos 01-05 use `kubectl delete pod` or `kubectl rollout restart`.
+#   This demo requires Holmes to CHANGE the deployment spec to fix the root cause.
+#   A restart without the patch just produces another OOMKill.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oom-patch-demo
+  namespace: demo-autohealer
+  labels:
+    app: oom-patch-demo
+    demo: oom-patch-limits
+  annotations:
+    demo/description: "Memory limit too low - requires patching limits, not restarting"
+    demo/expected-fix: "kubectl patch deployment to increase memory limits"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oom-patch-demo
+  template:
+    metadata:
+      labels:
+        app: oom-patch-demo
+    spec:
+      containers:
+        - name: memory-app
+          image: python:3.11-slim
+          command:
+            - python
+            - -c
+            - |
+              import time
+              print("Starting application - needs ~128Mi to run...")
+              # Simulate a real app that needs moderate memory
+              # This will exceed the 32Mi limit and get OOMKilled
+              data = []
+              for i in range(150):
+                  data.append('x' * 1024 * 1024)  # ~1MB per iteration
+                  time.sleep(0.5)
+              print("Application running normally")
+              while True:
+                  time.sleep(60)
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi   # Way too low
+            limits:
+              cpu: 100m
+              memory: 32Mi   # Way too low - app needs ~128Mi

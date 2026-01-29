@@ -1,0 +1,22 @@
+# EventSource: Watch K8s Warning events in demo-autohealer namespace
+# This triggers the auto-healer workflow when issues occur
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: k8s-demo-warnings
+  namespace: argo-events
+spec:
+  eventBusName: default
+  resource:
+    demo-warnings:
+      namespace: demo-autohealer
+      group: ""
+      version: v1
+      resource: events
+      eventTypes:
+        - ADD
+      filter:
+        fields:
+          - key: type
+            operation: "=="
+            value: Warning

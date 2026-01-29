@@ -1,0 +1,63 @@
+# Sensor: Connect demo namespace events to Holmes auto-healer workflow
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: demo-autohealer-sensor
+  namespace: argo-events
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+
+  dependencies:
+    - name: demo-warnings
+      eventSourceName: k8s-demo-warnings
+      eventName: demo-warnings
+
+  triggers:
+    - template:
+        name: trigger-demo-healer
+        conditions: demo-warnings
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: demo-healer-
+                namespace: argo-events
+              spec:
+                workflowTemplateRef:
+                  name: auto-healer-holmes
+                arguments:
+                  parameters:
+                    - name: event-reason
+                    - name: resource-name
+                    - name: resource-namespace
+                    - name: resource-kind
+                    - name: event-message
+          parameters:
+            - src:
+                dependencyName: demo-warnings
+                dataKey: body.reason
+              dest: spec.arguments.parameters.0.value
+            - src:
+                dependencyName: demo-warnings
+                dataKey: body.involvedObject.name
+              dest: spec.arguments.parameters.1.value
+            - src:
+                dependencyName: demo-warnings
+                dataKey: body.involvedObject.namespace
+              dest: spec.arguments.parameters.2.value
+            - src:
+                dependencyName: demo-warnings
+                dataKey: body.involvedObject.kind
+              dest: spec.arguments.parameters.3.value
+            - src:
+                dependencyName: demo-warnings
+                dataKey: body.message
+              dest: spec.arguments.parameters.4.value
+      retryStrategy:
+        steps: 3
+        duration: 30s

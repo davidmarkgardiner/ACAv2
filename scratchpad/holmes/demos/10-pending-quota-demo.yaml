@@ -1,0 +1,72 @@
+# Demo 10: Pending Pod - Patch ResourceQuota (Root Cause Fix)
+#
+# Problem: Pod stuck in Pending because the namespace ResourceQuota CPU limit
+#          is exhausted. There's plenty of node capacity, but the quota blocks it.
+#
+# Holmes Diagnosis:
+#   - Sees: Pod status Pending
+#   - Reads events: "exceeded quota: tight-quota, requested: requests.cpu=200m,
+#                    used: requests.cpu=0, limited: requests.cpu=100m"
+#   - Insight: "The namespace ResourceQuota limits CPU to 100m but the pod
+#              requests 200m. The quota must be increased."
+#
+# Expected Fix:
+#   kubectl patch resourcequota tight-quota -n demo-autohealer \
+#     -p '{"spec":{"hard":{"requests.cpu":"2","limits.cpu":"2"}}}'
+#
+# Why This Is Different:
+#   This isn't a node scheduling issue (cluster has resources).
+#   It's a policy constraint. Restarting or deleting the pod does nothing.
+#   Holmes must identify the quota as the blocker and increase it.
+---
+# First: Create a restrictive ResourceQuota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tight-quota
+  namespace: demo-autohealer
+  labels:
+    demo: pending-quota
+  annotations:
+    demo/description: "Intentionally restrictive quota to block pod scheduling"
+spec:
+  hard:
+    requests.cpu: "100m"    # Very tight - only 100m total
+    requests.memory: "64Mi"
+    limits.cpu: "100m"
+    limits.memory: "64Mi"
+---
+# Then: Deploy something that exceeds the quota
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pending-quota-demo
+  namespace: demo-autohealer
+  labels:
+    app: pending-quota-demo
+    demo: pending-quota
+  annotations:
+    demo/description: "Pod requests more CPU than ResourceQuota allows"
+    demo/expected-fix: "kubectl patch resourcequota to increase CPU limits"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pending-quota-demo
+  template:
+    metadata:
+      labels:
+        app: pending-quota-demo
+    spec:
+      containers:
+        - name: webapp
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 200m      # Exceeds quota of 100m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 32Mi
