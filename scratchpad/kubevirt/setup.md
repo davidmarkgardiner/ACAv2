@@ -8,6 +8,10 @@
 
 ---
 
+
+
+https://excalidraw.com/#json=jMUR59y44XVjcsTp_Ks4W,ypuZB3MNkbw0RA6-jcYTKw
+
 ## Prerequisites
 
 ### Hardware Requirements
