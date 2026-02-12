@@ -39,3 +39,9 @@ We also need to acknowledge the investment that's been made here. We've assigned
 More broadly, this is something we need to get right internally before we can credibly roll it out to the wider shared AKS platform. If after a year of dedicated effort we can't deliver automated alerting to our own team, it raises serious questions about whether the current approach and ownership model is going to work for the hundreds of teams we're expected to support.
 
 I think we need to step back and have a frank review of our observability strategy, what's been blocking progress, and how we ensure delivery going forward. Let's get something scheduled.
+
+---
+We're currently using a sledgehammer to crack a walnut. Need a tiny policy tweak? Cool — just fill out seventeen forms, get approval from half the organisation, wait for a change window that aligns with the stars, and come back in three weeks. Meanwhile, the engineering team is sat twiddling their thumbs.
+The fix? Move the policies closer to home — into Kubernetes, where the platform team can sort it in about 20 seconds with a PR and a cup of coffee. Same rules, same governance, zero drama.
+We've been banging our heads against this for a year now, and the only justification for keeping it this way seems to be "that's how we've always done it" — which, as we all know, is the battle cry of progress everywhere. 🙃
+Time for a rethink.
