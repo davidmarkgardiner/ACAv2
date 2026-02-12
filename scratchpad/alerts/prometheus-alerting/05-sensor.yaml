@@ -1,0 +1,64 @@
+---
+# Sensor - Route AlertManager alerts to triage workflow
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: alertmanager-triage-sensor
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  dependencies:
+    - name: alertmanager-alert
+      eventSourceName: alertmanager
+      eventName: alertmanager
+      filters:
+        data:
+          - path: body.status
+            type: string
+            value:
+              - "firing"
+  triggers:
+    - template:
+        name: triage-workflow
+        conditions: "alertmanager-alert"
+        rateLimit:
+          requestsPerUnit: 5
+          unit: Minute
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: alert-triage-
+                namespace: argo-events
+                labels:
+                  app.kubernetes.io/part-of: prometheus-alerting
+                  event-type: prometheus-alert
+              spec:
+                workflowTemplateRef:
+                  name: alertmanager-triage
+                arguments:
+                  parameters:
+                    - name: alert-payload
+          parameters:
+            - src:
+                dependencyName: alertmanager-alert
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+      retryStrategy:
+        steps: 3
+        duration: 10s
