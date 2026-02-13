@@ -1,0 +1,65 @@
+# LiteLLM on AKS - WITH DATABASE
+# Use this when you need: key management, spend tracking, teams, budgets, admin UI
+# Image: litellm-database
+# master_key is set, DB handles virtual key lookups
+
+image:
+  repository: ghcr.io/berriai/litellm-database
+  tag: main-latest
+  pullPolicy: Always
+
+replicaCount: 1
+
+masterkey: sk-change-me-in-prod
+
+# Deploy bundled PostgreSQL
+db:
+  deployStandalone: true
+
+postgresql:
+  architecture: standalone
+  auth:
+    database: litellm
+    username: litellm
+    password: change-me-in-prod
+    postgres-password: change-me-in-prod
+
+redis:
+  enabled: false
+
+# ServiceAccount for Azure Workload Identity
+serviceAccount:
+  create: true
+  annotations:
+    azure.workload.identity/client-id: "<your-uami-client-id>"
+
+podLabels:
+  azure.workload.identity/use: "true"
+
+proxy_config:
+  general_settings:
+    master_key: os.environ/PROXY_MASTER_KEY
+    store_model_in_db: true
+    database_connection_pool_limit: 10
+  litellm_settings:
+    drop_params: true
+    enable_azure_ad_token_refresh: true
+  model_list:
+    # Option 1: Azure OpenAI (uses UAMI for auth, no api_key needed)
+    - model_name: gpt-4
+      litellm_params:
+        model: azure/<your-deployment-name>
+        api_base: https://<your-resource>.openai.azure.com/
+        api_version: "2024-02-15-preview"
+
+    # Option 2: Self-hosted VLM on AKS (e.g. vLLM, KubeAI, TGI)
+    - model_name: my-vlm
+      litellm_params:
+        model: openai/<model-name>
+        api_base: http://<vlm-service>.<namespace>.svc.cluster.local/v1
+        api_key: not-needed
+
+# --- Install ---
+# helm install litellm oci://ghcr.io/berriai/litellm-helm \
+#   -n litellm --create-namespace \
+#   -f aks-values-with-db.yaml
