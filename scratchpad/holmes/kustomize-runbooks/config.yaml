@@ -1,0 +1,2 @@
+custom_runbook_catalogs:
+  - /etc/holmes/runbooks/catalog.json

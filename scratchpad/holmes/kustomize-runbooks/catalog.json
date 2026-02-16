@@ -1,0 +1,10 @@
+{
+  "catalog": [
+    {
+      "id": "dns-troubleshooting",
+      "update_date": "2026-02-16",
+      "description": "Troubleshooting DNS resolution and CoreDNS issues in Kubernetes clusters",
+      "link": "dns-troubleshooting.md"
+    }
+  ]
+}

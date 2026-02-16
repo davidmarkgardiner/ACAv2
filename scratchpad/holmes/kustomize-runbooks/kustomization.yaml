@@ -1,0 +1,11 @@
+configMapGenerator:
+  # Catalog + markdown runbook files
+  - name: holmes-custom-runbooks
+    files:
+      - catalog.json
+      - dns-troubleshooting.md
+
+  # Holmes config that points to the catalog
+  - name: holmes-config
+    files:
+      - config.yaml

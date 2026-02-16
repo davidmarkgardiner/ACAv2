@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: holmes
+  annotations:
+    configmap.reloader.stakater.com/reload: "holmes-custom-runbooks,holmes-config"
+spec:
+  template:
+    spec:
+      volumes:
+        - name: custom-runbooks
+          configMap:
+            name: holmes-custom-runbooks
+        - name: holmes-config
+          configMap:
+            name: holmes-config
+      containers:
+        - name: holmes
+          volumeMounts:
+            - name: custom-runbooks
+              mountPath: /etc/holmes/runbooks
+              readOnly: true
+            - name: holmes-config
+              mountPath: /root/.holmes/config.yaml
+              subPath: config.yaml
+              readOnly: true
