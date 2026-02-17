@@ -1,0 +1,178 @@
+# AKS-MCP Server - Local Testing with ADMIN access
+# For auto-remediation testing - full read/write access
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aks-mcp
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aks-mcp
+  namespace: aks-mcp
+
+---
+# Full ADMIN access for auto-remediation
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aks-mcp-admin
+rules:
+  # Full access to core resources
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+      - namespaces
+      - nodes
+      - events
+      - persistentvolumeclaims
+      - persistentvolumes
+      - serviceaccounts
+    verbs: ["*"]
+
+  # Full access to apps
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/scale
+      - daemonsets
+      - statefulsets
+      - statefulsets/scale
+      - replicasets
+    verbs: ["*"]
+
+  # Full access to batch
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["*"]
+
+  # Full access to networking
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["*"]
+
+  # RBAC read access
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list", "watch"]
+
+  # Autoscaling
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["*"]
+
+  # Policy
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["*"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aks-mcp-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aks-mcp-admin
+subjects:
+  - kind: ServiceAccount
+    name: aks-mcp
+    namespace: aks-mcp
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aks-mcp
+  namespace: aks-mcp
+  labels:
+    app: aks-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aks-mcp
+  template:
+    metadata:
+      labels:
+        app: aks-mcp
+    spec:
+      serviceAccountName: aks-mcp
+      containers:
+        - name: aks-mcp
+          image: ghcr.io/azure/aks-mcp:v0.0.12
+          imagePullPolicy: IfNotPresent
+          args:
+            - --access-level=admin
+            - --transport=streamable-http
+            - --host=0.0.0.0
+            - --port=8000
+            - --timeout=600
+            - --log-level=debug
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: kube-cache
+              mountPath: /home/mcp/.kube
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kube-cache
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aks-mcp
+  namespace: aks-mcp
+  labels:
+    app: aks-mcp
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: aks-mcp
