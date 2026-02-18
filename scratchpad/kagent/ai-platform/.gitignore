@@ -1,0 +1,11 @@
+# Upstream source repos (cloned separately, at repo root only)
+/kubeai/
+/litellm/
+/kagent/
+/kgateway/
+/mcp-gateway/
+
+# OS files
+.DS_Store
+*.swp
+*.swo

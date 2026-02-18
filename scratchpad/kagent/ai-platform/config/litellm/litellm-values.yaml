@@ -1,0 +1,45 @@
+# LiteLLM Helm values for ai-platform PoC
+# Deployed to namespace: litellm
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/berriai/litellm-database
+  pullPolicy: Always
+  tag: "main-latest"
+
+masterkey: "CHANGE-ME-your-litellm-master-key"
+
+# Bundled PostgreSQL for PoC
+db:
+  deployStandalone: true
+
+postgresql:
+  architecture: standalone
+  image:
+    tag: "latest"
+  auth:
+    username: litellm
+    database: litellm
+    password: "CHANGE-ME-postgres-password"
+    postgres-password: "CHANGE-ME-postgres-password"
+
+redis:
+  enabled: false
+
+proxy_config:
+  model_list:
+    - model_name: qwen2.5-3b
+      litellm_params:
+        model: openai/qwen2.5-3b
+        api_key: "not-needed"
+        api_base: http://kubeai.kubeai.svc.cluster.local/openai/v1
+    - model_name: qwen2.5-14b
+      litellm_params:
+        model: openai/qwen2.5-14b
+        api_key: "not-needed"
+        api_base: http://kubeai.kubeai.svc.cluster.local/openai/v1
+  litellm_settings:
+    drop_params: true
+  general_settings:
+    master_key: os.environ/PROXY_MASTER_KEY

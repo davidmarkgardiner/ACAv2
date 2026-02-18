@@ -1,0 +1,420 @@
+# Holmes AI Remediation Workflow
+# Uses Holmes (with KubeAI + AKS-MCP) to diagnose AND fix Kubernetes issues
+#
+# Flow: validate → Holmes investigate+fix → GitLab issue → Mattermost
+#
+# Holmes has:
+# - Built-in k8s tools for read (diagnosis)
+# - AKS-MCP for write (remediation via call_kubectl)
+# - Qwen 3 14B via KubeAI as the reasoning LLM
+#
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: holmes-remediation
+  namespace: argo
+  labels:
+    app: k8s-triage
+    type: remediation
+  annotations:
+    description: "Holmes AI remediation - diagnoses and fixes Kubernetes issues"
+    version: "1.0"
+spec:
+  serviceAccountName: argo
+  entrypoint: investigate-fix-report
+  activeDeadlineSeconds: 600
+
+  ttlStrategy:
+    secondsAfterCompletion: 600
+    secondsAfterSuccess: 300
+    secondsAfterFailure: 1800
+  podGC:
+    strategy: OnWorkflowCompletion
+
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        storageClassName: local-path
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 64Mi
+
+  arguments:
+    parameters:
+      - name: query
+        value: "Investigate and fix Kubernetes resource issue"
+      - name: event_type
+        value: "Unknown"
+      - name: cluster
+        value: "proxmox-k8s"
+      - name: namespace
+        value: "default"
+      - name: resource_kind
+        value: "Pod"
+      - name: resource_name
+        value: "unknown"
+      - name: severity
+        value: "medium"
+      - name: error_message
+        value: ""
+      - name: remediate
+        value: "true"
+      - name: gitlab_project_id
+        value: "68265584"
+      - name: gitlab_url
+        value: "https://gitlab.com"
+      - name: mattermost_webhook_url
+        value: "http://mattermost.mattermost:8065/hooks/5mb3nzhrajtw4xk6m7dmnmm27w"
+      - name: holmes_url
+        value: "http://holmes-holmes.holmesgpt.svc.cluster.local:80"
+
+  templates:
+    - name: investigate-fix-report
+      steps:
+        - - name: validate
+            template: validate-inputs
+        - - name: holmes-investigate
+            template: call-holmes
+        - - name: report
+            template: create-gitlab-issue
+            continueOn:
+              failed: true
+        - - name: notify
+            template: mattermost-notify
+
+    # Step 1: Validate inputs and Holmes connectivity
+    - name: validate-inputs
+      script:
+        image: curlimages/curl:8.5.0
+        command: [sh]
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        source: |
+          echo "=== Holmes Remediation Workflow v1.0 ==="
+          echo "Holmes: {{workflow.parameters.holmes_url}}"
+          echo "Target: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} in {{workflow.parameters.namespace}}"
+          echo "Remediate: {{workflow.parameters.remediate}}"
+
+          if [ -z "{{workflow.parameters.query}}" ]; then
+            echo "ERROR: query is required"; exit 1
+          fi
+
+          # Check Holmes is reachable
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 \
+            "{{workflow.parameters.holmes_url}}/healthz" 2>/dev/null)
+
+          if [ "${HTTP_CODE}" -eq 200 ]; then
+            echo "Holmes reachable"
+          else
+            echo "ERROR: Holmes not reachable (HTTP ${HTTP_CODE})"; exit 1
+          fi
+
+    # Step 2: Call Holmes for investigation + remediation
+    - name: call-holmes
+      retryStrategy:
+        limit: 1
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "15s"
+          factor: 2
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        source: |
+          REMEDIATE="{{workflow.parameters.remediate}}"
+
+          if [ "$REMEDIATE" = "true" ]; then
+            cat > /tmp/instructions.txt << 'INSTEOF'
+          CRITICAL INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:
+          1. DIAGNOSE: Use call_kubectl to describe the pod and get logs. Check container names carefully.
+          2. IDENTIFY root cause from the output.
+          3. EXECUTE A FIX using call_kubectl. You MUST actually run the fix command, not just suggest it. Common fixes:
+             - ImagePullBackOff: Use set image with the EXACT container name from describe output
+             - Missing ConfigMap or Secret: Create the missing resource with create configmap
+             - OOMKilled: Use patch to increase memory limits
+             - Generic restart: Use rollout restart
+          4. VERIFY: After fixing, check pods are Running with get pods
+          5. RULES: NEVER use kubectl edit (interactive). NEVER just print commands. You MUST execute the fix. Always verify container names before set image.
+          INSTEOF
+            DESC="REMEDIATION MODE: Diagnose AND FIX this issue using call_kubectl tool. You have admin access. Execute the repair commands directly."
+          else
+            echo "Diagnose this issue thoroughly using call_kubectl to inspect the cluster. Provide root cause analysis and recommended fixes, but do NOT execute any write operations." > /tmp/instructions.txt
+            DESC="ANALYSIS MODE: Investigate using call_kubectl for reads only. Do not make changes."
+          fi
+
+          INSTRUCTIONS=$(cat /tmp/instructions.txt)
+
+          jq -n \
+            --arg source "argo-remediation-workflow" \
+            --arg title "[{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}" \
+            --arg desc "${DESC}\n\nEvent: {{workflow.parameters.event_type}}\nError: {{workflow.parameters.error_message}}\nQuery: {{workflow.parameters.query}}" \
+            --arg kind "{{workflow.parameters.resource_kind}}" \
+            --arg name "{{workflow.parameters.resource_name}}" \
+            --arg ns "{{workflow.parameters.namespace}}" \
+            --arg cluster "{{workflow.parameters.cluster}}" \
+            --arg event "{{workflow.parameters.event_type}}" \
+            --arg sev "{{workflow.parameters.severity}}" \
+            --arg wf "{{workflow.name}}" \
+            --arg rem "$REMEDIATE" \
+            --arg inst "$INSTRUCTIONS" \
+            '{
+              source: $source,
+              title: $title,
+              description: $desc,
+              subject: { kind: $kind, name: $name, namespace: $ns },
+              context: { cluster: $cluster, event_type: $event, severity: $sev, workflow: $wf, remediate: $rem },
+              instructions: $inst,
+              include_tool_calls: true,
+              include_tool_call_results: false
+            }' > /tmp/request.json
+
+          echo "Calling Holmes (remediate=${REMEDIATE})..."
+          START=$(date +%s)
+
+          HTTP_CODE=$(curl -s -o /work/holmes-response.json -w "%{http_code}" \
+            --connect-timeout 10 --max-time 300 \
+            -X POST "{{workflow.parameters.holmes_url}}/api/investigate" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/request.json 2>&1)
+
+          DURATION=$(( $(date +%s) - START ))
+          echo "HTTP: ${HTTP_CODE}, Duration: ${DURATION}s"
+
+          if [ "${HTTP_CODE}" -ne 200 ]; then
+            echo "Holmes failed (HTTP ${HTTP_CODE})"
+            cat /work/holmes-response.json 2>/dev/null
+            exit 1
+          fi
+
+          # Extract key info
+          NUM_CALLS=$(jq -r '.num_llm_calls // 0' /work/holmes-response.json)
+          NUM_TOOLS=$(jq -r '.tool_calls | length // 0' /work/holmes-response.json)
+          echo "LLM calls: ${NUM_CALLS}, Tool calls: ${NUM_TOOLS}, Duration: ${DURATION}s"
+
+          # Add metadata
+          jq --arg d "$DURATION" \
+             --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --arg r "$REMEDIATE" \
+            '. + {_meta: {duration_s: ($d|tonumber), timestamp: $t, remediated: $r}}' \
+            /work/holmes-response.json > /work/resp.json && mv /work/resp.json /work/holmes-response.json
+
+    # Step 3: Create GitLab issue with investigation + remediation results
+    - name: create-gitlab-issue
+      retryStrategy:
+        limit: 2
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "5s"
+          factor: 2
+      script:
+        image: node:22-alpine
+        command: [node]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        env:
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-token
+                key: GITLAB_TOKEN
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        source: |
+          const fs = require('fs');
+          const https = require('https');
+
+          let response;
+          try {
+            response = JSON.parse(fs.readFileSync('/work/holmes-response.json', 'utf8'));
+          } catch (e) {
+            console.error('Failed to parse Holmes response:', e.message);
+            response = { analysis: '_Error parsing Holmes response_' };
+          }
+
+          const analysis = (response.analysis || '_No analysis_').replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+          const toolCalls = response.tool_calls || [];
+          const numLlmCalls = response.num_llm_calls || 0;
+          const duration = response._meta?.duration_s || 'N/A';
+          const remediated = response._meta?.remediated === 'true';
+          const timestamp = new Date().toISOString();
+
+          const errorMsg = '{{workflow.parameters.error_message}}';
+          const errorSection = errorMsg ? '```\n' + errorMsg + '\n```' : '_No error message_';
+
+          const toolList = toolCalls.length > 0
+            ? toolCalls.map(t => `- \`${t.tool_name || '?'}\`: ${(t.description || '').substring(0, 150)}`).join('\n')
+            : '_No tools called_';
+
+          const statusEmoji = remediated ? 'wrench' : 'mag';
+          const statusLabel = remediated ? 'REMEDIATION APPLIED' : 'ANALYSIS ONLY';
+
+          const body = [
+            `# ${statusLabel}`,
+            '',
+            '| Field | Value |',
+            '|-------|-------|',
+            '| **Alert Type** | {{workflow.parameters.event_type}} |',
+            '| **Cluster** | {{workflow.parameters.cluster}} |',
+            '| **Namespace** | {{workflow.parameters.namespace}} |',
+            '| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |',
+            `| **Timestamp** | ${timestamp} |`,
+            '| **Severity** | {{workflow.parameters.severity}} |',
+            `| **Mode** | ${statusLabel} |`,
+            `| **LLM Calls** | ${numLlmCalls} |`,
+            `| **Tool Calls** | ${toolCalls.length} |`,
+            `| **Duration** | ${duration}s |`,
+            '',
+            '### Error Message',
+            errorSection,
+            '',
+            '---',
+            '',
+            '# Holmes AI Analysis',
+            '',
+            analysis,
+            '',
+            '---',
+            '',
+            '# Tools Executed',
+            '',
+            toolList,
+            '',
+            '---',
+            '',
+            '# Verification',
+            '',
+            remediated
+              ? '- [ ] Verify the fix is holding\n- [ ] Monitor for recurrence\n- [ ] Close when confirmed stable'
+              : '- [ ] Review analysis\n- [ ] Apply recommended fixes manually\n- [ ] Verify and close',
+            '',
+            '<details><summary>Raw Holmes Response</summary>',
+            '',
+            '```json',
+            JSON.stringify(response, null, 2).substring(0, 10000),
+            '```',
+            '</details>',
+            '',
+            `*Holmes AI + AKS-MCP | ${statusLabel} | {{workflow.name}}*`,
+          ].join('\n');
+
+          const label = remediated ? 'remediation' : 'analysis-only';
+          const payload = JSON.stringify({
+            title: `[:${statusEmoji}:][{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.namespace}}/{{workflow.parameters.resource_name}}`,
+            description: body,
+            labels: `holmes,${label},{{workflow.parameters.event_type}},{{workflow.parameters.severity}},auto-generated`
+          });
+
+          const url = new URL(`{{workflow.parameters.gitlab_url}}/api/v4/projects/{{workflow.parameters.gitlab_project_id}}/issues`);
+          const options = {
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              'PRIVATE-TOKEN': process.env.GITLAB_TOKEN,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload)
+            }
+          };
+
+          const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              console.log(`GitLab HTTP: ${res.statusCode}`);
+              if (res.statusCode === 201) {
+                const gl = JSON.parse(data);
+                console.log(`Issue #${gl.iid}: ${gl.web_url}`);
+                fs.writeFileSync('/work/gitlab-issue-url.txt', gl.web_url);
+                fs.writeFileSync('/work/gitlab-issue-iid.txt', String(gl.iid));
+              } else {
+                console.error('GitLab error:', data);
+                process.exit(1);
+              }
+            });
+          });
+
+          req.on('error', (e) => {
+            console.error('Request failed:', e.message);
+            process.exit(1);
+          });
+
+          req.write(payload);
+          req.end();
+
+    # Step 4: Notify Mattermost
+    - name: mattermost-notify
+      script:
+        image: curlimages/curl:8.5.0
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        env:
+          - name: MATTERMOST_WEBHOOK_URL
+            valueFrom:
+              secretKeyRef:
+                name: mattermost-webhook
+                key: url
+                optional: true
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        source: |
+          # Use Secret if available, fall back to workflow parameter
+          WEBHOOK_URL="${MATTERMOST_WEBHOOK_URL:-{{workflow.parameters.mattermost_webhook_url}}}"
+
+          if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" = "" ]; then
+            echo "No Mattermost webhook configured, skipping notification"
+            exit 0
+          fi
+
+          ISSUE_URL=$(cat /work/gitlab-issue-url.txt 2>/dev/null || echo "unknown")
+          ISSUE_IID=$(cat /work/gitlab-issue-iid.txt 2>/dev/null || echo "?")
+          REMEDIATE="{{workflow.parameters.remediate}}"
+
+          if [ "$REMEDIATE" = "true" ]; then
+            ICON=":wrench:"
+            STATUS="Remediation Applied"
+          else
+            ICON=":mag:"
+            STATUS="Analysis Complete"
+          fi
+
+          curl -s -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"username\": \"Holmes AI\",
+              \"icon_url\": \"https://raw.githubusercontent.com/robusta-dev/holmesgpt/main/docs/images/logo.png\",
+              \"text\": \"### ${ICON} ${STATUS}\n| Field | Value |\n|---|---|\n| **Cluster** | {{workflow.parameters.cluster}} |\n| **Event** | {{workflow.parameters.event_type}} |\n| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |\n| **Namespace** | {{workflow.parameters.namespace}} |\n| **Severity** | {{workflow.parameters.severity}} |\n| **Mode** | ${STATUS} |\n| **GitLab** | [#${ISSUE_IID}](${ISSUE_URL}) |\n| **Workflow** | {{workflow.name}} |\"
+            }"
+
+          echo "Notification sent (${STATUS}, issue #${ISSUE_IID})"

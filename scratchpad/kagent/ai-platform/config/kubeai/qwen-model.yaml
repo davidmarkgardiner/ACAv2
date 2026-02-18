@@ -1,0 +1,16 @@
+# Qwen 2.5 3B Model CR for KubeAI
+# Apply after KubeAI is installed in kubeai namespace
+apiVersion: kubeai.org/v1
+kind: Model
+metadata:
+  name: qwen2.5-3b
+  namespace: kubeai
+spec:
+  engine: OLlama
+  features:
+    - TextGeneration
+  maxReplicas: 1
+  minReplicas: 0
+  owner: Qwen
+  resourceProfile: nvidia-gpu-rtx3060:1
+  url: ollama://qwen2.5:3b

@@ -1,0 +1,49 @@
+# kagent Helm values for ai-platform PoC
+# Deployed to namespace: kagent
+
+# Image settings - use ghcr.io registry (cr.kagent.dev not published yet)
+registry: ghcr.io
+tag: "0.7.13"
+
+# Use OpenAI-compatible provider (LiteLLM exposes OpenAI API)
+providers:
+  default: openAI
+  openAI:
+    provider: OpenAI
+    model: "qwen2.5-3b"
+    apiKeySecretRef: kagent-openai
+    apiKeySecretKey: OPENAI_API_KEY
+
+# Disable tools/agents that need external services we don't have
+tools:
+  grafana-mcp:
+    enabled: false
+  querydoc:
+    enabled: false
+
+agents:
+  k8s-agent:
+    enabled: true
+  kgateway-agent:
+    enabled: true
+  helm-agent:
+    enabled: true
+  # Disable agents that need services not in this PoC
+  istio-agent:
+    enabled: false
+  promql-agent:
+    enabled: false
+  observability-agent:
+    enabled: false
+  argo-rollouts-agent:
+    enabled: false
+  cilium-policy-agent:
+    enabled: false
+  cilium-manager-agent:
+    enabled: false
+  cilium-debug-agent:
+    enabled: false
+
+# SQLite is fine for PoC
+database:
+  type: sqlite

@@ -1,0 +1,20 @@
+# KubeAI Helm values for ai-platform PoC
+# Deployed to namespace: kubeai
+
+resourceProfiles:
+  nvidia-gpu-rtx3060:
+    imageName: "nvidia-gpu"
+    nodeSelector:
+      nvidia.com/gpu.family: ampere
+      nvidia.com/gpu.memory: "12288"
+    limits:
+      nvidia.com/gpu: "1"
+
+# Open WebUI subchart - co-located with KubeAI
+open-webui:
+  enabled: true
+  ollamaUrls:
+    - http://kubeai/openai/v1
+  extraEnvVars:
+    - name: OPENAI_API_BASE_URL
+      value: "http://kubeai/openai/v1"

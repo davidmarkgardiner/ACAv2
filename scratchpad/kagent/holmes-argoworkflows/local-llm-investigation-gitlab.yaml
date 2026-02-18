@@ -1,0 +1,321 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: local-llm-investigation-gitlab
+  namespace: argo
+  annotations:
+    description: "Local Qwen 3 LLM investigation with GitLab issue creation"
+    version: "2.0"
+    model: "qwen3-14b"
+spec:
+  serviceAccountName: argo
+  entrypoint: local-investigate-and-report
+  activeDeadlineSeconds: 600
+
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 64Mi
+
+  arguments:
+    parameters:
+      - name: query
+        value: "Investigate Kubernetes resource issue"
+      - name: event_type
+        value: "Unknown"
+      - name: cluster
+        value: "homelab-prod"
+      - name: namespace
+        value: "default"
+      - name: resource_kind
+        value: "Pod"
+      - name: resource_name
+        value: "unknown"
+      - name: severity
+        value: "medium"
+      - name: error_message
+        value: ""
+      - name: gitlab_project_id
+        value: "68265584"
+      - name: gitlab_token
+        value: ""
+      - name: gitlab_url
+        value: "https://gitlab.com"
+      - name: mattermost_webhook_url
+        value: "http://mattermost.mattermost:8065/hooks/5mb3nzhrajtw4xk6m7dmnmm27w"
+      - name: local_llm_url
+        value: "http://kubeai.kubeai.svc.cluster.local/openai/v1"
+      - name: llm_model
+        value: "qwen3-14b"
+
+  templates:
+    - name: local-investigate-and-report
+      steps:
+        - - name: validate-and-test
+            template: validate-and-test
+        - - name: investigate
+            template: call-local-llm
+        - - name: report
+            template: format-and-create-issue
+        - - name: notify
+            template: mattermost-notify
+
+    - name: validate-and-test
+      script:
+        image: curlimages/curl:8.5.0
+        command: [sh]
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        source: |
+          echo "Local LLM Investigation Workflow"
+          echo "LLM: {{workflow.parameters.local_llm_url}} ({{workflow.parameters.llm_model}})"
+
+          if [ -z "{{workflow.parameters.gitlab_token}}" ]; then
+            echo "ERROR: gitlab_token is required"; exit 1
+          fi
+          if [ -z "{{workflow.parameters.query}}" ]; then
+            echo "ERROR: query is required"; exit 1
+          fi
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 10 --max-time 30 \
+            "{{workflow.parameters.local_llm_url}}/models" 2>/dev/null)
+
+          if [ "${HTTP_CODE}" -eq 200 ]; then
+            echo "LLM reachable, inputs valid"
+          else
+            echo "LLM not reachable (HTTP ${HTTP_CODE})"; exit 1
+          fi
+
+    - name: call-local-llm
+      retryStrategy:
+        limit: 2
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "10s"
+          factor: 2
+      script:
+        image: alpine:3.19
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        source: |
+          apk add --no-cache curl jq > /dev/null 2>&1
+          echo "Calling {{workflow.parameters.llm_model}}..."
+
+          cat > /tmp/prompt.json << 'PROMPT'
+          {
+            "model": "{{workflow.parameters.llm_model}}",
+            "messages": [
+              {
+                "role": "system",
+                "content": "/no_think You are a Kubernetes SRE expert. Analyze the following issue and provide: 1) Root cause analysis, 2) Key findings, 3) Recommended fixes, 4) Investigation checklist. Be concise and actionable."
+              },
+              {
+                "role": "user",
+                "content": "Investigate this Kubernetes issue:\n\nEvent Type: {{workflow.parameters.event_type}}\nCluster: {{workflow.parameters.cluster}}\nNamespace: {{workflow.parameters.namespace}}\nResource: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}\nSeverity: {{workflow.parameters.severity}}\nError Message: {{workflow.parameters.error_message}}\n\nQuery: {{workflow.parameters.query}}\n\nProvide a structured analysis."
+              }
+            ],
+            "max_tokens": 3000,
+            "temperature": 0.3
+          }
+          PROMPT
+
+          START_TIME=$(date +%s)
+
+          HTTP_CODE=$(curl -s -o /work/llm-response.json -w "%{http_code}" \
+            --connect-timeout 10 --max-time 180 \
+            -X POST "{{workflow.parameters.local_llm_url}}/chat/completions" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/prompt.json 2>/dev/null)
+
+          DURATION=$(( $(date +%s) - START_TIME ))
+          echo "HTTP: ${HTTP_CODE}, Duration: ${DURATION}s"
+
+          if [ "${HTTP_CODE}" -eq 200 ]; then
+            TOKENS=$(jq -r '.usage.total_tokens // 0' /work/llm-response.json)
+            echo "Tokens: ${TOKENS}"
+            jq --arg d "$DURATION" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg m "{{workflow.parameters.llm_model}}" \
+              '. + {_meta: {duration: ($d|tonumber), ts: $t, model: $m}}' \
+              /work/llm-response.json > /work/resp.json && mv /work/resp.json /work/llm-response.json
+          else
+            echo "FAILED"; cat /work/llm-response.json 2>/dev/null; exit 1
+          fi
+
+    - name: format-and-create-issue
+      script:
+        image: node:18-alpine
+        command: [node]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        source: |
+          const fs = require('fs');
+          const https = require('https');
+
+          let response;
+          try {
+            response = JSON.parse(fs.readFileSync('/work/llm-response.json', 'utf8'));
+          } catch (e) {
+            console.error('Failed to parse LLM response:', e.message);
+            response = { choices: [{ message: { content: '_Error parsing LLM response_' } }] };
+          }
+
+          const content = response.choices?.[0]?.message?.content || '_No analysis provided_';
+          const tokens = response.usage?.total_tokens || 0;
+          const duration = response._meta?.duration || 'N/A';
+          const model = response._meta?.model || 'unknown';
+          const investigationId = `local-llm-{{workflow.name}}-${Date.now()}`;
+          const timestamp = new Date().toISOString();
+
+          const errorMsg = '{{workflow.parameters.error_message}}';
+          const errorSection = errorMsg ? '```\n' + errorMsg + '\n```' : '_No error message provided_';
+          const rk = '{{workflow.parameters.resource_kind}}'.toLowerCase();
+
+          const body = [
+            '# Problem Summary (Local LLM Investigation)',
+            '',
+            '| Field | Value |',
+            '|-------|-------|',
+            '| **Alert Type** | {{workflow.parameters.event_type}} |',
+            '| **Cluster** | {{workflow.parameters.cluster}} |',
+            '| **Namespace** | {{workflow.parameters.namespace}} |',
+            '| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |',
+            `| **Timestamp** | ${timestamp} |`,
+            '| **Severity** | {{workflow.parameters.severity}} |',
+            `| **LLM Model** | ${model} (local) |`,
+            `| **Response Time** | ${duration}s |`,
+            `| **Tokens** | ${tokens} |`,
+            '',
+            '### Error Message',
+            errorSection,
+            '',
+            '---',
+            '',
+            '# Investigation & Analysis',
+            '',
+            content,
+            '',
+            '---',
+            '',
+            '# Next Steps',
+            '',
+            '- [ ] Review this investigation report',
+            '- [ ] Verify findings against cluster state',
+            '- [ ] Apply recommended fixes',
+            '- [ ] Close when resolved',
+            '',
+            '---',
+            '',
+            '```bash',
+            `kubectl get ${rk} {{workflow.parameters.resource_name}} -n {{workflow.parameters.namespace}}`,
+            `kubectl logs ${rk}/{{workflow.parameters.resource_name}} -n {{workflow.parameters.namespace}} --tail=100`,
+            `kubectl describe ${rk} {{workflow.parameters.resource_name}} -n {{workflow.parameters.namespace}}`,
+            '```',
+            '',
+            '<details><summary>Raw LLM Response</summary>',
+            '',
+            '```json',
+            JSON.stringify(response, null, 2),
+            '```',
+            '</details>',
+            '',
+            `*Auto-generated | ${model} | ${investigationId}*`,
+          ].join('\n');
+
+          // Create GitLab issue via HTTPS
+          const payload = JSON.stringify({
+            title: `[LOCAL-LLM][{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.namespace}}/{{workflow.parameters.resource_name}}`,
+            description: body,
+            labels: 'local-llm,qwen3,{{workflow.parameters.event_type}},{{workflow.parameters.severity}},auto-generated'
+          });
+
+          const url = new URL(`{{workflow.parameters.gitlab_url}}/api/v4/projects/{{workflow.parameters.gitlab_project_id}}/issues`);
+          const options = {
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              'PRIVATE-TOKEN': '{{workflow.parameters.gitlab_token}}',
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload)
+            }
+          };
+
+          const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              console.log(`GitLab HTTP: ${res.statusCode}`);
+              if (res.statusCode === 201) {
+                const gl = JSON.parse(data);
+                console.log(`Issue #${gl.iid}: ${gl.web_url}`);
+                fs.writeFileSync('/work/gitlab-issue-url.txt', gl.web_url);
+                fs.writeFileSync('/work/gitlab-issue-iid.txt', String(gl.iid));
+              } else {
+                console.error('GitLab error:', data);
+                process.exit(1);
+              }
+            });
+          });
+
+          req.on('error', (e) => {
+            console.error('Request failed:', e.message);
+            process.exit(1);
+          });
+
+          req.write(payload);
+          req.end();
+
+    - name: mattermost-notify
+      script:
+        image: curlimages/curl:8.5.0
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        source: |
+          ISSUE_URL=$(cat /work/gitlab-issue-url.txt 2>/dev/null || echo "unknown")
+          ISSUE_IID=$(cat /work/gitlab-issue-iid.txt 2>/dev/null || echo "?")
+
+          curl -s -X POST "{{workflow.parameters.mattermost_webhook_url}}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"username\": \"Holmes Bot\",
+              \"icon_url\": \"https://raw.githubusercontent.com/robusta-dev/holmesgpt/main/docs/images/logo.png\",
+              \"text\": \"### :rotating_light: Investigation Complete\n| Field | Value |\n|---|---|\n| **Cluster** | {{workflow.parameters.cluster}} |\n| **Event** | {{workflow.parameters.event_type}} |\n| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |\n| **Namespace** | {{workflow.parameters.namespace}} |\n| **Severity** | {{workflow.parameters.severity}} |\n| **Model** | {{workflow.parameters.llm_model}} |\n| **GitLab Issue** | [#${ISSUE_IID}](${ISSUE_URL}) |\n| **Workflow** | {{workflow.name}} |\n\n**Quick Commands:**\n\`\`\`\nkubectl get {{workflow.parameters.resource_kind}} {{workflow.parameters.resource_name}} -n {{workflow.parameters.namespace}}\nkubectl logs {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} -n {{workflow.parameters.namespace}} --tail=100\nkubectl describe {{workflow.parameters.resource_kind}} {{workflow.parameters.resource_name}} -n {{workflow.parameters.namespace}}\n\`\`\`\"
+            }"
+
+          echo "Mattermost notification sent"

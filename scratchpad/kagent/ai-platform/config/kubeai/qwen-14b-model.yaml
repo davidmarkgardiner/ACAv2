@@ -1,0 +1,17 @@
+# Qwen 2.5 14B Model CR for KubeAI
+# Larger model for better agent/tool-use capabilities
+# Requires 3B model scaled to minReplicas: 0 to share GPU
+apiVersion: kubeai.org/v1
+kind: Model
+metadata:
+  name: qwen2.5-14b
+  namespace: kubeai
+spec:
+  engine: OLlama
+  features:
+    - TextGeneration
+  maxReplicas: 1
+  minReplicas: 1
+  owner: Qwen
+  resourceProfile: nvidia-gpu-rtx3060:1
+  url: ollama://qwen2.5:14b

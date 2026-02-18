@@ -1,0 +1,154 @@
+# HolmesGPT Helm Values - Proxmox K8s Cluster
+# LLM: Qwen 3 14B via KubeAI (local, $0 cost)
+# Tools: AKS-MCP server with admin access for remediation
+#
+# Deploy:
+#   helm upgrade --install holmes robusta/holmes \
+#     --namespace holmesgpt --create-namespace \
+#     -f helm-values-proxmox.yaml
+#
+
+replicas: 1
+logLevel: INFO
+enableServiceLinks: false
+enableTelemetry: false
+
+## LLM via KubeAI (OpenAI-compatible)
+additionalEnvVars:
+  - name: MODEL
+    value: "openai/qwen3-14b"
+  - name: OPENAI_API_BASE
+    value: "http://kubeai.kubeai.svc.cluster.local/openai/v1"
+  - name: OPENAI_API_KEY
+    value: "not-needed"
+  - name: ENABLE_TELEMETRY
+    value: "false"
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: MAX_STEPS
+    value: "10"
+
+## Toolsets - DISABLE built-in k8s to force all operations through AKS-MCP
+## This ensures Holmes uses call_kubectl for both read AND write operations
+toolsets:
+  kubernetes/core:
+    enabled: false
+  kubernetes/logs:
+    enabled: false
+  robusta:
+    enabled: false
+  internet:
+    enabled: false
+  prometheus/metrics:
+    enabled: false
+
+## AKS-MCP for remediation (write operations)
+mcp_servers:
+  aks-mcp:
+    description: "AKS MCP server with ADMIN access for diagnosis and remediation"
+    config:
+      mode: streamable-http
+      url: http://aks-mcp.aks-mcp.svc.cluster.local:8000/mcp
+    llm_instructions: |
+      You have access to AKS-MCP tools for Kubernetes operations.
+      The primary tool is call_kubectl which accepts kubectl command arguments.
+
+      REMEDIATION WORKFLOW:
+      1. DIAGNOSE: Use call_kubectl to inspect resources
+      2. IDENTIFY: Determine root cause from logs, events, and resource status
+      3. FIX: Use call_kubectl to apply the fix
+      4. VERIFY: Confirm the fix worked
+
+      CALL_KUBECTL EXAMPLES:
+      - call_kubectl(args="get pods -n ghostfolio")
+      - call_kubectl(args="describe pod postgres-xxx -n ghostfolio")
+      - call_kubectl(args="logs postgres-xxx -n ghostfolio --tail=50")
+      - call_kubectl(args="rollout restart deployment/postgres -n ghostfolio")
+      - call_kubectl(args="scale deployment myapp --replicas=3 -n default")
+      - call_kubectl(args="patch deployment myapp -n default -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"myapp\",\"resources\":{\"limits\":{\"memory\":\"512Mi\"}}}]}}}}'")
+
+      CRITICAL RULES:
+      1. When asked to FIX/REMEDIATE: execute the fix, don't just suggest it
+      2. After fixing, VERIFY the fix worked with a get/describe command
+      3. If the first fix fails, try alternatives
+      4. Always report what was done and the outcome
+      5. NEVER use 'kubectl edit' - it requires interactive mode. Use 'patch', 'set image', 'set resources', or 'apply' instead
+      6. When using 'set image', ALWAYS check the actual container name with 'describe' first - it may differ from the deployment name
+
+## Resources
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+## Service
+service:
+  type: ClusterIP
+  port: 80
+
+## Health Probes
+livenessProbe:
+  tcpSocket:
+    port: 5050
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 5
+
+readinessProbe:
+  tcpSocket:
+    port: 5050
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 5
+
+## RBAC - Holmes needs read access for its built-in k8s toolsets
+customClusterRoleRules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - events
+      - namespaces
+      - pods
+      - pods/status
+      - pods/log
+      - services
+      - serviceaccounts
+      - endpoints
+      - nodes
+      - persistentvolumes
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - daemonsets
+      - replicasets
+      - statefulsets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+
+## Pod Security
+podSecurityContext:
+  runAsNonRoot: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

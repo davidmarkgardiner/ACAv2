@@ -1,0 +1,154 @@
+# Gateway API resources for ai-platform PoC
+# All services on separate subdomains under lab.danatlab.com
+# NPM forwards each subdomain -> NodePort 30988 -> kgateway -> correct backend
+#
+# Routes:
+#   ai.lab.danatlab.com      -> kagent UI     (kagent:8080)
+#   chat.lab.danatlab.com    -> Open WebUI    (kubeai:80)
+#   litellm.lab.danatlab.com -> LiteLLM       (litellm:4000)  - API + admin UI
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-platform-gw
+  namespace: kgateway-system
+spec:
+  gatewayClassName: kgateway
+  listeners:
+    - name: kagent
+      protocol: HTTP
+      port: 8080
+      hostname: ai.lab.danatlab.com
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: chat
+      protocol: HTTP
+      port: 8080
+      hostname: chat.lab.danatlab.com
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: litellm
+      protocol: HTTP
+      port: 8080
+      hostname: litellm.lab.danatlab.com
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# Agent Gateway for MCP/agent traffic
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agent-gw
+  namespace: agentgateway-system
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8081
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# ReferenceGrants for cross-namespace routing
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gw-to-litellm
+  namespace: litellm
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: kgateway-system
+  to:
+    - group: ""
+      kind: Service
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gw-to-kagent
+  namespace: kagent
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: kgateway-system
+  to:
+    - group: ""
+      kind: Service
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gw-to-kubeai
+  namespace: kubeai
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: kgateway-system
+  to:
+    - group: ""
+      kind: Service
+---
+# ai.lab.danatlab.com -> kagent UI
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kagent-ui-route
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: ai-platform-gw
+      namespace: kgateway-system
+      sectionName: kagent
+  hostnames:
+    - ai.lab.danatlab.com
+  rules:
+    - backendRefs:
+        - name: kagent-ui
+          namespace: kagent
+          port: 8080
+---
+# chat.lab.danatlab.com -> Open WebUI
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openwebui-route
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: ai-platform-gw
+      namespace: kgateway-system
+      sectionName: chat
+  hostnames:
+    - chat.lab.danatlab.com
+  rules:
+    - backendRefs:
+        - name: open-webui
+          namespace: kubeai
+          port: 80
+---
+# litellm.lab.danatlab.com -> LiteLLM (API + admin UI)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: litellm-route
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: ai-platform-gw
+      namespace: kgateway-system
+      sectionName: litellm
+  hostnames:
+    - litellm.lab.danatlab.com
+  rules:
+    - backendRefs:
+        - name: litellm
+          namespace: litellm
+          port: 4000

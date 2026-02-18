@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: investigate-
+  namespace: argo
+spec:
+  workflowTemplateRef:
+    name: local-llm-investigation-gitlab
+  arguments:
+    parameters:
+      # --- EDIT THESE FOR YOUR SCENARIO ---
+      - name: query
+        value: "Investigate CrashLoopBackOff in mattermost namespace"
+      - name: event_type
+        value: "CrashLoopBackOff"
+      - name: namespace
+        value: "mattermost"
+      - name: resource_kind
+        value: "Pod"
+      - name: resource_name
+        value: "mattermost-app"
+      - name: severity
+        value: "critical"
+      - name: error_message
+        value: "Back-off restarting failed container"
+      # --- GitLab token (required) ---
+      - name: gitlab_token
+        value: "REPLACE_ME"

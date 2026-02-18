@@ -1,0 +1,13 @@
+# ModelConfig CRD pointing kagent at LiteLLM with Qwen 14B model
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: litellm-qwen-14b
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: qwen2.5-14b
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    baseUrl: http://litellm.litellm.svc.cluster.local:4000/v1

@@ -1,0 +1,241 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: holmes-investigation-gitlab
+  namespace: argo
+spec:
+  serviceAccountName: argo-workflow
+  entrypoint: investigate-and-report
+  templates:
+    - name: investigate-and-report
+      steps:
+        - - name: holmes-investigation
+            template: call-holmes
+            arguments:
+              parameters:
+                - name: query
+                  value: "{{workflow.parameters.query}}"
+                - name: title
+                  value: "{{workflow.parameters.title}}"
+        - - name: format-report
+            template: format-gitlab-issue
+            arguments:
+              artifacts:
+                - name: holmes-response
+                  from: "{{steps.holmes-investigation.outputs.artifacts.holmes-response}}"
+        - - name: create-gitlab-issue
+            template: gitlab-api-call
+            arguments:
+              artifacts:
+                - name: issue-body
+                  from: "{{steps.format-report.outputs.artifacts.issue-body}}"
+
+    - name: call-holmes
+      inputs:
+        parameters:
+          - name: query
+          - name: title
+      outputs:
+        artifacts:
+          - name: holmes-response
+            path: /tmp/holmes-response.json
+      container:
+        image: curlimages/curl:latest
+        command: [sh, -c]
+        args:
+          - |
+            curl -s -X POST http://holmes-holmes.holmes:5050/api/investigate \
+              -H "Content-Type: application/json" \
+              -d '{
+                "query": "{{inputs.parameters.query}}",
+                "title": "{{inputs.parameters.title}}",
+                "description": "Automated investigation via Argo Workflow",
+                "source": "argo-workflow",
+                "subject": {
+                  "kind": "{{workflow.parameters.resource_kind}}",
+                  "name": "{{workflow.parameters.resource_name}}",
+                  "namespace": "{{workflow.parameters.namespace}}"
+                },
+                "context": {
+                  "cluster": "{{workflow.parameters.cluster}}",
+                  "event_type": "{{workflow.parameters.event_type}}",
+                  "severity": "{{workflow.parameters.severity}}"
+                }
+              }' > /tmp/holmes-response.json
+            cat /tmp/holmes-response.json
+
+    - name: format-gitlab-issue
+      inputs:
+        artifacts:
+          - name: holmes-response
+            path: /tmp/holmes-response.json
+      outputs:
+        artifacts:
+          - name: issue-body
+            path: /tmp/issue-body.md
+      script:
+        image: node:18-alpine
+        command: [node]
+        source: |
+          const fs = require('fs');
+          const response = JSON.parse(fs.readFileSync('/tmp/holmes-response.json', 'utf8'));
+          
+          const issueBody = `# 🔴 Problem Summary
+
+| Field | Value |
+|-------|-------|
+| **Alert Type** | ${process.env.EVENT_TYPE || 'Unknown'} |
+| **Cluster** | ${process.env.CLUSTER || 'Unknown'} |
+| **Namespace** | ${process.env.NAMESPACE || 'Unknown'} |
+| **Resource** | ${process.env.RESOURCE_KIND || 'Unknown'}/${process.env.RESOURCE_NAME || 'Unknown'} |
+| **Event** | ${process.env.EVENT_TYPE || 'Unknown'} |
+| **Timestamp** | ${new Date().toISOString()} |
+| **Severity** | ${process.env.SEVERITY || 'medium'} |
+
+### Error Message
+${process.env.ERROR_MESSAGE ? '```\n' + process.env.ERROR_MESSAGE + '\n```' : '_No specific error message provided_'}
+
+---
+
+# 🔍 Investigation & Analysis
+
+### Holmes AI Analysis
+${response.analysis || '_No analysis provided by Holmes_'}
+
+### Key Findings
+${response.sections ? response.sections.map(s => '- ' + s).join('\n') : '_No specific sections returned_'}
+
+### Tool Calls Executed
+${response.tool_calls ? response.tool_calls.map(t => '- \`' + t.tool_name + '\`').join('\n') : '_No tools were called_'}
+
+---
+
+# 📊 Investigation Metrics
+
+| Metric | Value |
+|--------|-------|
+| **LLM Calls** | ${response.num_llm_calls || 'N/A'} |
+| **Investigation Status** | Completed |
+| **Workflow** | ${process.env.WORKFLOW_NAME || 'Unknown'} |
+| **Run ID** | ${process.env.ARGO_WORKFLOW_NAME || 'Unknown'} |
+
+---
+
+# 🚀 Recommended Next Steps
+
+### Automated Recommendations:
+${response.analysis ? 'Based on the Holmes investigation, the following actions are suggested:\n\n1. Review the analysis above\n2. Check affected resources\n3. Apply fixes if identified\n4. Monitor for recurrence' : '_No specific recommendations generated_'}
+
+### For SRE Team:
+1. Review this investigation report
+2. Verify the Holmes findings
+3. Apply any recommended fixes
+4. Close this issue when resolved
+5. Schedule post-mortem if critical
+
+---
+
+# 📋 Investigation Checklist
+
+- [x] Holmes AI investigation triggered
+- [x] Initial analysis completed
+- [x] Findings documented
+- [ ] Fix applied (manual step)
+- [ ] Verification complete
+- [ ] Monitoring confirmed
+- [x] Incident logged
+- [ ] Post-mortem scheduled (if critical)
+
+---
+
+# 📎 Additional Information
+
+### Raw Holmes Response
+<details>
+<summary>Click to expand full JSON response</summary>
+
+\`\`\`json
+${JSON.stringify(response, null, 2)}
+\`\`\`
+</details>
+
+### Related Resources
+- Workflow: ${process.env.ARGO_WORKFLOW_NAME || 'Unknown'}
+- Holmes Service: http://holmes-holmes.holmes:5050
+- Investigation Time: ${new Date().toISOString()}
+
+---
+
+*Auto-generated by Holmes AI + Argo Workflow Integration*
+*Investigation ID: ${process.env.ARGO_WORKFLOW_NAME || 'unknown'}-${Date.now()}*
+`;
+          
+          fs.writeFileSync('/tmp/issue-body.md', issueBody);
+          console.log('Issue body created successfully');
+        env:
+          - name: EVENT_TYPE
+            value: "{{workflow.parameters.event_type}}"
+          - name: CLUSTER
+            value: "{{workflow.parameters.cluster}}"
+          - name: NAMESPACE
+            value: "{{workflow.parameters.namespace}}"
+          - name: RESOURCE_KIND
+            value: "{{workflow.parameters.resource_kind}}"
+          - name: RESOURCE_NAME
+            value: "{{workflow.parameters.resource_name}}"
+          - name: SEVERITY
+            value: "{{workflow.parameters.severity}}"
+          - name: ERROR_MESSAGE
+            value: "{{workflow.parameters.error_message}}"
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+
+    - name: gitlab-api-call
+      inputs:
+        artifacts:
+          - name: issue-body
+            path: /tmp/issue-body.md
+      container:
+        image: curlimages/curl:latest
+        command: [sh, -c]
+        args:
+          - |
+            ISSUE_TITLE="[{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.namespace}}/{{workflow.parameters.resource_name}} - Holmes Investigation"
+            ISSUE_BODY=$(cat /tmp/issue-body.md | sed 's/"/\\"/g' | tr '\n' ' ')
+            
+            curl -s -X POST "https://gitlab.com/api/v4/projects/{{workflow.parameters.gitlab_project_id}}/issues" \
+              -H "PRIVATE-TOKEN: {{workflow.parameters.gitlab_token}}" \
+              -H "Content-Type: application/json" \
+              -d "{\"title\":\"${ISSUE_TITLE}\",\"description\":\"${ISSUE_BODY}\",\"labels\":\"holmes-investigation,{{workflow.parameters.event_type}},{{workflow.parameters.severity}},auto-generated\"}" \
+              -o /tmp/gitlab-response.json
+            
+            cat /tmp/gitlab-response.json
+            
+            # Extract and output the issue URL
+            ISSUE_URL=$(cat /tmp/gitlab-response.json | grep -o '"web_url":"[^"]*"' | cut -d'"' -f4)
+            echo "GitLab Issue Created: ${ISSUE_URL}"
+
+  arguments:
+    parameters:
+      - name: query
+        value: "Investigate pod failure"
+      - name: title
+        value: "Automated Investigation"
+      - name: event_type
+        value: "Unknown"
+      - name: cluster
+        value: "homelab-prod"
+      - name: namespace
+        value: "default"
+      - name: resource_kind
+        value: "Pod"
+      - name: resource_name
+        value: "unknown"
+      - name: severity
+        value: "medium"
+      - name: error_message
+        value: ""
+      - name: gitlab_project_id
+        value: "68265584"
+      - name: gitlab_token
+        value: ""  # Set via workflow parameter or secret
