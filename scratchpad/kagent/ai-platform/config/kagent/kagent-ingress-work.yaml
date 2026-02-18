@@ -1,0 +1,104 @@
+# kagent UI Ingress for Work (AKS with Istio add-on)
+# Exposes kagent UI over HTTPS via Istio ingress gateway.
+#
+# Prerequisites:
+#   - Istio add-on enabled on the AKS cluster
+#   - TLS cert secret exists (see bottom of file)
+#   - kagent UI service running: kubectl get svc -n kagent | grep ui
+#
+# Deploy:
+#   kubectl apply -f kagent-ingress-work.yaml
+#
+# If you already have a shared Istio Gateway, skip the Gateway resource
+# and just point the VirtualService at your existing gateway.
+
+---
+# Istio Gateway — handles TLS termination
+# If you already have a shared gateway, skip this and update the
+# VirtualService gateways: field to reference your existing one.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: kagent-gateway
+  namespace: kagent
+spec:
+  selector:
+    istio: aks-istio-ingressgateway-external  # AKS Istio add-on external gateway
+    # If using internal gateway instead:
+    # istio: aks-istio-ingressgateway-internal
+  servers:
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: kagent-tls  # TLS secret (must be in istio-ingress namespace for AKS add-on)
+      hosts:
+        - kagent.your-domain.com    # Change this
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      tls:
+        httpsRedirect: true
+      hosts:
+        - kagent.your-domain.com    # Change this
+
+---
+# VirtualService — routes traffic to kagent UI
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: kagent-ui
+  namespace: kagent
+spec:
+  hosts:
+    - kagent.your-domain.com        # Change this
+  gateways:
+    - kagent-gateway
+  http:
+    - route:
+        - destination:
+            host: kagent-ui.kagent.svc.cluster.local
+            port:
+              number: 8080
+
+---
+# (Optional) Also expose the kagent controller API if agents/tools
+# need to reach it from outside the cluster.
+# apiVersion: networking.istio.io/v1
+# kind: VirtualService
+# metadata:
+#   name: kagent-api
+#   namespace: kagent
+# spec:
+#   hosts:
+#     - kagent-api.your-domain.com
+#   gateways:
+#     - kagent-gateway
+#   http:
+#     - route:
+#         - destination:
+#             host: kagent-controller.kagent.svc.cluster.local
+#             port:
+#               number: 8083
+
+# ============================================================
+# TLS Certificate
+# ============================================================
+# For AKS Istio add-on, the TLS secret MUST be in the
+# istio-ingress namespace (aks-istio-system or istio-system),
+# NOT in the kagent namespace.
+#
+# Create it:
+#   kubectl create secret tls kagent-tls \
+#     -n aks-istio-ingress \
+#     --cert=tls.crt --key=tls.key
+#
+# Or if using an existing wildcard cert:
+#   credentialName: your-wildcard-tls-secret
+#
+# Note: The AKS Istio add-on ingress gateway runs in the
+# aks-istio-ingress namespace. The credentialName in the
+# Gateway must reference a secret in THAT namespace.
