@@ -1,0 +1,31 @@
+# RemoteMCPServer CRDs - connects kagent agents to AKS-MCP instances
+#
+# Homelab: Only the readonly server is deployed (kubectl/helm tools).
+# Work: Deploy both readonly + readwrite instances for triage/remediation split.
+---
+# Readonly AKS-MCP instance - used by SRE Triage Agent
+apiVersion: kagent.dev/v1alpha2
+kind: RemoteMCPServer
+metadata:
+  name: aks-mcp-readonly
+  namespace: kagent
+spec:
+  url: "http://aks-mcp.aks-mcp.svc:8000/mcp"
+  timeout: 120s
+  sseReadTimeout: 10m0s
+  description: "AKS-MCP readonly - kubectl, helm, Azure diagnostics, monitoring, fleet (read-only operations)"
+---
+# Readwrite AKS-MCP instance - used by SRE Remediation Agent
+# Homelab: Not deployed by default. Uncomment when testing remediation.
+# Work: Deploy aks-mcp-readwrite Helm release first, then apply this.
+#
+# apiVersion: kagent.dev/v1alpha2
+# kind: RemoteMCPServer
+# metadata:
+#   name: aks-mcp-readwrite
+#   namespace: kagent
+# spec:
+#   url: "http://aks-mcp-readwrite.aks-mcp.svc:8000/mcp"
+#   timeout: 120s
+#   sseReadTimeout: 10m0s
+#   description: "AKS-MCP readwrite - can scale node pools, restart pods, apply patches, run helm upgrades"
