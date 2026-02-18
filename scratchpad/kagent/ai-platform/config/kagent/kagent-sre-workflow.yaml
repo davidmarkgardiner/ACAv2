@@ -1,0 +1,525 @@
+# KAgent SRE Workflow
+# Uses kagent's SRE Triage Agent (readonly) or SRE Remediation Agent (readwrite)
+# via the A2A protocol to diagnose and optionally fix Kubernetes issues
+#
+# Flow: validate → KAgent A2A → GitLab issue → Mattermost
+#
+# Agents:
+# - sre-triage-agent: readonly investigation, root cause analysis (remediate=false)
+# - sre-remediation-agent: readwrite, can fix issues (remediate=true)
+# - Both use k8s tools + AKS-MCP via MCP tool servers
+#
+# Replaces Holmes with kagent — same parameters, same reporting pipeline,
+# different AI backend. Keep both to compare.
+#
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: kagent-sre-workflow
+  namespace: argo
+  labels:
+    app: k8s-triage
+    type: kagent-sre
+  annotations:
+    description: "KAgent SRE workflow - diagnoses and optionally fixes Kubernetes issues via A2A"
+    version: "1.0"
+spec:
+  serviceAccountName: argo
+  entrypoint: investigate-fix-report
+  activeDeadlineSeconds: 900
+
+  ttlStrategy:
+    secondsAfterCompletion: 600
+    secondsAfterSuccess: 300
+    secondsAfterFailure: 1800
+  podGC:
+    strategy: OnWorkflowCompletion
+
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        storageClassName: local-path
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 64Mi
+
+  arguments:
+    parameters:
+      - name: query
+        value: "Investigate and fix Kubernetes resource issue"
+      - name: event_type
+        value: "Unknown"
+      - name: cluster
+        value: "proxmox-k8s"
+      - name: namespace
+        value: "default"
+      - name: resource_kind
+        value: "Pod"
+      - name: resource_name
+        value: "unknown"
+      - name: severity
+        value: "medium"
+      - name: error_message
+        value: ""
+      - name: remediate
+        value: "false"
+      - name: gitlab_project_id
+        value: "68265584"
+      - name: gitlab_url
+        value: "https://gitlab.com"
+      - name: mattermost_webhook_url
+        value: "http://mattermost.mattermost:8065/hooks/placeholder"
+      - name: kagent_controller_url
+        value: "http://kagent-controller.kagent.svc.cluster.local:8083"
+
+  templates:
+    - name: investigate-fix-report
+      steps:
+        - - name: validate
+            template: validate-inputs
+        - - name: kagent-investigate
+            template: call-kagent
+        - - name: report
+            template: create-gitlab-issue
+            continueOn:
+              failed: true
+        - - name: notify
+            template: mattermost-notify
+
+    # Step 1: Validate inputs and KAgent connectivity
+    - name: validate-inputs
+      script:
+        image: curlimages/curl:8.5.0
+        command: [sh]
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        source: |
+          echo "=== KAgent SRE Workflow v1.0 ==="
+          echo "Controller: {{workflow.parameters.kagent_controller_url}}"
+          echo "Target: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} in {{workflow.parameters.namespace}}"
+          REMEDIATE="{{workflow.parameters.remediate}}"
+          if [ "$REMEDIATE" = "true" ]; then
+            AGENT="sre-remediation-agent"
+            echo "Mode: REMEDIATION (sre-remediation-agent)"
+          else
+            AGENT="sre-triage-agent"
+            echo "Mode: TRIAGE (sre-triage-agent)"
+          fi
+
+          if [ -z "{{workflow.parameters.query}}" ]; then
+            echo "ERROR: query is required"; exit 1
+          fi
+
+          # Check kagent controller is reachable
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 \
+            "{{workflow.parameters.kagent_controller_url}}/api/agents" 2>/dev/null)
+
+          case "${HTTP_CODE}" in ''|*[!0-9]*) echo "ERROR: KAgent controller unreachable"; exit 1 ;; esac
+          if [ "${HTTP_CODE}" -eq 200 ]; then
+            echo "KAgent controller reachable (HTTP ${HTTP_CODE})"
+          else
+            echo "ERROR: KAgent controller not reachable (HTTP ${HTTP_CODE})"; exit 1
+          fi
+
+          # Check target agent exists
+          AGENT_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 \
+            "{{workflow.parameters.kagent_controller_url}}/api/agents/kagent/${AGENT}" 2>/dev/null)
+
+          if [ "${AGENT_CODE}" -eq 200 ]; then
+            echo "Agent ${AGENT} found and ready"
+          else
+            echo "WARNING: Agent ${AGENT} check returned HTTP ${AGENT_CODE} — may still work via A2A"
+          fi
+
+    # Step 2: Call KAgent via A2A protocol (message/send)
+    #
+    # remediate=false → sre-triage-agent (readonly: describe, logs, events)
+    # remediate=true  → sre-remediation-agent (readwrite: patch, create, delete, scale)
+    #
+    # A2A endpoint: POST /api/a2a/kagent/{agent-name}/  (trailing slash required)
+    # Protocol: Google A2A (JSON-RPC 2.0, method: message/send)
+    #
+    - name: call-kagent
+      retryStrategy:
+        limit: 1
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "15s"
+          factor: 2
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        source: |
+          REMEDIATE="{{workflow.parameters.remediate}}"
+
+          # Select agent and build prompt based on mode
+          if [ "$REMEDIATE" = "true" ]; then
+            AGENT_NAME="sre-remediation-agent"
+
+            cat > /tmp/prompt.txt << 'PROMPTEOF'
+          Fix this Kubernetes issue:
+
+          Cluster: {{workflow.parameters.cluster}}
+          Namespace: {{workflow.parameters.namespace}}
+          Resource: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}
+          Event: {{workflow.parameters.event_type}}
+          Severity: {{workflow.parameters.severity}}
+          Error: {{workflow.parameters.error_message}}
+
+          Query: {{workflow.parameters.query}}
+
+          CRITICAL: When calling any tool, you MUST use the exact namespace "{{workflow.parameters.namespace}}" — copy it exactly, do not retype it from memory.
+
+          Instructions:
+          1. Describe the resource to understand current state and get container names.
+          2. Check logs and events for the root cause.
+          3. Apply the minimum fix needed to resolve the issue.
+          4. After fixing, verify the resource is healthy (pods Running, no errors).
+          5. Report what you did in your standard output format (Action/Before/After/Status/Rollback).
+          PROMPTEOF
+          else
+            AGENT_NAME="sre-triage-agent"
+
+            cat > /tmp/prompt.txt << 'PROMPTEOF'
+          Investigate this Kubernetes issue:
+
+          Cluster: {{workflow.parameters.cluster}}
+          Namespace: {{workflow.parameters.namespace}}
+          Resource: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}
+          Event: {{workflow.parameters.event_type}}
+          Severity: {{workflow.parameters.severity}}
+          Error: {{workflow.parameters.error_message}}
+
+          Query: {{workflow.parameters.query}}
+
+          CRITICAL: When calling any tool, you MUST use the exact namespace "{{workflow.parameters.namespace}}" — copy it exactly, do not retype it from memory.
+
+          Use your tools to gather evidence. Do not guess. Report findings in your standard output format (Issue/Evidence/Root Cause/Recommended Fix).
+          PROMPTEOF
+          fi
+
+          PROMPT=$(cat /tmp/prompt.txt)
+          TASK_ID="argo-$(echo {{workflow.name}} | tr -cd 'a-z0-9-')-$(date +%s)"
+
+          # Build A2A message/send request (Google A2A JSON-RPC 2.0)
+          jq -n \
+            --arg task_id "$TASK_ID" \
+            --arg prompt "$PROMPT" \
+            '{
+              "jsonrpc": "2.0",
+              "id": $task_id,
+              "method": "message/send",
+              "params": {
+                "message": {
+                  "role": "user",
+                  "parts": [{"kind": "text", "text": $prompt}]
+                }
+              }
+            }' > /tmp/a2a-request.json
+
+          echo "Calling ${AGENT_NAME} via A2A (remediate=${REMEDIATE})..."
+          START=$(date +%s)
+
+          HTTP_CODE=$(curl -s -o /work/kagent-response.json -w "%{http_code}" \
+            --connect-timeout 10 --max-time 300 \
+            -X POST "{{workflow.parameters.kagent_controller_url}}/api/a2a/kagent/${AGENT_NAME}/" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/a2a-request.json)
+
+          DURATION=$(( $(date +%s) - START ))
+          echo "HTTP: ${HTTP_CODE}, Duration: ${DURATION}s"
+
+          case "${HTTP_CODE}" in ''|*[!0-9]*) echo "ERROR: curl failed — could not reach agent"; exit 1 ;; esac
+          if [ "${HTTP_CODE}" -ne 200 ]; then
+            echo "KAgent A2A call failed (HTTP ${HTTP_CODE})"
+            cat /work/kagent-response.json 2>/dev/null
+            exit 1
+          fi
+
+          # Check for JSON-RPC error
+          RPC_ERROR=$(jq -r '.error.message // empty' /work/kagent-response.json 2>/dev/null)
+          if [ -n "$RPC_ERROR" ]; then
+            echo "A2A RPC error: ${RPC_ERROR}"
+            exit 1
+          fi
+
+          # Check task state
+          STATE=$(jq -r '.result.status.state // "unknown"' /work/kagent-response.json)
+          echo "Task state: ${STATE}"
+
+          if [ "$STATE" = "failed" ]; then
+            echo "Agent task failed"
+            # status.message may be a string or an A2A Message object
+            jq -r '
+              if (.result.status.message | type) == "string" then .result.status.message
+              elif (.result.status.message | type) == "object" then (.result.status.message.parts[]?.text // "No details")
+              else "No error details"
+              end
+            ' /work/kagent-response.json
+            exit 1
+          fi
+
+          # Extract analysis from artifacts (primary source)
+          ANALYSIS=$(jq -r '
+            [.result.artifacts[]?.parts[]? | select(.kind == "text") | .text] | join("\n\n")
+          ' /work/kagent-response.json 2>/dev/null)
+
+          if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ] || [ "$ANALYSIS" = "" ]; then
+            # Fallback: last agent message from history
+            ANALYSIS=$(jq -r '
+              [.result.history[]? | select(.role == "agent") | .parts[]? | select(.kind == "text") | .text] | last // "No analysis returned"
+            ' /work/kagent-response.json 2>/dev/null)
+          fi
+
+          # Count conversation turns (proxy for tool call count)
+          NUM_HISTORY=$(jq -r '.result.history | length // 0' /work/kagent-response.json 2>/dev/null)
+          echo "Analysis: $(echo "$ANALYSIS" | wc -c | tr -d ' ') chars, History entries: ${NUM_HISTORY}, Duration: ${DURATION}s"
+
+          # Add metadata for downstream steps
+          jq --arg d "$DURATION" \
+             --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --arg r "$REMEDIATE" \
+             --arg a "$AGENT_NAME" \
+             --arg s "$STATE" \
+            '. + {_meta: {duration_s: ($d|tonumber), timestamp: $t, remediated: $r, agent: $a, state: $s}}' \
+            /work/kagent-response.json > /work/resp.json && mv /work/resp.json /work/kagent-response.json
+
+    # Step 3: Create GitLab issue with analysis/remediation results
+    - name: create-gitlab-issue
+      retryStrategy:
+        limit: 2
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "5s"
+          factor: 2
+      script:
+        image: node:22-alpine
+        command: [node]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        env:
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-token
+                key: GITLAB_TOKEN
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        source: |
+          const fs = require('fs');
+          const https = require('https');
+
+          let response;
+          try {
+            response = JSON.parse(fs.readFileSync('/work/kagent-response.json', 'utf8'));
+          } catch (e) {
+            console.error('Failed to parse KAgent response:', e.message);
+            response = { result: { artifacts: [], status: { state: 'error' }, history: [] } };
+          }
+
+          // Extract analysis from A2A artifacts (primary)
+          const artifacts = response.result?.artifacts || [];
+          let analysis = artifacts
+            .flatMap(a => (a.parts || []))
+            .filter(p => p.kind === 'text')
+            .map(p => p.text)
+            .join('\n\n');
+
+          if (!analysis) {
+            // Fallback: last agent message from history
+            const history = response.result?.history || [];
+            const agentTexts = history
+              .filter(m => m.role === 'agent')
+              .flatMap(m => (m.parts || []))
+              .filter(p => p.kind === 'text')
+              .map(p => p.text);
+            analysis = agentTexts[agentTexts.length - 1] || '_No analysis returned by agent_';
+          }
+
+          // Strip think tags (Qwen sometimes emits these)
+          analysis = analysis.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+
+          const state = response.result?.status?.state || 'unknown';
+          const duration = response._meta?.duration_s || 'N/A';
+          const agentName = response._meta?.agent || 'unknown';
+          const remediated = response._meta?.remediated === 'true';
+          const timestamp = new Date().toISOString();
+
+          // Count conversation turns
+          const history = response.result?.history || [];
+          const agentTurns = history.filter(m => m.role === 'agent').length;
+
+          const errorMsg = '{{workflow.parameters.error_message}}';
+          const errorSection = errorMsg ? '```\n' + errorMsg + '\n```' : '_No error message_';
+
+          const statusEmoji = remediated ? 'wrench' : 'mag';
+          const statusLabel = remediated ? 'REMEDIATION APPLIED' : 'TRIAGE ANALYSIS';
+
+          const body = [
+            `# ${statusLabel}`,
+            '',
+            '| Field | Value |',
+            '|-------|-------|',
+            '| **Alert Type** | {{workflow.parameters.event_type}} |',
+            '| **Cluster** | {{workflow.parameters.cluster}} |',
+            '| **Namespace** | {{workflow.parameters.namespace}} |',
+            '| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |',
+            `| **Timestamp** | ${timestamp} |`,
+            '| **Severity** | {{workflow.parameters.severity}} |',
+            `| **Mode** | ${statusLabel} |`,
+            `| **Agent** | ${agentName} |`,
+            `| **Task State** | ${state} |`,
+            `| **Agent Turns** | ${agentTurns} |`,
+            `| **Duration** | ${duration}s |`,
+            '',
+            '### Error Message',
+            errorSection,
+            '',
+            '---',
+            '',
+            '# KAgent Analysis',
+            '',
+            analysis,
+            '',
+            '---',
+            '',
+            '# Verification',
+            '',
+            remediated
+              ? '- [ ] Verify the fix is holding\n- [ ] Monitor for recurrence\n- [ ] Close when confirmed stable'
+              : '- [ ] Review analysis findings\n- [ ] Apply recommended fixes manually\n- [ ] Verify and close',
+            '',
+            '<details><summary>Raw A2A Response</summary>',
+            '',
+            '```json',
+            JSON.stringify(response, null, 2).substring(0, 10000),
+            '```',
+            '</details>',
+            '',
+            `*KAgent ${agentName} | ${statusLabel} | {{workflow.name}}*`,
+          ].join('\n');
+
+          const label = remediated ? 'remediation' : 'triage';
+          const payload = JSON.stringify({
+            title: `[:${statusEmoji}:][{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.namespace}}/{{workflow.parameters.resource_name}}`,
+            description: body,
+            labels: `kagent,${label},{{workflow.parameters.event_type}},{{workflow.parameters.severity}},auto-generated`
+          });
+
+          const url = new URL(`{{workflow.parameters.gitlab_url}}/api/v4/projects/{{workflow.parameters.gitlab_project_id}}/issues`);
+          const options = {
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              'PRIVATE-TOKEN': process.env.GITLAB_TOKEN,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload)
+            }
+          };
+
+          const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              console.log(`GitLab HTTP: ${res.statusCode}`);
+              if (res.statusCode === 201) {
+                const gl = JSON.parse(data);
+                console.log(`Issue #${gl.iid}: ${gl.web_url}`);
+                fs.writeFileSync('/work/gitlab-issue-url.txt', gl.web_url);
+                fs.writeFileSync('/work/gitlab-issue-iid.txt', String(gl.iid));
+              } else {
+                console.error('GitLab error:', data);
+                process.exit(1);
+              }
+            });
+          });
+
+          req.on('error', (e) => {
+            console.error('Request failed:', e.message);
+            process.exit(1);
+          });
+
+          req.write(payload);
+          req.end();
+
+    # Step 4: Notify Mattermost
+    - name: mattermost-notify
+      script:
+        image: curlimages/curl:8.5.0
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        env:
+          - name: MATTERMOST_WEBHOOK_URL
+            valueFrom:
+              secretKeyRef:
+                name: mattermost-webhook
+                key: url
+                optional: true
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        source: |
+          # Use Secret if available, fall back to workflow parameter
+          WEBHOOK_URL="${MATTERMOST_WEBHOOK_URL:-{{workflow.parameters.mattermost_webhook_url}}}"
+
+          if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" = "" ]; then
+            echo "No Mattermost webhook configured, skipping notification"
+            exit 0
+          fi
+
+          ISSUE_URL=$(cat /work/gitlab-issue-url.txt 2>/dev/null || echo "unknown")
+          ISSUE_IID=$(cat /work/gitlab-issue-iid.txt 2>/dev/null || echo "?")
+          REMEDIATE="{{workflow.parameters.remediate}}"
+
+          if [ "$REMEDIATE" = "true" ]; then
+            ICON=":wrench:"
+            STATUS="Remediation Applied"
+            AGENT="sre-remediation-agent"
+          else
+            ICON=":mag:"
+            STATUS="Triage Complete"
+            AGENT="sre-triage-agent"
+          fi
+
+          curl -s -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"username\": \"KAgent SRE\",
+              \"icon_url\": \"https://avatars.githubusercontent.com/u/193178627\",
+              \"text\": \"### ${ICON} ${STATUS}\n| Field | Value |\n|---|---|\n| **Cluster** | {{workflow.parameters.cluster}} |\n| **Event** | {{workflow.parameters.event_type}} |\n| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |\n| **Namespace** | {{workflow.parameters.namespace}} |\n| **Severity** | {{workflow.parameters.severity}} |\n| **Agent** | ${AGENT} |\n| **Mode** | ${STATUS} |\n| **GitLab** | [#${ISSUE_IID}](${ISSUE_URL}) |\n| **Workflow** | {{workflow.name}} |\"
+            }"
+
+          echo "Notification sent (${STATUS}, agent: ${AGENT}, issue #${ISSUE_IID})"
