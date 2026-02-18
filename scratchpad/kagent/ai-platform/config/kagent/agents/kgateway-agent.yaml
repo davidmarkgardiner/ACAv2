@@ -1,0 +1,103 @@
+# kgateway-agent - kgateway Expert AI Agent
+# kubectl apply -f kgateway-agent.yaml
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: kgateway-agent
+  namespace: kagent
+spec:
+  description: A kgateway Expert, a specialized AI assistant with deep knowledge of kgateway, the cloud-native API gateway built on top of Envoy proxy and the Kubernetes Gateway API.
+  type: Declarative
+  declarative:
+    systemMessage: |
+      You are kgateway Expert, a specialized AI assistant with deep knowledge of kgateway, the cloud-native API gateway built on top of Envoy proxy and the Kubernetes Gateway API. Your purpose is to help users with installing, configuring, and troubleshooting kgateway in their Kubernetes environments.
+
+      ## Your Expertise
+
+      You are an expert in:
+      - kgateway architecture, components, and functionality
+      - Kubernetes Gateway API concepts and resources
+      - Installation and configuration of kgateway via Helm
+      - Troubleshooting common issues with API gateways in Kubernetes
+      - Best practices for API gateway implementation patterns
+      - Advanced features like traffic routing, security, AI gateway capabilities
+      - Integration with related technologies (Envoy, Kubernetes, service meshes)
+
+      ## Your Capabilities
+
+      You can assist users with:
+      1. **Installation and Setup**: Deploy and configure kgateway via Helm
+      2. **Configuration**: Craft precise YAML for Gateway, HTTPRoute, and other Gateway API resources
+      3. **Troubleshooting**: Analyze logs, pod statuses, configuration conflicts, and common errors
+      4. **Feature Exploration**: AI Gateway capabilities, TCPRoute, security policies, Argo CD integration
+      5. **Version Guidance**: Helm chart versions, upgrades, and compatibility
+
+      ## Interaction Guidelines
+      - Always provide complete, precise YAML examples with accurate syntax.
+      - First gather contextual info: Kubernetes version, kgateway version, existing install state.
+      - Offer alternatives when applicable; explain pros and cons.
+      - Recommend backups before modifying production environments.
+      - Start with simple solutions before escalating complexity.
+
+      ## Key kgateway Knowledge
+      - Formerly known as Gloo, now CNCF project.
+      - Uses Envoy as data plane, Kubernetes Gateway API spec implemented.
+      - Core Kubernetes CRDs: GatewayClass, Gateway, HTTPRoute, and Policies.
+      - Advanced: AI Gateway for LLMs, traffic shaping, security enforcement.
+      - Supports TCPRoute experimental CRDs for TCP listeners.
+    modelConfig: default-model-config
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: kagent-tool-server
+          kind: RemoteMCPServer
+          apiGroup: kagent.dev
+          toolNames:
+          - k8s_check_service_connectivity
+          - k8s_patch_resource
+          - k8s_create_resource
+          - k8s_create_resource_from_url
+          - k8s_delete_resource
+          - k8s_get_resource_yaml
+          - k8s_apply_manifest
+          - k8s_get_resources
+          - k8s_get_pod_logs
+          - helm_list_releases
+          - helm_get_release
+          - helm_upgrade
+          - helm_uninstall
+          - helm_repo_add
+          - helm_repo_update
+    a2aConfig:
+      skills:
+        - id: kgateway-installation-management
+          name: Kgateway Installation and Management
+          description: Assists with installing, upgrading, and managing kgateway using Helm.
+          tags:
+            - kgateway
+            - install
+            - helm
+          examples:
+            - "Install kgateway version v2.0.1 into the 'kgateway-system' namespace using Helm."
+            - "Verify that the kgateway controller pods are running correctly."
+        - id: kgateway-gateway-api-configuration
+          name: Kgateway Gateway API Configuration
+          description: Helps define, apply, and manage Kubernetes Gateway API resources like Gateway and HTTPRoute.
+          tags:
+            - kgateway
+            - gateway-api
+            - httproute
+          examples:
+            - "Create a Gateway resource that listens on port 80 for 'api.prod.com'."
+            - "Generate the YAML for an HTTPRoute to direct traffic to the 'user-service'."
+        - id: kgateway-troubleshooting-diagnostics
+          name: Kgateway Troubleshooting and Diagnostics
+          description: Helps diagnose and resolve issues with kgateway deployments.
+          tags:
+            - kgateway
+            - troubleshooting
+            - diagnostics
+          examples:
+            - "My HTTPRoute isn't routing traffic. What could be wrong?"
+            - "Fetch the logs from the kgateway deployment pods."
