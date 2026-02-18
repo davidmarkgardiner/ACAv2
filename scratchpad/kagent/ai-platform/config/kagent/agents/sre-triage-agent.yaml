@@ -96,18 +96,21 @@ spec:
     tools:
       # AKS-MCP readonly tools (kubectl, helm, plus Azure tools when on AKS)
       # Homelab: DISABLED — kagent-tool-server covers k8s/helm, AKS-MCP Azure tools don't apply
-      # Work: uncomment and add toolNames list to avoid None validation error
+      # Work: uncomment to enable remote AKS cluster access
       # - type: McpServer
       #   mcpServer:
       #     name: aks-mcp-readonly
       #     kind: RemoteMCPServer
       #     apiGroup: kagent.dev
       #     toolNames:
-      #       - call_kubectl
-      #       - call_helm
-      #       - run_az_cli_command
-      #       - list_detectors
-      #       - get_detector
+      #       - call_az              # az CLI (az aks list, az aks get-credentials, etc.)
+      #       - call_kubectl         # kubectl against remote cluster
+      #       - helm                 # helm against remote cluster
+      #       - aks_detector         # AKS health detectors
+      #       - aks_advisor_recommendation  # Azure Advisor
+      #       - aks_monitoring       # Azure Monitor / Log Analytics
+      #       - aks_network_resources      # VNet, NSG, route tables
+      #       - get_aks_vmss_info    # Node pool VMSS info
       # kagent built-in k8s tools (read-only subset) + helm read tools
       - type: McpServer
         mcpServer:

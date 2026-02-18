@@ -132,25 +132,40 @@ spec:
             - helm_uninstall
             - helm_repo_add
             - helm_repo_update
-      # AKS-MCP readonly for investigation
+      # AKS-MCP for remote AKS cluster access
       # Homelab: DISABLED — kagent-tool-server covers k8s/helm, AKS-MCP Azure tools don't apply
-      # Work: uncomment both readonly and readwrite, must specify toolNames to avoid None validation error
+      # Work: uncomment to enable remote AKS cluster access + remediation
+      #
+      # Readonly instance (investigate remote clusters):
       # - type: McpServer
       #   mcpServer:
       #     name: aks-mcp-readonly
       #     kind: RemoteMCPServer
       #     apiGroup: kagent.dev
       #     toolNames:
-      #       - call_kubectl
-      #       - call_helm
-      #       - run_az_cli_command
-      # Work deployment: uncomment to add AKS-MCP readwrite for Azure operations
-      # (scale node pools, restart VMSS, update AKS config via az cli)
+      #       - call_az              # az CLI (az aks list, az aks get-credentials, etc.)
+      #       - call_kubectl         # kubectl against remote cluster
+      #       - helm                 # helm against remote cluster
+      #       - aks_detector         # AKS health detectors
+      #       - aks_advisor_recommendation
+      #       - aks_monitoring       # Azure Monitor / Log Analytics
+      #       - aks_network_resources
+      #       - get_aks_vmss_info
+      #
+      # Readwrite instance (scale, restart, patch on remote clusters):
       # - type: McpServer
       #   mcpServer:
       #     name: aks-mcp-readwrite
       #     kind: RemoteMCPServer
       #     apiGroup: kagent.dev
+      #     toolNames:
+      #       - call_az
+      #       - call_kubectl
+      #       - helm
+      #       - aks_detector
+      #       - aks_monitoring
+      #       - get_aks_vmss_info
+      #       - collect_aks_node_logs
     a2aConfig:
       skills:
         - id: cluster-remediation
