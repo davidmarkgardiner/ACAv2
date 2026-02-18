@@ -1,0 +1,64 @@
+# kagent → LiteLLM Connection
+# These resources wire kagent agents to LiteLLM as their LLM backend.
+# kubectl apply -f kagent-litellm-connection.yaml
+#
+# The model name in ModelConfig must match a model_name in LiteLLM's proxy_config.model_list.
+
+---
+# 1. Secret containing the LiteLLM master key
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-key
+  namespace: kagent
+type: Opaque
+stringData:
+  api-key: sk-work-changeme  # Must match masterkey in litellm-values-work.yaml
+
+---
+# 2. Default ModelConfig — used by agents with modelConfig: default-model-config
+#    This is the config most built-in agents reference.
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: default-model-config
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: gpt-4o                          # Must match a model_name in LiteLLM
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    baseUrl: http://litellm.litellm.svc:4000/v1
+
+---
+# 3. (Optional) Second ModelConfig for a smaller/cheaper model
+# apiVersion: kagent.dev/v1alpha2
+# kind: ModelConfig
+# metadata:
+#   name: litellm-gpt4o-mini
+#   namespace: kagent
+# spec:
+#   provider: OpenAI
+#   model: gpt-4o-mini
+#   apiKeySecret: litellm-key
+#   apiKeySecretKey: api-key
+#   openAI:
+#     baseUrl: http://litellm.litellm.svc:4000/v1
+
+⏺ The LiteLLM master key. That's what LiteLLM uses to authenticate incoming API requests. Agents send it as a Bearer token in the Authorization header.                      
+                                                                                                                                                                             
+  So in kagent-litellm-connection.yaml, the secret should contain whatever your LiteLLM masterkey is set to at work:                                                         
+                                                                                                                                                                             
+  apiVersion: v1                                                                                                                                                             
+  kind: Secret                                                                                                                                                               
+  metadata:                                                                          
+    name: litellm-key
+    namespace: kagent
+  type: Opaque
+  stringData:
+    api-key: sk-whatever-your-work-masterkey-is   # Same value as masterkey in litellm-values-work.yaml
+
+  The flow is:
+
+  Agent pod → sends "Authorization: Bearer sk-your-masterkey" → LiteLLM validates it → forwards to Azure OpenAI
