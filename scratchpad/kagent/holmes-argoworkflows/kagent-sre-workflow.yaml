@@ -240,7 +240,7 @@ spec:
           START=$(date +%s)
 
           HTTP_CODE=$(curl -s -o /work/kagent-response.json -w "%{http_code}" \
-            --connect-timeout 10 --max-time 300 \
+            --connect-timeout 10 --max-time 600 \
             -X POST "{{workflow.parameters.kagent_controller_url}}/api/a2a/kagent/${AGENT_NAME}/" \
             -H "Content-Type: application/json" \
             -d @/tmp/a2a-request.json)
@@ -312,8 +312,8 @@ spec:
           duration: "5s"
           factor: 2
       script:
-        image: node:22-alpine
-        command: [node]
+        image: badouralix/curl-jq:alpine
+        command: [sh]
         volumeMounts:
           - name: work
             mountPath: /work
@@ -325,154 +325,144 @@ spec:
                 key: GITLAB_TOKEN
         resources:
           requests:
-            memory: "128Mi"
+            memory: "64Mi"
             cpu: "100m"
           limits:
-            memory: "256Mi"
-            cpu: "500m"
+            memory: "128Mi"
+            cpu: "200m"
         source: |
-          const fs = require('fs');
-          const https = require('https');
+          set -e
 
-          let response;
-          try {
-            response = JSON.parse(fs.readFileSync('/work/kagent-response.json', 'utf8'));
-          } catch (e) {
-            console.error('Failed to parse KAgent response:', e.message);
-            response = { result: { artifacts: [], status: { state: 'error' }, history: [] } };
-          }
+          RESPONSE="/work/kagent-response.json"
+          if [ ! -f "$RESPONSE" ]; then
+            echo "ERROR: kagent-response.json not found"
+            exit 1
+          fi
 
-          // Extract analysis from A2A artifacts (primary)
-          const artifacts = response.result?.artifacts || [];
-          let analysis = artifacts
-            .flatMap(a => (a.parts || []))
-            .filter(p => p.kind === 'text')
-            .map(p => p.text)
-            .join('\n\n');
+          # Extract analysis from A2A artifacts (primary source)
+          ANALYSIS=$(jq -r '
+            [.result.artifacts[]?.parts[]? | select(.kind == "text") | .text] | join("\n\n")
+          ' "$RESPONSE" 2>/dev/null)
 
-          if (!analysis) {
-            // Fallback: last agent message from history
-            const history = response.result?.history || [];
-            const agentTexts = history
-              .filter(m => m.role === 'agent')
-              .flatMap(m => (m.parts || []))
-              .filter(p => p.kind === 'text')
-              .map(p => p.text);
-            analysis = agentTexts[agentTexts.length - 1] || '_No analysis returned by agent_';
-          }
+          # Fallback: last agent message from history
+          if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ] || [ "$ANALYSIS" = "" ]; then
+            ANALYSIS=$(jq -r '
+              [.result.history[]? | select(.role == "agent") | .parts[]? | select(.kind == "text") | .text] | last // "_No analysis returned by agent_"
+            ' "$RESPONSE" 2>/dev/null)
+          fi
 
-          // Strip think tags (Qwen sometimes emits these)
-          analysis = analysis.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+          # Strip think tags (Qwen sometimes emits these)
+          ANALYSIS=$(echo "$ANALYSIS" | sed 's/<think>.*<\/think>//g')
 
-          const state = response.result?.status?.state || 'unknown';
-          const duration = response._meta?.duration_s || 'N/A';
-          const agentName = response._meta?.agent || 'unknown';
-          const remediated = response._meta?.remediated === 'true';
-          const timestamp = new Date().toISOString();
+          # Extract metadata
+          STATE=$(jq -r '.result.status.state // "unknown"' "$RESPONSE")
+          DURATION=$(jq -r '._meta.duration_s // "N/A"' "$RESPONSE")
+          AGENT_NAME=$(jq -r '._meta.agent // "unknown"' "$RESPONSE")
+          REMEDIATED=$(jq -r '._meta.remediated // "false"' "$RESPONSE")
+          AGENT_TURNS=$(jq -r '[.result.history[]? | select(.role == "agent")] | length' "$RESPONSE")
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          // Count conversation turns
-          const history = response.result?.history || [];
-          const agentTurns = history.filter(m => m.role === 'agent').length;
+          # Set labels based on mode
+          if [ "$REMEDIATED" = "true" ]; then
+            STATUS_EMOJI="wrench"
+            STATUS_LABEL="REMEDIATION APPLIED"
+            LABEL="remediation"
+            VERIFY_CHECKLIST="- [ ] Verify the fix is holding\n- [ ] Monitor for recurrence\n- [ ] Close when confirmed stable"
+          else
+            STATUS_EMOJI="mag"
+            STATUS_LABEL="TRIAGE ANALYSIS"
+            LABEL="triage"
+            VERIFY_CHECKLIST="- [ ] Review analysis findings\n- [ ] Apply recommended fixes manually\n- [ ] Verify and close"
+          fi
 
-          const errorMsg = '{{workflow.parameters.error_message}}';
-          const errorSection = errorMsg ? '```\n' + errorMsg + '\n```' : '_No error message_';
+          ERROR_MSG="{{workflow.parameters.error_message}}"
+          if [ -n "$ERROR_MSG" ]; then
+            ERROR_SECTION="\`\`\`\n${ERROR_MSG}\n\`\`\`"
+          else
+            ERROR_SECTION="_No error message_"
+          fi
 
-          const statusEmoji = remediated ? 'wrench' : 'mag';
-          const statusLabel = remediated ? 'REMEDIATION APPLIED' : 'TRIAGE ANALYSIS';
+          # Truncate raw response for the details section
+          RAW_RESPONSE=$(jq -c '.' "$RESPONSE" | head -c 10000)
 
-          const body = [
-            `# ${statusLabel}`,
-            '',
-            '| Field | Value |',
-            '|-------|-------|',
-            '| **Alert Type** | {{workflow.parameters.event_type}} |',
-            '| **Cluster** | {{workflow.parameters.cluster}} |',
-            '| **Namespace** | {{workflow.parameters.namespace}} |',
-            '| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |',
-            `| **Timestamp** | ${timestamp} |`,
-            '| **Severity** | {{workflow.parameters.severity}} |',
-            `| **Mode** | ${statusLabel} |`,
-            `| **Agent** | ${agentName} |`,
-            `| **Task State** | ${state} |`,
-            `| **Agent Turns** | ${agentTurns} |`,
-            `| **Duration** | ${duration}s |`,
-            '',
-            '### Error Message',
-            errorSection,
-            '',
-            '---',
-            '',
-            '# KAgent Analysis',
-            '',
-            analysis,
-            '',
-            '---',
-            '',
-            '# Verification',
-            '',
-            remediated
-              ? '- [ ] Verify the fix is holding\n- [ ] Monitor for recurrence\n- [ ] Close when confirmed stable'
-              : '- [ ] Review analysis findings\n- [ ] Apply recommended fixes manually\n- [ ] Verify and close',
-            '',
-            '<details><summary>Raw A2A Response</summary>',
-            '',
-            '```json',
-            JSON.stringify(response, null, 2).substring(0, 10000),
-            '```',
-            '</details>',
-            '',
-            `*KAgent ${agentName} | ${statusLabel} | {{workflow.name}}*`,
-          ].join('\n');
+          # Write analysis to file so jq can safely read it (avoids shell quoting issues)
+          printf '%s' "$ANALYSIS" > /tmp/analysis.txt
+          printf '%s' "$RAW_RESPONSE" > /tmp/raw_response.txt
 
-          const label = remediated ? 'remediation' : 'triage';
-          const payload = JSON.stringify({
-            title: `[:${statusEmoji}:][{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.namespace}}/{{workflow.parameters.resource_name}}`,
-            description: body,
-            labels: `kagent,${label},{{workflow.parameters.event_type}},{{workflow.parameters.severity}},auto-generated`
-          });
+          # Build the issue body safely using jq
+          BODY=$(jq -n --rawfile analysis /tmp/analysis.txt \
+            --arg status_label "$STATUS_LABEL" \
+            --arg event_type "{{workflow.parameters.event_type}}" \
+            --arg cluster "{{workflow.parameters.cluster}}" \
+            --arg namespace "{{workflow.parameters.namespace}}" \
+            --arg resource "{{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}" \
+            --arg timestamp "$TIMESTAMP" \
+            --arg severity "{{workflow.parameters.severity}}" \
+            --arg agent_name "$AGENT_NAME" \
+            --arg state "$STATE" \
+            --arg agent_turns "$AGENT_TURNS" \
+            --arg duration "$DURATION" \
+            --arg error_section "$ERROR_SECTION" \
+            --arg verify "$VERIFY_CHECKLIST" \
+            --rawfile raw_response /tmp/raw_response.txt \
+            --arg workflow_name "{{workflow.name}}" \
+            -r '
+            "# " + $status_label + "\n\n" +
+            "| Field | Value |\n|-------|-------|\n" +
+            "| **Alert Type** | " + $event_type + " |\n" +
+            "| **Cluster** | " + $cluster + " |\n" +
+            "| **Namespace** | " + $namespace + " |\n" +
+            "| **Resource** | " + $resource + " |\n" +
+            "| **Timestamp** | " + $timestamp + " |\n" +
+            "| **Severity** | " + $severity + " |\n" +
+            "| **Mode** | " + $status_label + " |\n" +
+            "| **Agent** | " + $agent_name + " |\n" +
+            "| **Task State** | " + $state + " |\n" +
+            "| **Agent Turns** | " + $agent_turns + " |\n" +
+            "| **Duration** | " + $duration + "s |\n\n" +
+            "### Error Message\n" + $error_section + "\n\n---\n\n" +
+            "# KAgent Analysis\n\n" + $analysis + "\n\n---\n\n" +
+            "# Verification\n\n" + $verify + "\n\n" +
+            "<details><summary>Raw A2A Response</summary>\n\n```json\n" + $raw_response + "\n```\n</details>\n\n" +
+            "*KAgent " + $agent_name + " | " + $status_label + " | " + $workflow_name + "*"
+          ')
 
-          const url = new URL(`{{workflow.parameters.gitlab_url}}/api/v4/projects/{{workflow.parameters.gitlab_project_id}}/issues`);
-          const options = {
-            hostname: url.hostname,
-            port: url.port || 443,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-              'PRIVATE-TOKEN': process.env.GITLAB_TOKEN,
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(payload)
-            }
-          };
+          TITLE="[:${STATUS_EMOJI}:][{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.namespace}}/{{workflow.parameters.resource_name}}"
+          LABELS="kagent,${LABEL},{{workflow.parameters.event_type}},{{workflow.parameters.severity}},auto-generated"
 
-          const req = https.request(options, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-              console.log(`GitLab HTTP: ${res.statusCode}`);
-              if (res.statusCode === 201) {
-                const gl = JSON.parse(data);
-                console.log(`Issue #${gl.iid}: ${gl.web_url}`);
-                fs.writeFileSync('/work/gitlab-issue-url.txt', gl.web_url);
-                fs.writeFileSync('/work/gitlab-issue-iid.txt', String(gl.iid));
-              } else {
-                console.error('GitLab error:', data);
-                process.exit(1);
-              }
-            });
-          });
+          # Build GitLab API payload safely with jq
+          jq -n \
+            --arg title "$TITLE" \
+            --arg description "$BODY" \
+            --arg labels "$LABELS" \
+            '{title: $title, description: $description, labels: $labels}' > /tmp/gitlab-payload.json
 
-          req.on('error', (e) => {
-            console.error('Request failed:', e.message);
-            process.exit(1);
-          });
+          echo "Creating GitLab issue: $TITLE"
 
-          req.write(payload);
-          req.end();
+          HTTP_CODE=$(curl -s -o /work/gitlab-response.json -w "%{http_code}" \
+            -X POST "{{workflow.parameters.gitlab_url}}/api/v4/projects/{{workflow.parameters.gitlab_project_id}}/issues" \
+            -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/gitlab-payload.json)
 
-    # Step 4: Notify Mattermost
+          echo "GitLab HTTP: ${HTTP_CODE}"
+
+          if [ "$HTTP_CODE" = "201" ]; then
+            ISSUE_URL=$(jq -r '.web_url' /work/gitlab-response.json)
+            ISSUE_IID=$(jq -r '.iid' /work/gitlab-response.json)
+            echo "Issue #${ISSUE_IID}: ${ISSUE_URL}"
+            printf '%s' "$ISSUE_URL" > /work/gitlab-issue-url.txt
+            printf '%s' "$ISSUE_IID" > /work/gitlab-issue-iid.txt
+          else
+            echo "GitLab error:"
+            cat /work/gitlab-response.json
+            exit 1
+          fi
+
+    # Step 4: Notify Mattermost with analysis summary and actionable commands
     - name: mattermost-notify
       script:
-        image: curlimages/curl:8.5.0
+        image: badouralix/curl-jq:alpine
         command: [sh]
         volumeMounts:
           - name: work
@@ -486,10 +476,10 @@ spec:
                 optional: true
         resources:
           requests:
-            memory: "32Mi"
+            memory: "64Mi"
             cpu: "50m"
           limits:
-            memory: "64Mi"
+            memory: "128Mi"
             cpu: "100m"
         source: |
           # Use Secret if available, fall back to workflow parameter
@@ -503,6 +493,7 @@ spec:
           ISSUE_URL=$(cat /work/gitlab-issue-url.txt 2>/dev/null || echo "unknown")
           ISSUE_IID=$(cat /work/gitlab-issue-iid.txt 2>/dev/null || echo "?")
           REMEDIATE="{{workflow.parameters.remediate}}"
+          RESPONSE="/work/kagent-response.json"
 
           if [ "$REMEDIATE" = "true" ]; then
             ICON=":wrench:"
@@ -514,12 +505,92 @@ spec:
             AGENT="sre-triage-agent"
           fi
 
-          curl -s -X POST "$WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"username\": \"KAgent SRE\",
-              \"icon_url\": \"https://avatars.githubusercontent.com/u/193178627\",
-              \"text\": \"### ${ICON} ${STATUS}\n| Field | Value |\n|---|---|\n| **Cluster** | {{workflow.parameters.cluster}} |\n| **Event** | {{workflow.parameters.event_type}} |\n| **Resource** | {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} |\n| **Namespace** | {{workflow.parameters.namespace}} |\n| **Severity** | {{workflow.parameters.severity}} |\n| **Agent** | ${AGENT} |\n| **Mode** | ${STATUS} |\n| **GitLab** | [#${ISSUE_IID}](${ISSUE_URL}) |\n| **Workflow** | {{workflow.name}} |\"
-            }"
+          # Extract analysis from KAgent response
+          ANALYSIS=""
+          if [ -f "$RESPONSE" ]; then
+            ANALYSIS=$(jq -r '
+              [.result.artifacts[]?.parts[]? | select(.kind == "text") | .text] | join("\n\n")
+            ' "$RESPONSE" 2>/dev/null)
 
-          echo "Notification sent (${STATUS}, agent: ${AGENT}, issue #${ISSUE_IID})"
+            if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
+              ANALYSIS=$(jq -r '
+                [.result.history[]? | select(.role == "agent") | .parts[]? | select(.kind == "text") | .text] | last // ""
+              ' "$RESPONSE" 2>/dev/null)
+            fi
+
+            # Strip think tags
+            ANALYSIS=$(echo "$ANALYSIS" | sed 's/<think>.*<\/think>//g')
+
+            DURATION=$(jq -r '._meta.duration_s // "N/A"' "$RESPONSE")
+            AGENT_TURNS=$(jq -r '[.result.history[]? | select(.role == "agent")] | length' "$RESPONSE")
+          fi
+
+          # Truncate analysis for Mattermost (keep first 2000 chars)
+          ANALYSIS_TRIMMED=$(echo "$ANALYSIS" | head -c 2000)
+          if [ ${#ANALYSIS} -gt 2000 ]; then
+            ANALYSIS_TRIMMED="${ANALYSIS_TRIMMED}..."
+          fi
+
+          # Write analysis to file for safe jq reading
+          printf '%s' "$ANALYSIS_TRIMMED" > /tmp/analysis.txt
+
+          NS="{{workflow.parameters.namespace}}"
+          RES_NAME="{{workflow.parameters.resource_name}}"
+          RES_KIND="{{workflow.parameters.resource_kind}}"
+          RES_KIND_LOWER=$(echo "$RES_KIND" | tr '[:upper:]' '[:lower:]')
+
+          # Build quick commands based on resource type
+          COMMANDS="kubectl describe ${RES_KIND_LOWER} ${RES_NAME} -n ${NS}
+          kubectl logs ${RES_NAME} -n ${NS} --tail=100
+          kubectl get events -n ${NS} --field-selector involvedObject.name=${RES_NAME} --sort-by='.lastTimestamp'
+          kubectl get ${RES_KIND_LOWER} ${RES_NAME} -n ${NS} -o wide"
+
+          printf '%s' "$COMMANDS" > /tmp/commands.txt
+
+          # Build Mattermost payload with jq (safe JSON construction)
+          jq -n \
+            --rawfile analysis /tmp/analysis.txt \
+            --rawfile commands /tmp/commands.txt \
+            --arg icon "$ICON" \
+            --arg status "$STATUS" \
+            --arg cluster "{{workflow.parameters.cluster}}" \
+            --arg event_type "{{workflow.parameters.event_type}}" \
+            --arg resource "${RES_KIND}/${RES_NAME}" \
+            --arg namespace "$NS" \
+            --arg severity "{{workflow.parameters.severity}}" \
+            --arg agent "$AGENT" \
+            --arg duration "${DURATION:-N/A}" \
+            --arg turns "${AGENT_TURNS:-0}" \
+            --arg issue_iid "$ISSUE_IID" \
+            --arg issue_url "$ISSUE_URL" \
+            --arg workflow "{{workflow.name}}" \
+            '{
+              username: "KAgent SRE",
+              icon_url: "https://avatars.githubusercontent.com/u/193178627",
+              text: (
+                "### " + $icon + " " + $status + "\n" +
+                "| Field | Value |\n|---|---|\n" +
+                "| **Cluster** | " + $cluster + " |\n" +
+                "| **Event** | " + $event_type + " |\n" +
+                "| **Resource** | `" + $resource + "` |\n" +
+                "| **Namespace** | `" + $namespace + "` |\n" +
+                "| **Severity** | " + $severity + " |\n" +
+                "| **Agent** | " + $agent + " |\n" +
+                "| **Duration** | " + $duration + "s (" + $turns + " turns) |\n" +
+                "| **GitLab** | [#" + $issue_iid + "](" + $issue_url + ") |\n" +
+                "| **Workflow** | `" + $workflow + "` |\n\n" +
+                "---\n" +
+                "#### :clipboard: Analysis Summary\n" +
+                $analysis + "\n\n" +
+                "---\n" +
+                "#### :computer: Quick Commands\n" +
+                "```\n" + $commands + "\n```"
+              )
+            }' > /tmp/mm-payload.json
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/mm-payload.json)
+
+          echo "Mattermost HTTP: ${HTTP_CODE} (${STATUS}, agent: ${AGENT}, issue #${ISSUE_IID})"
