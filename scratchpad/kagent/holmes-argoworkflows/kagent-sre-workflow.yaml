@@ -389,8 +389,21 @@ spec:
           printf '%s' "$ANALYSIS" > /tmp/analysis.txt
           printf '%s' "$RAW_RESPONSE" > /tmp/raw_response.txt
 
+          # Build quick commands
+          NS="{{workflow.parameters.namespace}}"
+          RES_NAME="{{workflow.parameters.resource_name}}"
+          RES_KIND="{{workflow.parameters.resource_kind}}"
+          RES_KIND_LOWER=$(echo "$RES_KIND" | tr '[:upper:]' '[:lower:]')
+
+          printf '%s\n%s\n%s\n%s' \
+            "kubectl describe ${RES_KIND_LOWER} ${RES_NAME} -n ${NS}" \
+            "kubectl logs ${RES_NAME} -n ${NS} --tail=100" \
+            "kubectl get events -n ${NS} --field-selector involvedObject.name=${RES_NAME} --sort-by='.lastTimestamp'" \
+            "kubectl get ${RES_KIND_LOWER} ${RES_NAME} -n ${NS} -o wide" > /tmp/commands.txt
+
           # Build the issue body safely using jq
           BODY=$(jq -n --rawfile analysis /tmp/analysis.txt \
+            --rawfile commands /tmp/commands.txt \
             --arg status_label "$STATUS_LABEL" \
             --arg event_type "{{workflow.parameters.event_type}}" \
             --arg cluster "{{workflow.parameters.cluster}}" \
@@ -422,6 +435,7 @@ spec:
             "| **Duration** | " + $duration + "s |\n\n" +
             "### Error Message\n" + $error_section + "\n\n---\n\n" +
             "# KAgent Analysis\n\n" + $analysis + "\n\n---\n\n" +
+            "## Quick Commands\n\n```bash\n" + $commands + "\n```\n\n---\n\n" +
             "# Verification\n\n" + $verify + "\n\n" +
             "<details><summary>Raw A2A Response</summary>\n\n```json\n" + $raw_response + "\n```\n</details>\n\n" +
             "*KAgent " + $agent_name + " | " + $status_label + " | " + $workflow_name + "*"
