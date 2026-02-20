@@ -1,0 +1,42 @@
+---
+# EventSource - Infra catch-all tier consumer group
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-infra
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: infra
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  kafka:
+    k8s-events:
+      url: "REPLACE_EVENTHUB_NAMESPACE.servicebus.windows.net:9093"
+      topic: "REPLACE_EVENTHUB_NAME"
+      consumerGroup:
+        groupName: "consumer-infra"
+      tls:
+        caCertSecret:
+          name: eventhub-tls-ca
+          key: ca.pem
+      sasl:
+        mechanism: "PLAIN"
+        userSecret:
+          name: eventhub-credentials
+          key: username
+        passwordSecret:
+          name: eventhub-credentials
+          key: connection-string
+      jsonBody: true
+      partition: ""
+      version: "2.1.0"

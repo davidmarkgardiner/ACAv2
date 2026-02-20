@@ -1,0 +1,54 @@
+---
+# VLLM Configuration for Critical Tier (Cloud VLLM)
+# Uses OpenAI-compatible /v1/chat/completions endpoint
+# Works with: Azure OpenAI, OpenAI, hosted vLLM, LiteLLM proxy, etc.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-critical-config
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: critical
+data:
+  # Replace with your cloud VLLM endpoint
+  VLLM_ENDPOINT: "REPLACE_WITH_CLOUD_VLLM_ENDPOINT"
+  # e.g., "https://your-resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview"
+  # e.g., "https://api.openai.com/v1/chat/completions"
+
+  # Model name (passed in request body)
+  VLLM_MODEL: "REPLACE_WITH_MODEL_NAME"
+  # e.g., "gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet"
+---
+# API Key for Cloud VLLM
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vllm-critical-secret
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: critical
+type: Opaque
+stringData:
+  api-key: "REPLACE_WITH_VLLM_API_KEY"
+---
+# VLLM Configuration for Warnings Tier (Hosted/Local VLLM)
+# Points to your self-hosted vLLM, KubeAI, or LiteLLM instance
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-warnings-config
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: warnings
+data:
+  # Replace with your hosted VLLM endpoint (in-cluster service)
+  VLLM_ENDPOINT: "REPLACE_WITH_HOSTED_VLLM_ENDPOINT"
+  # e.g., "http://vllm-service.vllm.svc.cluster.local:8000/v1/chat/completions"
+  # e.g., "http://kubeai.kubeai.svc.cluster.local/openai/v1/chat/completions"
+
+  # Model name
+  VLLM_MODEL: "REPLACE_WITH_MODEL_NAME"
+  # e.g., "qwen3-14b", "llama-3.1-8b"

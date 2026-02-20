@@ -1,0 +1,50 @@
+---
+# EventSource - Consume K8s events from Azure Event Hub via Kafka protocol
+# IMPORTANT: Requires Event Hub Standard or Premium tier (Basic doesn't support Kafka)
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  kafka:
+    k8s-events:
+      # Replace with your Event Hub namespace (e.g., evh-platform-prod.servicebus.windows.net:9093)
+      url: "REPLACE_EVENTHUB_NAMESPACE.servicebus.windows.net:9093"
+      # Replace with your Event Hub name
+      topic: "REPLACE_EVENTHUB_NAME"
+      consumerGroup:
+        # Replace with your consumer group name
+        groupName: "REPLACE_CONSUMER_GROUP"
+      tls:
+        # MUST point to a real secret — empty name causes deployment failure
+        # Create with: kubectl create secret generic eventhub-tls-ca -n argo-events --from-file=ca.pem=<cert-file>
+        caCertSecret:
+          name: eventhub-tls-ca
+          key: ca.pem
+      sasl:
+        mechanism: "PLAIN"
+        userSecret:
+          name: eventhub-credentials
+          key: username
+        passwordSecret:
+          name: eventhub-credentials
+          key: connection-string
+      # Parse Kafka message body as JSON (OTLP envelope)
+      jsonBody: true
+      # Empty = consume from all partitions
+      partition: ""
+      # Event Hub Kafka protocol version
+      version: "2.1.0"

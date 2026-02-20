@@ -1,0 +1,30 @@
+---
+# Shared RBAC - Sensor service account needs permission to create workflows
+# Apply once — all three tier sensors use the same service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows", "workflowtemplates"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: sensor-workflow-creator
+  apiGroup: rbac.authorization.k8s.io

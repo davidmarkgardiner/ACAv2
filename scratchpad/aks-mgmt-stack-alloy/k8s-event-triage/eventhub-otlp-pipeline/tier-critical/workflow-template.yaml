@@ -1,0 +1,311 @@
+---
+# Workflow Template - Critical Tier
+# Filters: critical reasons only (CrashLoopBackOff, OOMKilled, etc.)
+# Backend: Cloud VLLM for fast, capable analysis
+# SLA: Must be handled
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-triage-critical
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: critical
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  ttlStrategy:
+    secondsAfterCompletion: 300
+    secondsAfterSuccess: 120
+    secondsAfterFailure: 600
+  podGC:
+    strategy: OnPodCompletion
+  arguments:
+    parameters:
+      - name: otlp-payload
+        description: "Full OTLP JSON envelope from Event Hub"
+  templates:
+    - name: triage-pipeline
+      steps:
+        - - name: parse-otlp
+            template: parse-otlp
+            arguments:
+              parameters:
+                - name: otlp-payload
+                  value: "{{workflow.parameters.otlp-payload}}"
+        - - name: process-event
+            template: analyze-and-alert
+            withParam: "{{steps.parse-otlp.outputs.parameters.events}}"
+            arguments:
+              parameters:
+                - name: cluster
+                  value: "{{item.cluster}}"
+                - name: environment
+                  value: "{{item.environment}}"
+                - name: event-type
+                  value: "{{item.event_type}}"
+                - name: event-reason
+                  value: "{{item.event_reason}}"
+                - name: event-message
+                  value: "{{item.event_message}}"
+                - name: object-kind
+                  value: "{{item.object_kind}}"
+                - name: object-name
+                  value: "{{item.object_name}}"
+                - name: object-namespace
+                  value: "{{item.object_namespace}}"
+                - name: event-time
+                  value: "{{item.event_time}}"
+                - name: event-count
+                  value: "{{item.event_count}}"
+
+    # -------------------------------------------------------------------------
+    # Parse OTLP — CRITICAL reasons only
+    # -------------------------------------------------------------------------
+    - name: parse-otlp
+      inputs:
+        parameters:
+          - name: otlp-payload
+      outputs:
+        parameters:
+          - name: events
+            valueFrom:
+              path: /tmp/events.json
+          - name: event-count
+            valueFrom:
+              path: /tmp/event-count.txt
+      script:
+        image: python:3.11-alpine
+        command: [sh]
+        source: |
+          cat > /tmp/otlp_input.json << '__OTLP_EOF__'
+          {{inputs.parameters.otlp-payload}}
+          __OTLP_EOF__
+
+          python3 << '__PYTHON_EOF__'
+          import json
+
+          CRITICAL_REASONS = {
+              "CrashLoopBackOff", "OOMKilled", "OOMKilling",
+              "FailedScheduling", "NodeNotReady", "NodeNotSchedulable",
+              "FailedMount", "FailedAttachVolume",
+          }
+
+          with open("/tmp/otlp_input.json") as f:
+              payload = json.load(f)
+
+          events = []
+
+          for resource_log in payload.get("resourceLogs", []):
+              res_attrs = {}
+              for attr in resource_log.get("resource", {}).get("attributes", []):
+                  key = attr.get("key", "")
+                  val = attr.get("value", {})
+                  res_attrs[key] = val.get("stringValue", str(val.get("intValue", val.get("boolValue", ""))))
+
+              for scope_log in resource_log.get("scopeLogs", []):
+                  for record in scope_log.get("logRecords", []):
+                      attrs = {}
+                      for attr in record.get("attributes", []):
+                          key = attr.get("key", "")
+                          val = attr.get("value", {})
+                          attrs[key] = val.get("stringValue", str(val.get("intValue", val.get("boolValue", ""))))
+
+                      body_str = record.get("body", {}).get("stringValue", "")
+                      try:
+                          k8s_event = json.loads(body_str) if body_str else {}
+                      except (json.JSONDecodeError, TypeError):
+                          k8s_event = {}
+
+                      reason = attrs.get("event_reason", k8s_event.get("reason", ""))
+                      event_type = attrs.get("event_type", k8s_event.get("type", ""))
+
+                      # CRITICAL FILTER: only critical reasons + Warning type
+                      if event_type != "Warning" or reason not in CRITICAL_REASONS:
+                          continue
+
+                      events.append({
+                          "cluster": attrs.get("cluster", res_attrs.get("cluster", "unknown")),
+                          "environment": attrs.get("environment", res_attrs.get("environment", "unknown")),
+                          "event_type": event_type,
+                          "event_reason": reason,
+                          "event_message": k8s_event.get("message", ""),
+                          "object_kind": attrs.get("obj_kind", k8s_event.get("involvedObject", {}).get("kind", "")),
+                          "object_name": k8s_event.get("involvedObject", {}).get("name", ""),
+                          "object_namespace": attrs.get("obj_namespace", k8s_event.get("involvedObject", {}).get("namespace", "")),
+                          "event_time": k8s_event.get("lastTimestamp", k8s_event.get("firstTimestamp", "")),
+                          "event_count": str(k8s_event.get("count", 1)),
+                      })
+
+          with open("/tmp/events.json", "w") as f:
+              json.dump(events, f)
+          with open("/tmp/event-count.txt", "w") as f:
+              f.write(str(len(events)))
+
+          print(f"[CRITICAL] {len(events)} critical event(s) from OTLP payload")
+          for e in events:
+              print(f"  - {e['event_reason']}: {e['object_kind']}/{e['object_name']} in {e['object_namespace']}")
+          __PYTHON_EOF__
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    # -------------------------------------------------------------------------
+    # Cloud VLLM analysis + Mattermost alert
+    # Critical events MUST be alerted — this step does both AI triage and notify
+    # -------------------------------------------------------------------------
+    - name: analyze-and-alert
+      inputs:
+        parameters:
+          - name: cluster
+          - name: environment
+          - name: event-type
+          - name: event-reason
+          - name: event-message
+          - name: object-kind
+          - name: object-name
+          - name: object-namespace
+          - name: event-time
+          - name: event-count
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        env:
+          - name: WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: mattermost-webhook-config
+                key: WEBHOOK_URL
+          - name: VLLM_ENDPOINT
+            valueFrom:
+              configMapKeyRef:
+                name: vllm-critical-config
+                key: VLLM_ENDPOINT
+                optional: true
+          - name: VLLM_MODEL
+            valueFrom:
+              configMapKeyRef:
+                name: vllm-critical-config
+                key: VLLM_MODEL
+                optional: true
+          - name: VLLM_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: vllm-critical-secret
+                key: api-key
+                optional: true
+        source: |
+          REASON="{{inputs.parameters.event-reason}}"
+          EMOJI=":red_circle:"
+          COLOR="#e74c3c"
+
+          echo "[CRITICAL] $REASON: {{inputs.parameters.object-kind}}/{{inputs.parameters.object-name}}"
+
+          # --- Step 1: Cloud VLLM Analysis (if configured) ---
+          ANALYSIS="(VLLM not configured)"
+          if [ -n "$VLLM_ENDPOINT" ] && [ -n "$VLLM_MODEL" ]; then
+            echo "Calling Cloud VLLM for analysis..."
+
+            cat > /tmp/event_message.txt << '__MSG_EOF__'
+          {{inputs.parameters.event-message}}
+          __MSG_EOF__
+
+            EVENT_MSG=$(cat /tmp/event_message.txt | head -c 1000)
+
+            jq -n \
+              --arg model "$VLLM_MODEL" \
+              --arg reason "$REASON" \
+              --arg kind "{{inputs.parameters.object-kind}}" \
+              --arg name "{{inputs.parameters.object-name}}" \
+              --arg namespace "{{inputs.parameters.object-namespace}}" \
+              --arg message "$EVENT_MSG" \
+              --arg cluster "{{inputs.parameters.cluster}}" \
+              '{
+                model: $model,
+                messages: [
+                  {
+                    role: "system",
+                    content: "You are an SRE assistant. Analyze Kubernetes events and provide: 1) Root cause analysis (2-3 sentences) 2) Recommended actions (numbered list). Be concise."
+                  },
+                  {
+                    role: "user",
+                    content: ("CRITICAL K8s Event on cluster " + $cluster + ":\nReason: " + $reason + "\nObject: " + $kind + "/" + $name + " in namespace " + $namespace + "\nMessage: " + $message + "\n\nAnalyze this event and recommend actions.")
+                  }
+                ],
+                max_tokens: 500,
+                temperature: 0.3
+              }' > /tmp/vllm_request.json
+
+            VLLM_RESPONSE=$(curl -s --max-time 30 \
+              -X POST "$VLLM_ENDPOINT" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${VLLM_API_KEY:-none}" \
+              -d @/tmp/vllm_request.json)
+
+            ANALYSIS=$(echo "$VLLM_RESPONSE" | jq -r '.choices[0].message.content // "(analysis failed)"' 2>/dev/null)
+            echo "VLLM analysis: $ANALYSIS"
+          fi
+
+          # --- Step 2: Mattermost Alert (always) ---
+          jq -n \
+            --arg emoji "$EMOJI" \
+            --arg color "$COLOR" \
+            --arg cluster "{{inputs.parameters.cluster}}" \
+            --arg environment "{{inputs.parameters.environment}}" \
+            --arg event_reason "{{inputs.parameters.event-reason}}" \
+            --arg object_kind "{{inputs.parameters.object-kind}}" \
+            --arg object_name "{{inputs.parameters.object-name}}" \
+            --arg object_namespace "{{inputs.parameters.object-namespace}}" \
+            --arg event_count "{{inputs.parameters.event-count}}" \
+            --arg event_time "{{inputs.parameters.event-time}}" \
+            --arg event_message "$EVENT_MSG" \
+            --arg analysis "$ANALYSIS" \
+            '{
+              username: "K8s Critical Alert",
+              icon_emoji: ":rotating_light:",
+              text: ($emoji + " **CRITICAL: " + $event_reason + "** on " + $cluster),
+              attachments: [
+                {
+                  fallback: ($event_reason + " - critical"),
+                  color: $color,
+                  title: ($object_kind + "/" + $object_name),
+                  text: ("| Field | Value |\n|-------|-------|\n| **Cluster** | `" + $cluster + "` |\n| **Environment** | `" + $environment + "` |\n| **Namespace** | `" + $object_namespace + "` |\n| **Reason** | " + $event_reason + " |\n| **Count** | " + $event_count + " |\n| **Time** | " + $event_time + " |")
+                },
+                {
+                  fallback: "Event Message",
+                  color: $color,
+                  title: "Event Message",
+                  text: $event_message
+                },
+                {
+                  fallback: "AI Analysis",
+                  color: "#3498db",
+                  title: ":robot_face: AI Analysis (Cloud VLLM)",
+                  text: $analysis
+                }
+              ] + (if ($object_kind == "Pod") then [{
+                fallback: "Quick Commands",
+                color: "#2ecc71",
+                title: "Quick Commands",
+                text: ("```\nkubectl describe pod " + $object_name + " -n " + $object_namespace + " | tail -30\nkubectl logs " + $object_name + " -n " + $object_namespace + " --tail=50\nkubectl get events -n " + $object_namespace + " --field-selector involvedObject.name=" + $object_name + "\n```")
+              }] else [] end)
+            }' > /tmp/mattermost.json
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/mattermost.json \
+            --max-time 10)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "Mattermost: HTTP $HTTP_CODE"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi

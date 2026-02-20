@@ -1,0 +1,247 @@
+---
+# Workflow Template - Warnings Tier
+# Filters: Warning events EXCLUDING critical reasons (handled by critical tier)
+# Backend: Hosted VLLM (local, cheaper) — best effort
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-triage-warnings
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: warnings
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  ttlStrategy:
+    secondsAfterCompletion: 120
+    secondsAfterSuccess: 60
+    secondsAfterFailure: 300
+  podGC:
+    strategy: OnPodCompletion
+  arguments:
+    parameters:
+      - name: otlp-payload
+  templates:
+    - name: triage-pipeline
+      steps:
+        - - name: parse-otlp
+            template: parse-otlp
+            arguments:
+              parameters:
+                - name: otlp-payload
+                  value: "{{workflow.parameters.otlp-payload}}"
+        - - name: process-event
+            template: analyze-best-effort
+            withParam: "{{steps.parse-otlp.outputs.parameters.events}}"
+            arguments:
+              parameters:
+                - name: cluster
+                  value: "{{item.cluster}}"
+                - name: environment
+                  value: "{{item.environment}}"
+                - name: event-type
+                  value: "{{item.event_type}}"
+                - name: event-reason
+                  value: "{{item.event_reason}}"
+                - name: event-message
+                  value: "{{item.event_message}}"
+                - name: object-kind
+                  value: "{{item.object_kind}}"
+                - name: object-name
+                  value: "{{item.object_name}}"
+                - name: object-namespace
+                  value: "{{item.object_namespace}}"
+                - name: event-time
+                  value: "{{item.event_time}}"
+                - name: event-count
+                  value: "{{item.event_count}}"
+
+    # -------------------------------------------------------------------------
+    # Parse OTLP — NON-CRITICAL warnings only
+    # Excludes critical reasons (those are handled by tier-critical)
+    # -------------------------------------------------------------------------
+    - name: parse-otlp
+      inputs:
+        parameters:
+          - name: otlp-payload
+      outputs:
+        parameters:
+          - name: events
+            valueFrom:
+              path: /tmp/events.json
+          - name: event-count
+            valueFrom:
+              path: /tmp/event-count.txt
+      script:
+        image: python:3.11-alpine
+        command: [sh]
+        source: |
+          cat > /tmp/otlp_input.json << '__OTLP_EOF__'
+          {{inputs.parameters.otlp-payload}}
+          __OTLP_EOF__
+
+          python3 << '__PYTHON_EOF__'
+          import json
+
+          # These are handled by the critical tier — skip them here
+          CRITICAL_REASONS = {
+              "CrashLoopBackOff", "OOMKilled", "OOMKilling",
+              "FailedScheduling", "NodeNotReady", "NodeNotSchedulable",
+              "FailedMount", "FailedAttachVolume",
+          }
+
+          with open("/tmp/otlp_input.json") as f:
+              payload = json.load(f)
+
+          events = []
+
+          for resource_log in payload.get("resourceLogs", []):
+              res_attrs = {}
+              for attr in resource_log.get("resource", {}).get("attributes", []):
+                  key = attr.get("key", "")
+                  val = attr.get("value", {})
+                  res_attrs[key] = val.get("stringValue", str(val.get("intValue", val.get("boolValue", ""))))
+
+              for scope_log in resource_log.get("scopeLogs", []):
+                  for record in scope_log.get("logRecords", []):
+                      attrs = {}
+                      for attr in record.get("attributes", []):
+                          key = attr.get("key", "")
+                          val = attr.get("value", {})
+                          attrs[key] = val.get("stringValue", str(val.get("intValue", val.get("boolValue", ""))))
+
+                      body_str = record.get("body", {}).get("stringValue", "")
+                      try:
+                          k8s_event = json.loads(body_str) if body_str else {}
+                      except (json.JSONDecodeError, TypeError):
+                          k8s_event = {}
+
+                      reason = attrs.get("event_reason", k8s_event.get("reason", ""))
+                      event_type = attrs.get("event_type", k8s_event.get("type", ""))
+
+                      # WARNING FILTER: Warning type, NOT critical reasons
+                      if event_type != "Warning" or reason in CRITICAL_REASONS:
+                          continue
+
+                      events.append({
+                          "cluster": attrs.get("cluster", res_attrs.get("cluster", "unknown")),
+                          "environment": attrs.get("environment", res_attrs.get("environment", "unknown")),
+                          "event_type": event_type,
+                          "event_reason": reason,
+                          "event_message": k8s_event.get("message", ""),
+                          "object_kind": attrs.get("obj_kind", k8s_event.get("involvedObject", {}).get("kind", "")),
+                          "object_name": k8s_event.get("involvedObject", {}).get("name", ""),
+                          "object_namespace": attrs.get("obj_namespace", k8s_event.get("involvedObject", {}).get("namespace", "")),
+                          "event_time": k8s_event.get("lastTimestamp", k8s_event.get("firstTimestamp", "")),
+                          "event_count": str(k8s_event.get("count", 1)),
+                      })
+
+          with open("/tmp/events.json", "w") as f:
+              json.dump(events, f)
+          with open("/tmp/event-count.txt", "w") as f:
+              f.write(str(len(events)))
+
+          print(f"[WARNINGS] {len(events)} non-critical warning(s) from OTLP payload")
+          for e in events:
+              print(f"  - {e['event_reason']}: {e['object_kind']}/{e['object_name']} in {e['object_namespace']}")
+          __PYTHON_EOF__
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    # -------------------------------------------------------------------------
+    # Hosted VLLM analysis (best effort)
+    # If VLLM is slow or down, the workflow just logs and moves on
+    # -------------------------------------------------------------------------
+    - name: analyze-best-effort
+      inputs:
+        parameters:
+          - name: cluster
+          - name: environment
+          - name: event-type
+          - name: event-reason
+          - name: event-message
+          - name: object-kind
+          - name: object-name
+          - name: object-namespace
+          - name: event-time
+          - name: event-count
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        env:
+          - name: VLLM_ENDPOINT
+            valueFrom:
+              configMapKeyRef:
+                name: vllm-warnings-config
+                key: VLLM_ENDPOINT
+                optional: true
+          - name: VLLM_MODEL
+            valueFrom:
+              configMapKeyRef:
+                name: vllm-warnings-config
+                key: VLLM_MODEL
+                optional: true
+        source: |
+          REASON="{{inputs.parameters.event-reason}}"
+
+          echo "[WARNING] $REASON: {{inputs.parameters.object-kind}}/{{inputs.parameters.object-name}} in {{inputs.parameters.object-namespace}}"
+
+          cat > /tmp/event_message.txt << '__MSG_EOF__'
+          {{inputs.parameters.event-message}}
+          __MSG_EOF__
+
+          EVENT_MSG=$(cat /tmp/event_message.txt | head -c 1000)
+
+          # Best-effort VLLM analysis — if not configured or fails, just log
+          if [ -n "$VLLM_ENDPOINT" ] && [ -n "$VLLM_MODEL" ]; then
+            echo "Calling Hosted VLLM for analysis..."
+
+            jq -n \
+              --arg model "$VLLM_MODEL" \
+              --arg reason "$REASON" \
+              --arg kind "{{inputs.parameters.object-kind}}" \
+              --arg name "{{inputs.parameters.object-name}}" \
+              --arg namespace "{{inputs.parameters.object-namespace}}" \
+              --arg message "$EVENT_MSG" \
+              --arg cluster "{{inputs.parameters.cluster}}" \
+              '{
+                model: $model,
+                messages: [
+                  {
+                    role: "system",
+                    content: "You are an SRE assistant. Briefly analyze this Kubernetes warning event. Provide a one-line root cause and one-line recommended action."
+                  },
+                  {
+                    role: "user",
+                    content: ("K8s Warning on " + $cluster + ": " + $reason + " - " + $kind + "/" + $name + " in " + $namespace + "\nMessage: " + $message)
+                  }
+                ],
+                max_tokens: 200,
+                temperature: 0.3
+              }' > /tmp/vllm_request.json
+
+            VLLM_RESPONSE=$(curl -s --max-time 60 \
+              -X POST "$VLLM_ENDPOINT" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/vllm_request.json 2>&1)
+
+            ANALYSIS=$(echo "$VLLM_RESPONSE" | jq -r '.choices[0].message.content // "(analysis failed)"' 2>/dev/null)
+            echo "Analysis: $ANALYSIS"
+          else
+            echo "VLLM not configured, skipping analysis"
+          fi
+
+          echo "Done (best effort)"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
