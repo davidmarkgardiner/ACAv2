@@ -2,6 +2,8 @@
 
 Test the `k8s-triage-critical` workflow template without needing Event Hub, Alloy, or real events.
 
+Verified working on proxmox-k8s (2026-02-23): 3/3 steps Succeeded in 20s, jq parsed correctly, fan-out created 2 pods, graceful degradation when KAgent/GitLab/Mattermost not configured.
+
 ---
 
 ## Prerequisites
@@ -15,15 +17,29 @@ kubectl get workflowtemplate k8s-triage-critical -n argo-events
 
 ### 2. ConfigMaps exist (create if missing)
 
+For **parse-only testing** (no KAgent/GitLab/Mattermost), create with empty values:
+
 ```bash
-# KAgent config — update KAGENT_URL to your actual KAgent service
+kubectl create configmap kagent-config -n argo-events \
+  --from-literal=KAGENT_URL="" \
+  --from-literal=KAGENT_CRITICAL_AGENT="" \
+  --from-literal=KAGENT_WARNINGS_AGENT="" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create configmap mattermost-webhook-config -n argo-events \
+  --from-literal=WEBHOOK_URL="" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+For **full pipeline testing**, set real values:
+
+```bash
 kubectl create configmap kagent-config -n argo-events \
   --from-literal=KAGENT_URL="http://kagent-a2a.kagent.svc.cluster.local" \
   --from-literal=KAGENT_CRITICAL_AGENT="sre-triage-agent" \
   --from-literal=KAGENT_WARNINGS_AGENT="sre-triage-agent" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Mattermost webhook — update with your real webhook URL
 kubectl create configmap mattermost-webhook-config -n argo-events \
   --from-literal=WEBHOOK_URL="https://mattermost.example.com/hooks/YOUR_HOOK_ID" \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -41,7 +57,7 @@ kubectl create secret generic gitlab-token -n argo-events \
 
 ## Test 1: JQ Parsing Only (no KAgent needed)
 
-Tests that OTLP parsing and critical event filtering work. Deliberately leaves KAgent/GitLab/Mattermost configs empty so they're skipped gracefully.
+Tests that OTLP parsing and critical event filtering work. KAgent/GitLab/Mattermost are skipped gracefully when ConfigMaps have empty values.
 
 Save this as `test-parse-only.yaml`:
 
@@ -54,8 +70,7 @@ metadata:
 spec:
   workflowTemplateRef:
     name: k8s-triage-critical
-  podGC:
-    strategy: ""
+  podGC: {}
   arguments:
     parameters:
       - name: otlp-payload
@@ -116,38 +131,35 @@ Run:
 ```bash
 kubectl create -f test-parse-only.yaml
 
-# Watch the workflow
+# Watch it run
 argo watch -n argo-events @latest
 
-# Or if you have argo CLI, stream logs in real time (recommended — podGC is disabled):
-argo submit -n argo-events --from workflowtemplate/k8s-triage-critical --log \
-  -p 'kagent-url=' -p 'kagent-agent=' -p 'remediate=false' \
-  -p 'gitlab-project-id=' -p 'gitlab-url=https://gitlab.com' \
-  -p 'otlp-payload={"resourceLogs":[{"resource":{"attributes":[{"key":"cluster","value":{"stringValue":"test-cluster"}}]},"scopeLogs":[{"logRecords":[{"body":{"stringValue":"{\"type\":\"Warning\",\"reason\":\"OOMKilled\",\"message\":\"OOM killed\",\"involvedObject\":{\"kind\":\"Pod\",\"name\":\"oom-pod\",\"namespace\":\"test-ns\"},\"count\":1}"},"attributes":[{"key":"event_type","value":{"stringValue":"Warning"}},{"key":"event_reason","value":{"stringValue":"OOMKilled"}}]}]}]}]}'
+# Get logs IMMEDIATELY after completion (pods are cleaned up fast)
+argo logs -n argo-events @latest
+
+# Or check step details + output parameters
+argo get -n argo-events @latest
 ```
 
-**Expected result:**
-- `parse-otlp`: Succeeds, outputs 2 events (CrashLoopBackOff + FailedScheduling), filters out the Normal/Pulled
-- `process-event(0)` + `process-event(1)`: Both run, print "KAgent not configured, skipping" and "No Mattermost webhook configured, skipping"
-- All steps green
+**Expected result (verified):**
+- `parse-otlp`: Succeeds (~4s), outputs 2 events (CrashLoopBackOff + FailedScheduling), filters out the Normal/Pulled event
+- `process-event(0)` + `process-event(1)`: Both run in parallel (~4s each), print graceful skip messages
+- All 3/3 steps green, total ~20s
 
 ---
 
 ## Test 2: Full Pipeline (KAgent + GitLab + Mattermost)
 
-Same payload but with real service endpoints. Update the ConfigMaps (prerequisites above), then:
-
-```bash
-kubectl create -f test-parse-only.yaml
-```
-
-But this time with ConfigMaps pointing to real services:
+Same YAML file as Test 1 — just update the ConfigMaps to point to real services first (see prerequisites).
 
 ```bash
 # Verify your configs are set
 kubectl get configmap kagent-config -n argo-events -o yaml
 kubectl get configmap mattermost-webhook-config -n argo-events -o yaml
 kubectl get secret gitlab-token -n argo-events
+
+# Run the same test
+kubectl create -f test-parse-only.yaml
 ```
 
 **Expected result:**
@@ -159,7 +171,7 @@ kubectl get secret gitlab-token -n argo-events
 
 ## Test 3: Single Event (Minimal)
 
-For the quickest possible test with just one event:
+For the quickest possible smoke test with just one event — run directly, no file needed:
 
 ```bash
 kubectl create -f - << 'EOF'
@@ -171,8 +183,7 @@ metadata:
 spec:
   workflowTemplateRef:
     name: k8s-triage-critical
-  podGC:
-    strategy: ""
+  podGC: {}
   arguments:
     parameters:
       - name: otlp-payload
@@ -190,6 +201,8 @@ spec:
 EOF
 ```
 
+**Expected:** 1 event parsed, 1 process-event pod, 2/2 steps green.
+
 ---
 
 ## Checking Results
@@ -198,16 +211,19 @@ EOF
 # List recent workflows
 argo list -n argo-events --sort-by=.metadata.creationTimestamp | head
 
-# Get logs (before podGC cleans up — podGC is disabled in test files)
+# Get logs (use argo CLI — pods are cleaned up by podGC)
 argo logs -n argo-events @latest
 
 # Detailed step status
 argo get -n argo-events @latest
+
+# Check parse-otlp output (jq extraction + event count)
+argo get -n argo-events @latest -o json | jq '.status.nodes[] | select(.displayName == "parse-otlp") | .outputs.parameters'
 ```
 
 ### What to look for in logs
 
-**parse-otlp step:**
+**parse-otlp step** (may not appear in `argo logs` if it finishes before log collector starts — check output params instead):
 ```
 [CRITICAL] 2 critical event(s) from OTLP payload
   - CrashLoopBackOff: Pod/myapp-pod-abc in dgdemo
@@ -250,6 +266,29 @@ argo delete -n argo-events --completed
 
 ---
 
+## Important Notes
+
+### podGC behaviour
+
+The workflow template uses `podGC: OnPodCompletion` which cleans up pods as soon as each step finishes. This means:
+- **Pod logs disappear quickly** — you can't `kubectl logs` completed pods
+- **Use `argo logs`** instead — it captures logs from the workflow controller
+- **Use `argo get -o json`** to inspect output parameters (always available even after pods are gone)
+- The test files set `podGC: {}` to try to override, but the template's setting takes precedence
+
+### podGC strategy values
+
+| Strategy | Valid? | Behaviour |
+|----------|--------|-----------|
+| `OnPodCompletion` | Yes | Deletes pod when step completes |
+| `OnPodSuccess` | Yes | Deletes pod only on success |
+| `OnWorkflowCompletion` | Yes | Deletes all pods when workflow ends |
+| `OnWorkflowSuccess` | Yes | Deletes all pods only on workflow success |
+| `Never` | **NO** — fails with "unknown strategy" | |
+| `""` (empty string) | Works but template default still applies | |
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -261,4 +300,5 @@ argo delete -n argo-events --completed
 | KAgent A2A error | Wrong agent name or method | Verify agent exists: `kubectl get agents -n kagent`, ensure trailing slash in URL |
 | GitLab 401 | Bad token | Check `GITLAB_TOKEN` secret value and project access |
 | Mattermost 404 | Bad webhook URL | Verify webhook URL in configmap is correct |
-| Pods disappear before logs | podGC cleaning up | Test files above set `podGC.strategy: ""` to disable — if using real sensor trigger, logs must be captured fast or use `argo logs --follow` |
+| Pods disappear before logs | podGC cleaning up | Use `argo logs` not `kubectl logs`, or check output params via `argo get -o json` |
+| `unknown strategy 'Never'` | Invalid podGC value | Use `podGC: {}` or omit podGC entirely |
