@@ -390,8 +390,7 @@ spec:
                 params: {
                   message: {
                     role: "user",
-                    parts: [{
-                      text: (
+                    parts: [{"kind": "text", "text": (
                         if $remediate == "true" then
                           "Fix this CRITICAL K8s issue on cluster " + $cluster + ":\n"
                         else
@@ -406,8 +405,7 @@ spec:
                         else
                           "Triage this critical event. Use your tools to gather evidence. Report: Issue/Evidence/Root Cause/Recommended Fix."
                         end
-                      )
-                    }]
+                      )}]
                   }
                 }
               }' > /tmp/kagent_request.json
@@ -453,6 +451,8 @@ spec:
               fi
             else
               echo "KAgent call failed (HTTP $HTTP_CODE)"
+              echo "Response body:"
+              cat /tmp/kagent_response.json 2>/dev/null
               ANALYSIS="(KAgent call failed: HTTP $HTTP_CODE)"
             fi
           else
@@ -623,13 +623,19 @@ spec:
               }] else [] end)
             }' > /tmp/mattermost.json
 
-          MM_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          MM_HTTP=$(curl -s -o /tmp/mm_response.txt -w "%{http_code}" \
             -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d @/tmp/mattermost.json \
             --max-time 10)
 
           echo "Mattermost: HTTP $MM_HTTP"
+          if [ "$MM_HTTP" != "200" ]; then
+            echo "Mattermost error response:"
+            cat /tmp/mm_response.txt 2>/dev/null
+            echo ""
+            echo "Payload size: $(wc -c < /tmp/mattermost.json) bytes"
+          fi
           echo "=========================================="
           echo "Done: $REASON $OBJ_KIND/$OBJ_NAME in $OBJ_NS"
           echo "  Agent: ${KAGENT_AGENT} (routed)"
