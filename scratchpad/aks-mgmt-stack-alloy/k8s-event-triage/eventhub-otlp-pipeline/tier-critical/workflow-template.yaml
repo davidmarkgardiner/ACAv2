@@ -34,7 +34,7 @@ spec:
     secondsAfterSuccess: 300
     secondsAfterFailure: 1800
   podGC:
-    strategy: OnPodCompletion
+    strategy: OnWorkflowCompletion
   arguments:
     parameters:
       - name: otlp-payload
@@ -215,9 +215,32 @@ spec:
           echo "${NAMESPACE_ROUTES:-{\}}" > /tmp/ns_routes.json
           echo "${REASON_ROUTES:-{\}}" > /tmp/reason_routes.json
 
-          cat > /tmp/otlp_input.json << '__OTLP_EOF__'
+          cat > /tmp/otlp_raw.txt << '__OTLP_EOF__'
           {{inputs.parameters.otlp-payload}}
           __OTLP_EOF__
+
+          # Detect Base64-encoded payload and decode if needed
+          # Event Hub via Kafka may deliver the body as Base64 depending on EventSource config
+          if jq empty /tmp/otlp_raw.txt 2>/dev/null; then
+            # Already valid JSON — use as-is
+            cp /tmp/otlp_raw.txt /tmp/otlp_input.json
+            echo "Payload: valid JSON ($(wc -c < /tmp/otlp_input.json) bytes)"
+          else
+            # Not valid JSON — try Base64 decode
+            echo "Payload is not valid JSON, attempting Base64 decode..."
+            # Strip whitespace and decode
+            tr -d '[:space:]' < /tmp/otlp_raw.txt | base64 -d > /tmp/otlp_input.json 2>/dev/null
+            if jq empty /tmp/otlp_input.json 2>/dev/null; then
+              echo "Payload: Base64 decoded to valid JSON ($(wc -c < /tmp/otlp_input.json) bytes)"
+            else
+              echo "ERROR: Payload is neither valid JSON nor Base64-encoded JSON"
+              echo "First 200 chars of raw payload:"
+              head -c 200 /tmp/otlp_raw.txt
+              echo "[]" > /tmp/events.json
+              echo "0" > /tmp/event-count.txt
+              exit 0
+            fi
+          fi
 
           # Parse OTLP envelope, extract K8s events, filter critical, route agents
           jq \
