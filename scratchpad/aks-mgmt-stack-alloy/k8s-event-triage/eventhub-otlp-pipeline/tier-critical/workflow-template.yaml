@@ -6,7 +6,12 @@
 #   - kagent-sre-workflow (validate → KAgent A2A → GitLab issue → Mattermost)
 #
 # Input: OTLP JSON envelope from Event Hub (via Argo Events sensor)
-# Flow:  parse-otlp → fan-out → (KAgent A2A → GitLab → Mattermost) per event
+# Flow:  validate-kagent → parse-otlp (+ agent routing) → fan-out → investigate-and-report
+#
+# Agent Routing:
+#   Events are routed to specialist agents based on namespace/reason.
+#   Routing table is in ConfigMap 'agent-routing' — update it to add new agents.
+#   Priority: namespace match → reason match → default (triage/remediation)
 #
 # SLA: Critical events MUST be handled
 #
@@ -34,7 +39,7 @@ spec:
     parameters:
       - name: otlp-payload
         description: "Full OTLP JSON envelope from Event Hub"
-      # KAgent settings (defaults match proxmox-k8s / in-cluster KAgent)
+      # KAgent settings — overrides ConfigMap if provided
       - name: kagent-url
         value: ""
       - name: kagent-agent
@@ -50,6 +55,8 @@ spec:
   templates:
     - name: triage-pipeline
       steps:
+        - - name: validate-kagent
+            template: validate-kagent
         - - name: parse-otlp
             template: parse-otlp
             arguments:
@@ -81,9 +88,83 @@ spec:
                   value: "{{item.event_time}}"
                 - name: event-count
                   value: "{{item.event_count}}"
+                - name: target-agent
+                  value: "{{item.target_agent}}"
 
     # -------------------------------------------------------------------------
-    # Parse OTLP — CRITICAL reasons only
+    # Validate KAgent — fail early if controller is unreachable
+    # Ported from kagent-sre-workflow.yaml validate-inputs step
+    # -------------------------------------------------------------------------
+    - name: validate-kagent
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        env:
+          - name: KAGENT_URL
+            valueFrom:
+              configMapKeyRef:
+                name: kagent-config
+                key: KAGENT_URL
+        source: |
+          # Override from workflow param if provided
+          WF_KAGENT_URL="{{workflow.parameters.kagent-url}}"
+          [ -n "$WF_KAGENT_URL" ] && KAGENT_URL="$WF_KAGENT_URL"
+
+          echo "=== KAgent Health Check ==="
+
+          if [ -z "$KAGENT_URL" ]; then
+            echo "WARNING: KAGENT_URL is empty — KAgent analysis will be skipped"
+            echo "Continuing anyway (workflow degrades gracefully)"
+            exit 0
+          fi
+
+          echo "Controller: $KAGENT_URL"
+
+          # Check KAgent controller is reachable
+          HTTP_CODE=$(curl -s -o /tmp/agents.json -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 \
+            "${KAGENT_URL}/api/agents" 2>/dev/null)
+
+          case "${HTTP_CODE}" in
+            ''|*[!0-9]*)
+              echo "ERROR: KAgent controller unreachable at ${KAGENT_URL}"
+              echo "Check: is kagent-controller running? Is the URL correct?"
+              exit 1
+              ;;
+          esac
+
+          if [ "${HTTP_CODE}" -ne 200 ]; then
+            echo "ERROR: KAgent controller returned HTTP ${HTTP_CODE}"
+            exit 1
+          fi
+
+          echo "KAgent controller reachable (HTTP 200)"
+
+          # List available agents for logging
+          AGENT_COUNT=$(jq 'length // 0' /tmp/agents.json 2>/dev/null)
+          echo "Available agents: ${AGENT_COUNT}"
+          jq -r '.[]? | "  - \(.metadata.name // .name // "unknown")"' /tmp/agents.json 2>/dev/null || true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+
+    # -------------------------------------------------------------------------
+    # Parse OTLP + Agent Routing
+    #
+    # 1. Parse OTLP envelope, extract K8s events, filter critical reasons
+    # 2. Route each event to the right KAgent agent:
+    #    - Namespace match (from agent-routing ConfigMap) → specialist agent
+    #    - Reason match (from agent-routing ConfigMap) → specialist agent
+    #    - Default: triage or remediation agent
+    #
+    # To add a new specialist agent:
+    #   1. Create the agent CRD in kagent namespace
+    #   2. Update agent-routing ConfigMap with the namespace/reason mapping
+    #   3. Events from that namespace/reason will auto-route to the new agent
     # -------------------------------------------------------------------------
     - name: parse-otlp
       inputs:
@@ -100,13 +181,52 @@ spec:
       script:
         image: badouralix/curl-jq:alpine
         command: [sh]
+        env:
+          - name: DEFAULT_TRIAGE_AGENT
+            valueFrom:
+              configMapKeyRef:
+                name: agent-routing
+                key: default-triage
+                optional: true
+          - name: DEFAULT_REMEDIATION_AGENT
+            valueFrom:
+              configMapKeyRef:
+                name: agent-routing
+                key: default-remediation
+                optional: true
+          - name: NAMESPACE_ROUTES
+            valueFrom:
+              configMapKeyRef:
+                name: agent-routing
+                key: namespace-routes
+                optional: true
+          - name: REASON_ROUTES
+            valueFrom:
+              configMapKeyRef:
+                name: agent-routing
+                key: reason-routes
+                optional: true
         source: |
+          REMEDIATE="{{workflow.parameters.remediate}}"
+          DEFAULT_TRIAGE="${DEFAULT_TRIAGE_AGENT:-sre-triage-agent}"
+          DEFAULT_REMEDIATION="${DEFAULT_REMEDIATION_AGENT:-sre-remediation-agent}"
+
+          # Write routing tables for jq (default to empty object if not configured)
+          echo "${NAMESPACE_ROUTES:-{\}}" > /tmp/ns_routes.json
+          echo "${REASON_ROUTES:-{\}}" > /tmp/reason_routes.json
+
           cat > /tmp/otlp_input.json << '__OTLP_EOF__'
           {{inputs.parameters.otlp-payload}}
           __OTLP_EOF__
 
-          # Parse OTLP envelope, extract K8s events, filter critical reasons
-          jq '
+          # Parse OTLP envelope, extract K8s events, filter critical, route agents
+          jq \
+            --arg default_triage "$DEFAULT_TRIAGE" \
+            --arg default_remediation "$DEFAULT_REMEDIATION" \
+            --arg remediate "$REMEDIATE" \
+            --slurpfile ns_routes /tmp/ns_routes.json \
+            --slurpfile reason_routes /tmp/reason_routes.json \
+            '
             # Convert OTLP attribute array [{key,value}] to object
             def attrs: [.[]? | {(.key): (.value.stringValue // (.value.intValue // .value.boolValue // "" | tostring))}] | add // {};
 
@@ -122,8 +242,14 @@ spec:
 
               ($a.event_reason // $ev.reason // "") as $reason |
               ($a.event_type // $ev.type // "") as $type |
+              ($a.obj_namespace // $ev.involvedObject.namespace // "") as $ns |
 
               select($type == "Warning" and ($reason | is_critical)) |
+
+              # Agent routing: namespace → reason → default
+              ($ns_routes[0][$ns] // null) as $ns_agent |
+              ($reason_routes[0][$reason] // null) as $reason_agent |
+              (if $remediate == "true" then $default_remediation else $default_triage end) as $default_agent |
 
               {
                 cluster:          ($a.cluster // $res.cluster // "unknown"),
@@ -133,9 +259,10 @@ spec:
                 event_message:    ($ev.message // ""),
                 object_kind:      ($a.obj_kind // $ev.involvedObject.kind // ""),
                 object_name:      ($ev.involvedObject.name // ""),
-                object_namespace: ($a.obj_namespace // $ev.involvedObject.namespace // ""),
+                object_namespace: $ns,
                 event_time:       ($ev.lastTimestamp // $ev.firstTimestamp // ""),
-                event_count:      ($ev.count // 1 | tostring)
+                event_count:      ($ev.count // 1 | tostring),
+                target_agent:     ($ns_agent // $reason_agent // $default_agent)
               }
             ]
           ' /tmp/otlp_input.json > /tmp/events.json
@@ -143,7 +270,7 @@ spec:
           COUNT=$(jq length /tmp/events.json)
           echo "$COUNT" > /tmp/event-count.txt
           echo "[CRITICAL] $COUNT critical event(s) from OTLP payload"
-          jq -r '.[] | "  - \(.event_reason): \(.object_kind)/\(.object_name) in \(.object_namespace)"' /tmp/events.json
+          jq -r '.[] | "  - \(.event_reason): \(.object_kind)/\(.object_name) in \(.object_namespace) → \(.target_agent)"' /tmp/events.json
         resources:
           requests:
             cpu: 50m
@@ -158,12 +285,8 @@ spec:
     # Combined into one script because withParam fan-out runs parallel pods
     # that can't share a PVC. Each event gets its own pod with the full pipeline.
     #
-    # Ported from kagent-sre-workflow.yaml (the working version):
-    #   - A2A message/send with retry
-    #   - Artifact + history fallback extraction
-    #   - Think tag stripping
-    #   - GitLab issue with full SRE formatting
-    #   - Mattermost rich notification with analysis + quick commands
+    # Agent selection: uses target-agent from routing (set by parse-otlp).
+    # Workflow param kagent-agent overrides routing if provided (manual override).
     # -------------------------------------------------------------------------
     - name: investigate-and-report
       inputs:
@@ -178,6 +301,7 @@ spec:
           - name: object-namespace
           - name: event-time
           - name: event-count
+          - name: target-agent
       retryStrategy:
         limit: 1
         retryPolicy: "OnFailure"
@@ -198,11 +322,6 @@ spec:
               configMapKeyRef:
                 name: kagent-config
                 key: KAGENT_URL
-          - name: KAGENT_AGENT
-            valueFrom:
-              configMapKeyRef:
-                name: kagent-config
-                key: KAGENT_CRITICAL_AGENT
           - name: GITLAB_TOKEN
             valueFrom:
               secretKeyRef:
@@ -222,11 +341,18 @@ spec:
           GITLAB_PROJECT_ID="{{workflow.parameters.gitlab-project-id}}"
           GITLAB_URL="{{workflow.parameters.gitlab-url}}"
 
-          # Override KAgent URL/agent from workflow params if provided
+          # Agent selection: routing decision (from parse-otlp) → workflow override → ConfigMap
+          KAGENT_AGENT="{{inputs.parameters.target-agent}}"
           WF_KAGENT_URL="{{workflow.parameters.kagent-url}}"
           WF_KAGENT_AGENT="{{workflow.parameters.kagent-agent}}"
           [ -n "$WF_KAGENT_URL" ] && KAGENT_URL="$WF_KAGENT_URL"
           [ -n "$WF_KAGENT_AGENT" ] && KAGENT_AGENT="$WF_KAGENT_AGENT"
+
+          if [ "$REMEDIATE" = "true" ]; then
+            MODE_LABEL="REMEDIATION"
+          else
+            MODE_LABEL="TRIAGE"
+          fi
 
           echo "=========================================="
           echo "[CRITICAL] $REASON: $OBJ_KIND/$OBJ_NAME in $OBJ_NS"
@@ -237,14 +363,6 @@ spec:
           {{inputs.parameters.event-message}}
           __MSG_EOF__
           EVENT_MSG=$(cat /tmp/event_message.txt | head -c 1000)
-
-          # Select agent based on remediation mode
-          if [ "$REMEDIATE" = "true" ]; then
-            KAGENT_AGENT="sre-remediation-agent"
-            MODE_LABEL="REMEDIATION"
-          else
-            MODE_LABEL="TRIAGE"
-          fi
 
           # =================================================================
           # STEP 1: KAgent A2A Analysis
@@ -514,6 +632,7 @@ spec:
           echo "Mattermost: HTTP $MM_HTTP"
           echo "=========================================="
           echo "Done: $REASON $OBJ_KIND/$OBJ_NAME in $OBJ_NS"
+          echo "  Agent: ${KAGENT_AGENT} (routed)"
           echo "  KAgent: ${KAGENT_STATUS} (${DURATION}s)"
           echo "  GitLab: ${ISSUE_IID:-skipped}"
           echo "  Mattermost: HTTP ${MM_HTTP}"
