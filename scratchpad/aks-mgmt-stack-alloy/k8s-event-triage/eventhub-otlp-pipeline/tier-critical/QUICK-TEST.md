@@ -254,6 +254,151 @@ Mattermost: HTTP 200
 
 ---
 
+## Test 4: Event Deduplication (memoize)
+
+Tests that the same event within 24h is skipped (memoized) on second submission.
+
+**Step 1: Submit the first workflow**
+
+```bash
+kubectl create -f - << 'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: test-dedup-
+  namespace: argo-events
+spec:
+  workflowTemplateRef:
+    name: k8s-triage-critical
+  podGC: {}
+  arguments:
+    parameters:
+      - name: otlp-payload
+        value: '{"resourceLogs":[{"resource":{"attributes":[{"key":"cluster","value":{"stringValue":"dedup-cluster"}}]},"scopeLogs":[{"logRecords":[{"body":{"stringValue":"{\"type\":\"Warning\",\"reason\":\"CrashLoopBackOff\",\"message\":\"back-off restarting container\",\"involvedObject\":{\"kind\":\"Pod\",\"name\":\"dedup-test-pod\",\"namespace\":\"default\"},\"count\":1}"},"attributes":[{"key":"event_type","value":{"stringValue":"Warning"}},{"key":"event_reason","value":{"stringValue":"CrashLoopBackOff"}}]}]}]}]}'
+      - name: kagent-url
+        value: ""
+      - name: kagent-agent
+        value: ""
+      - name: remediate
+        value: "false"
+      - name: gitlab-project-id
+        value: ""
+      - name: gitlab-url
+        value: "https://gitlab.com"
+EOF
+```
+
+Wait for completion:
+
+```bash
+argo watch -n argo-events @latest
+```
+
+**Expected:** `investigate-and-report` runs fully (not memoized).
+
+**Step 2: Submit the identical workflow again**
+
+Run the exact same `kubectl create` command above again.
+
+```bash
+argo watch -n argo-events @latest
+```
+
+**Expected:** `investigate-and-report` step shows as **memoized/skipped** — the step completes instantly without running the script.
+
+**Step 3: Verify the cache ConfigMap**
+
+```bash
+# Cache lives in the argo namespace (controller namespace), not argo-events
+kubectl get configmap event-dedup-cache -n argo -o yaml
+```
+
+You should see a cached key like `dedup-cluster-default-dedup-test-pod-CrashLoopBackOff`.
+
+**Step 4: Verify different pod is NOT deduped**
+
+Submit a workflow with a different pod name — it should run fully (different cache key):
+
+```bash
+kubectl create -f - << 'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: test-dedup-different-
+  namespace: argo-events
+spec:
+  workflowTemplateRef:
+    name: k8s-triage-critical
+  podGC: {}
+  arguments:
+    parameters:
+      - name: otlp-payload
+        value: '{"resourceLogs":[{"resource":{"attributes":[{"key":"cluster","value":{"stringValue":"dedup-cluster"}}]},"scopeLogs":[{"logRecords":[{"body":{"stringValue":"{\"type\":\"Warning\",\"reason\":\"CrashLoopBackOff\",\"message\":\"back-off restarting container\",\"involvedObject\":{\"kind\":\"Pod\",\"name\":\"different-pod\",\"namespace\":\"default\"},\"count\":1}"},"attributes":[{"key":"event_type","value":{"stringValue":"Warning"}},{"key":"event_reason","value":{"stringValue":"CrashLoopBackOff"}}]}]}]}]}'
+      - name: kagent-url
+        value: ""
+      - name: kagent-agent
+        value: ""
+      - name: remediate
+        value: "false"
+      - name: gitlab-project-id
+        value: ""
+      - name: gitlab-url
+        value: "https://gitlab.com"
+EOF
+```
+
+**Expected:** Runs fully — different pod name = different cache key.
+
+---
+
+## Test 5: Remediation Mode Toggle
+
+Tests the `remediate` parameter override. No template change needed — just pass `remediate: "true"`.
+
+```bash
+kubectl create -f - << 'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: test-remediate-
+  namespace: argo-events
+spec:
+  workflowTemplateRef:
+    name: k8s-triage-critical
+  podGC: {}
+  arguments:
+    parameters:
+      - name: otlp-payload
+        value: '{"resourceLogs":[{"resource":{"attributes":[{"key":"cluster","value":{"stringValue":"my-cluster"}}]},"scopeLogs":[{"logRecords":[{"body":{"stringValue":"{\"type\":\"Warning\",\"reason\":\"OOMKilled\",\"message\":\"container killed due to OOM\",\"involvedObject\":{\"kind\":\"Pod\",\"name\":\"oom-test-pod\",\"namespace\":\"staging\"},\"count\":1}"},"attributes":[{"key":"event_type","value":{"stringValue":"Warning"}},{"key":"event_reason","value":{"stringValue":"OOMKilled"}}]}]}]}]}'
+      - name: kagent-url
+        value: ""
+      - name: kagent-agent
+        value: ""
+      - name: remediate
+        value: "true"
+      - name: gitlab-project-id
+        value: ""
+      - name: gitlab-url
+        value: "https://gitlab.com"
+EOF
+```
+
+```bash
+argo logs -n argo-events @latest
+```
+
+**Expected in logs:**
+- `Remediate: true` in the header
+- `MODE_LABEL="REMEDIATION"` path taken
+- parse-otlp routes to `sre-remediation-agent` (instead of `sre-triage-agent`)
+- If KAgent is configured: A2A prompt says "Fix this CRITICAL K8s issue..." instead of "Investigate..."
+
+**With KAgent configured**, also check:
+- GitLab issue title has `:wrench:` emoji and `REMEDIATION APPLIED` label
+- Mattermost notification reflects remediation mode
+
+---
+
 ## Cleanup
 
 ```bash
@@ -262,6 +407,9 @@ argo delete -n argo-events --selector workflows.argoproj.io/workflow-template=k8
 
 # Or delete all completed
 argo delete -n argo-events --completed
+
+# Clear dedup cache (to re-test memoize) — lives in argo namespace (controller)
+kubectl delete configmap event-dedup-cache -n argo --ignore-not-found
 ```
 
 ---
@@ -302,3 +450,5 @@ The workflow template uses `podGC: OnPodCompletion` which cleans up pods as soon
 | Mattermost 404 | Bad webhook URL | Verify webhook URL in configmap is correct |
 | Pods disappear before logs | podGC cleaning up | Use `argo logs` not `kubectl logs`, or check output params via `argo get -o json` |
 | `unknown strategy 'Never'` | Invalid podGC value | Use `podGC: {}` or omit podGC entirely |
+| `investigate-and-report` skipped unexpectedly | memoize cache hit (24h dedup) | Delete ConfigMap: `kubectl delete cm event-dedup-cache -n argo` |
+| memoize "configmaps is forbidden" | Controller SA missing ConfigMap create/update | Patch `argo-cluster-role` to add `create`, `update` verbs on `configmaps` resource |

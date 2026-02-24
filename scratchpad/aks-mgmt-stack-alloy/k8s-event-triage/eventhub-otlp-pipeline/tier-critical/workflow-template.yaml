@@ -312,6 +312,12 @@ spec:
     # Workflow param kagent-agent overrides routing if provided (manual override).
     # -------------------------------------------------------------------------
     - name: investigate-and-report
+      memoize:
+        key: "{{inputs.parameters.cluster}}-{{inputs.parameters.object-namespace}}-{{inputs.parameters.object-name}}-{{inputs.parameters.event-reason}}"
+        maxAge: "24h"
+        cache:
+          configMap:
+            name: event-dedup-cache
       inputs:
         parameters:
           - name: cluster
