@@ -10,6 +10,8 @@ The proposal is simple: instead of spinning up temporary clusters on demand, we 
 
 When a rebuild or failure happens, teams switch context — the namespace is already there, secrets are already synced, identity bindings are already in place. No emergency standup. No user disruption. No time pressure.
 
+On the DNS side — this is simpler than it might sound. We don't need to share DNS zones, restructure anything, or do anything exotic. Each cluster gets a friendly internal CNAME alias — something like apac-cluster.internal. In a failover event, we update that alias to point to the EMEA cluster instead. That's a single DNS record change, it's automatable, and it's reversible in seconds. Teams never need to know or care about the underlying cluster endpoint — they always hit the same alias. Nothing about this requires touching the wider DNS zone or any shared infrastructure.
+
 The cost delta is zero. The infrastructure already exists. The one-time investment is updating our onboarding automation to provision on two clusters instead of one.
 
 Happy to walk through the detail — I've put together a full architecture document covering the topology, GitOps sync approach, failover process, and answers to the likely questions around data residency and capacity. Will share shortly.
