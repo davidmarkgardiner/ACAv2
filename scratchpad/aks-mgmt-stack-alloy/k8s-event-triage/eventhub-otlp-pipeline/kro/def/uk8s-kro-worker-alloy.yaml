@@ -1,0 +1,347 @@
+---
+# Crow Worker Alloy — Workload Cluster Event Collector
+# KRO ResourceGraphDefinition that deploys Grafana Alloy on a workload cluster
+# to collect K8s events and forward them to Azure Event Hub as OTLP/Kafka.
+#
+# Deploy one instance per workload cluster. The management cluster's
+# uk8s-kro-ai-stack.kro.run consumes these events via Argo Events.
+#
+# What this creates:
+#   - Namespace: monitoring
+#   - ServiceAccount + ClusterRole + ClusterRoleBinding (watch events)
+#   - ConfigMap: alloy-config  (HCL config, parameterised)
+#   - Deployment: grafana/alloy
+#   - Service: alloy HTTP health/metrics endpoint
+#
+# Pre-requisites:
+#   - Secret "alloy-eventhub" with key "connection-string" in monitoring namespace
+#     kubectl create secret generic alloy-eventhub -n monitoring \
+#       --from-literal=connection-string='Endpoint=sb://...'
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: uk8s-kro-worker-alloy.kro.run
+  labels:
+    kro.run/type: kro-worker-alloy
+    kro.run/category: event-collector
+    kro.run/layer: worker
+  annotations:
+    kro.run/description: "Workload cluster Alloy collector: K8s events → OTLP/Kafka → Event Hub"
+    kro.run/version: "1.0.0"
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: KroWorkerAlloy
+    spec:
+      namespace: string | default="monitoring" description="Namespace for Alloy deployment"
+
+      # ── Cluster identity (embedded in every event as labels) ─────────────
+      cluster:
+        name: string | required=true description="Cluster name label (e.g. aks-prod-01)"
+        environment: string | default="production" description="Environment label"
+        region: string | default="uksouth" description="Azure region label"
+
+      # ── Event Hub target ─────────────────────────────────────────────────
+      eventHub:
+        # Full FQDN with port, e.g. evh-prod.servicebus.windows.net:9093
+        fqdn: string | required=true description="Event Hub broker FQDN with port"
+        topic: string | default="k8s-events" description="Event Hub topic name"
+        # Secret in the monitoring namespace holding the connection string
+        credentialsSecretName: string | default="alloy-eventhub"
+
+      # ── Namespaces to watch (HCL list content, quoted + comma-separated)
+      # Example: '"default", "production", "staging"'
+      # Phase 1 = app namespaces only. Phase 3 = add infra namespaces.
+      watchNamespacesHCL: string | required=true description="HCL-formatted quoted namespace list, e.g. '\"default\", \"app\"'"
+
+      # ── Alloy image ──────────────────────────────────────────────────────
+      image: string | default="grafana/alloy:v1.12.2"
+
+  resources:
+    # ──────────────────────────────────────────────────────────────────────────
+    # 1. Namespace
+    # ──────────────────────────────────────────────────────────────────────────
+    - id: monitoringNamespace
+      template:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ${schema.spec.namespace}
+          labels:
+            app.kubernetes.io/part-of: kro-worker-alloy
+            kro.run/instance: ${schema.metadata.name}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 2. ServiceAccount
+    # ──────────────────────────────────────────────────────────────────────────
+    - id: serviceAccount
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: alloy
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: alloy
+            app.kubernetes.io/part-of: kro-worker-alloy
+            kro.run/instance: ${schema.metadata.name}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 3. ClusterRole — read K8s events, pods, nodes, namespaces
+    # ──────────────────────────────────────────────────────────────────────────
+    - id: clusterRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: alloy-k8s-events-${schema.metadata.name}
+          labels:
+            app: alloy
+            app.kubernetes.io/part-of: kro-worker-alloy
+            kro.run/instance: ${schema.metadata.name}
+        rules:
+          - apiGroups: [""]
+            resources: ["events"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: [""]
+            resources: ["namespaces", "pods", "nodes"]
+            verbs: ["get", "list", "watch"]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 4. ClusterRoleBinding
+    # ──────────────────────────────────────────────────────────────────────────
+    - id: clusterRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: alloy-k8s-events-${schema.metadata.name}
+          labels:
+            app: alloy
+            app.kubernetes.io/part-of: kro-worker-alloy
+            kro.run/instance: ${schema.metadata.name}
+        subjects:
+          - kind: ServiceAccount
+            name: alloy
+            namespace: ${schema.spec.namespace}
+        roleRef:
+          kind: ClusterRole
+          name: alloy-k8s-events-${schema.metadata.name}
+          apiGroup: rbac.authorization.k8s.io
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 5. ConfigMap — Alloy HCL config
+    #    Pipeline: loki.source.kubernetes_events
+    #            → loki.process (enrich + dedup + rate-limit)
+    #            → otelcol.receiver.loki
+    #            → otelcol.processor.batch
+    #            → otelcol.exporter.kafka (otlp_json → Event Hub)
+    # ──────────────────────────────────────────────────────────────────────────
+    - id: configMap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: alloy-config
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: alloy
+            app.kubernetes.io/part-of: kro-worker-alloy
+            kro.run/instance: ${schema.metadata.name}
+        data:
+          config.alloy: |
+            logging {
+              level  = "info"
+              format = "logfmt"
+            }
+
+            // Watch K8s events in specified namespaces
+            loki.source.kubernetes_events "cluster_events" {
+              namespaces = [${schema.spec.watchNamespacesHCL}]
+              job_name   = "kubernetes-events"
+              log_format = "json"
+              forward_to = [loki.process.enrich.receiver]
+            }
+
+            // Enrich events with cluster metadata, parse fields, dedup, rate-limit
+            loki.process "enrich" {
+              stage.static_labels {
+                values = {
+                  cluster     = "${schema.spec.cluster.name}",
+                  environment = "${schema.spec.cluster.environment}",
+                  region      = "${schema.spec.cluster.region}",
+                  source      = "alloy",
+                }
+              }
+
+              stage.json {
+                expressions = {
+                  event_type    = "type",
+                  event_reason  = "reason",
+                  event_count   = "count",
+                  obj_kind      = "involvedObject.kind",
+                  obj_namespace = "involvedObject.namespace",
+                }
+              }
+
+              stage.labels {
+                values = {
+                  event_type    = "",
+                  event_reason  = "",
+                  obj_kind      = "",
+                  obj_namespace = "",
+                }
+              }
+
+              // Dedup: only forward first occurrence (count == 1)
+              stage.drop {
+                source              = "event_count"
+                expression          = "^[2-9]|^[1-9][0-9]+"
+                drop_counter_reason = "duplicate_event"
+              }
+
+              // Rate limit: prevent flooding during event storms
+              stage.limit {
+                rate  = 10
+                burst = 25
+                drop  = true
+              }
+
+              forward_to = [otelcol.receiver.loki.bridge.receiver]
+            }
+
+            otelcol.receiver.loki "bridge" {
+              output {
+                logs = [otelcol.processor.batch.default.input]
+              }
+            }
+
+            otelcol.processor.batch "default" {
+              timeout         = "2s"
+              send_batch_size = 100
+              output {
+                logs = [otelcol.exporter.kafka.eventhub.input]
+              }
+            }
+
+            otelcol.exporter.kafka "eventhub" {
+              brokers          = ["${schema.spec.eventHub.fqdn}"]
+              protocol_version = "1.0.0"
+
+              logs {
+                topic    = "${schema.spec.eventHub.topic}"
+                encoding = "otlp_json"
+              }
+
+              authentication {
+                tls {
+                  insecure = false
+                }
+                sasl {
+                  username  = "$ConnectionString"
+                  password  = sys.env("EVENTHUB_CONNECTION_STRING")
+                  mechanism = "PLAIN"
+                }
+              }
+
+              sending_queue {
+                enabled    = true
+                queue_size = 1000
+              }
+            }
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 6. Deployment
+    # ──────────────────────────────────────────────────────────────────────────
+    - id: deployment
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: alloy
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: alloy
+            app.kubernetes.io/part-of: kro-worker-alloy
+            kro.run/instance: ${schema.metadata.name}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: alloy
+          template:
+            metadata:
+              labels:
+                app: alloy
+                app.kubernetes.io/part-of: kro-worker-alloy
+            spec:
+              serviceAccountName: alloy
+              containers:
+                - name: alloy
+                  image: ${schema.spec.image}
+                  args:
+                    - run
+                    - /etc/alloy/config.alloy
+                    - --storage.path=/var/lib/alloy/data
+                    - --server.http.listen-addr=0.0.0.0:12345
+                  ports:
+                    - containerPort: 12345
+                      name: http
+                  env:
+                    - name: EVENTHUB_CONNECTION_STRING
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.eventHub.credentialsSecretName}
+                          key: connection-string
+                  volumeMounts:
+                    - name: config
+                      mountPath: /etc/alloy
+                    - name: data
+                      mountPath: /var/lib/alloy/data
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 128Mi
+                    limits:
+                      cpu: 200m
+                      memory: 256Mi
+                  livenessProbe:
+                    httpGet:
+                      path: /-/healthy
+                      port: 12345
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  readinessProbe:
+                    httpGet:
+                      path: /-/ready
+                      port: 12345
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+              volumes:
+                - name: config
+                  configMap:
+                    name: alloy-config
+                - name: data
+                  emptyDir: {}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 7. Service — Alloy HTTP health/metrics endpoint
+    # ──────────────────────────────────────────────────────────────────────────
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: alloy
+          namespace: ${schema.spec.namespace}
+          labels:
+            app: alloy
+            app.kubernetes.io/part-of: kro-worker-alloy
+            kro.run/instance: ${schema.metadata.name}
+        spec:
+          selector:
+            app: alloy
+          ports:
+            - port: 12345
+              targetPort: 12345
+              name: http

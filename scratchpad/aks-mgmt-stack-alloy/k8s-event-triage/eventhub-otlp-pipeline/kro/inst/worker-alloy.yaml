@@ -1,0 +1,39 @@
+---
+# Crow Worker Alloy — Workload Cluster Instance
+# Apply this TO the workload cluster (NOT the management cluster).
+#
+# Pre-requisite before applying:
+#   Create the Event Hub credentials secret on the workload cluster:
+#
+#   kubectl create ns monitoring
+#   printf '%s' 'Endpoint=sb://evh-YOUR-NS.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=...' \
+#     > /tmp/eh-connstr.txt
+#   kubectl create secret generic alloy-eventhub -n monitoring \
+#     --from-file=connection-string=/tmp/eh-connstr.txt
+#   rm /tmp/eh-connstr.txt
+#
+# Repeat for each workload cluster with a unique `cluster.name`.
+apiVersion: v1alpha1
+kind: KroWorkerAlloy
+metadata:
+  name: kro-alloy-cluster01
+  namespace: default
+spec:
+  namespace: monitoring
+
+  cluster:
+    name: "aks-prod-01"
+    environment: "production"
+    region: "uksouth"
+
+  eventHub:
+    fqdn: "evh-YOUR-NAMESPACE.servicebus.windows.net:9093"
+    topic: "k8s-events"
+    credentialsSecretName: "alloy-eventhub"
+
+  # HCL-formatted quoted namespace list.
+  # Phase 1: app namespaces only.
+  # Phase 3: add infra namespaces (cert-manager, external-dns, keda, etc.)
+  watchNamespacesHCL: '"default", "production", "staging"'
+
+  image: "grafana/alloy:v1.12.2"

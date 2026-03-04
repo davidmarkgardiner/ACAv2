@@ -1,0 +1,53 @@
+---
+# Crow AI Stack — Management Cluster Instance
+# Apply this to the management cluster (where KRO + Argo are running).
+#
+# Pre-requisites before applying:
+#
+#   1. Extract Event Hub TLS CA cert:
+#      openssl s_client -connect evh-YOUR-NS.servicebus.windows.net:9093 \
+#        -showcerts 2>/dev/null \
+#        | awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
+#        > /tmp/eventhub-ca.pem
+#      kubectl create secret generic eventhub-tls-ca -n argo-events \
+#        --from-file=ca.pem=/tmp/eventhub-ca.pem
+#
+#   2. Create Event Hub credentials secret:
+#      printf '%s' '$ConnectionString' > /tmp/eh-user.txt
+#      printf '%s' 'Endpoint=sb://evh-YOUR-NS.servicebus.windows.net/;...' > /tmp/eh-pass.txt
+#      kubectl create secret generic eventhub-credentials -n argo-events \
+#        --from-file=username=/tmp/eh-user.txt \
+#        --from-file=connection-string=/tmp/eh-pass.txt
+#      rm /tmp/eh-user.txt /tmp/eh-pass.txt
+#
+#   3. Create Event Hub consumer group (Azure):
+#      az eventhubs eventhub consumer-group create \
+#        --name argo-events-consumer \
+#        --eventhub-name k8s-events \
+#        --namespace-name evh-YOUR-NS \
+#        --resource-group rg-event-triage
+apiVersion: v1alpha1
+kind: KroAIStack
+metadata:
+  name: kro-ai-stack-prod
+  namespace: default
+spec:
+  namespace: argo-events
+
+  eventHub:
+    fqdn: "evh-YOUR-NAMESPACE.servicebus.windows.net:9093"
+    topic: "k8s-events"
+    consumerGroup: "argo-events-consumer"
+    credentialsSecretName: "eventhub-credentials"
+    tlsCaSecretName: "eventhub-tls-ca"
+
+  mattermost:
+    webhookUrl: "https://mattermost.YOUR-DOMAIN.com/hooks/YOUR-WEBHOOK-ID"
+
+  kagent:
+    url: "http://kagent-controller-manager.kagent.svc.cluster.local:8082"
+    criticalAgent: "sre-triage-agent"
+    warningsAgent: "sre-triage-agent"
+
+  sensor:
+    rateLimitPerMinute: 5
