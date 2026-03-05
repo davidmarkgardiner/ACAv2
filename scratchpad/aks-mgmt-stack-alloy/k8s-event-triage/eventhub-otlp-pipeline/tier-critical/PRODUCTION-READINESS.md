@@ -120,6 +120,10 @@ Two VLLM backends available. Need to decide which agents connect to which.
 - [ ] Decide central vs per-cluster MCP deployment
 - [ ] If per-cluster: plan UAMI config for each cluster
 - [ ] Address the self-healing gap (mgmt cluster down scenario)
+- [ ] Lock down MCP endpoint — ensure only authorized agents can reach it (not just people)
+  - Network policy / service mesh to restrict ingress to agent pods only
+  - mTLS or token-based auth so the MCP rejects requests from anything other than the triage agents
+  - Audit logging on MCP access for traceability
 - [ ] Document the deployment topology
 
 ---
@@ -208,19 +212,38 @@ Agents are only as good as the context they have. Need runbooks for common scena
 
 ---
 
-## 11. Engineering Rollout
+## 11. Engineering Rollout — Namespace-by-Namespace Fault Injection
 
-**Owner:** David
+**Owner:** David + Team
 
-Turn it on for real and flush out bugs.
+**Strategy:** Open up one namespace at a time, assign it to a specific agent, and validate through deliberate fault injection before moving on.
 
-- [ ] Start with one non-critical AKS cluster
-- [ ] Critical tier only (Phase 1)
-- [ ] Monitor for false positives / noise
-- [ ] Tune the Alloy dedup filter and rate limits
-- [ ] Add more namespaces gradually
-- [ ] Enable warnings tier (Phase 2) after critical is stable
-- [ ] Enable infra tier (Phase 3) last
+### Approach
+
+1. **One namespace, one agent** — each namespace is assigned to a dedicated agent. The team injects faults into that namespace (on any cluster in engineering) and evaluates whether the agent can correctly triage and ideally remediate the issue.
+2. **Agent tuning loop** — work with each agent's context, skills, and tools to improve its performance against the injected faults. Iterate on system prompts, runbooks, and tool permissions until the agent handles the namespace's failure modes reliably.
+3. **Repeat for all core agents** — once an agent passes fault injection for its namespace, move to the next agent/namespace pair. When all core agents are validated, we're in a position to release into dev clusters.
+
+### Fault Injection Scope
+
+- Inject faults into any cluster in the engineering environment
+- Target one namespace at a time to isolate agent performance
+- Fault types: CrashLoopBackOff, OOMKilled, FailedScheduling, resource exhaustion, config errors, network policies, etc.
+- Success criteria: agent provides correct triage diagnosis; bonus if it can auto-remediate
+
+### Rollout Phases
+
+- [ ] Select first namespace + assign to first agent
+- [ ] Define fault injection playbook (what faults, how to inject, expected agent response)
+- [ ] Run fault injection round — evaluate agent triage accuracy
+- [ ] Tune agent (prompts, tools, permissions) based on results
+- [ ] Repeat for each core agent/namespace pair
+- [ ] All core agents validated → release to dev clusters
+- [ ] Monitor dev clusters for false positives / noise
+- [ ] Tune Alloy dedup filter and rate limits
+- [ ] Expand to additional namespaces gradually
+- [ ] Enable warnings tier after critical is stable
+- [ ] Enable infra tier last
 
 ---
 
