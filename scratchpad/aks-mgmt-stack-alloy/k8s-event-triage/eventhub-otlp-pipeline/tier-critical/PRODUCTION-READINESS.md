@@ -36,22 +36,29 @@ Outstanding items to get from working prototype to production. Needs team involv
 
 **Owner:** David
 
-Different event types trigger different EventSources via separate consumer groups. Each routes to a different workflow/agent.
+**How Event Hub consumer groups actually work:** All events go to a single topic (`k8s-events`). Consumer groups are just independent read cursors — every consumer group sees every event. They don't filter. The reason we need separate consumer groups is so that multiple consumers can each read the same stream at their own pace without interfering with each other's offsets.
+
+**Filtering happens downstream in the Argo Events Sensors**, not at the Event Hub level. Each sensor has trigger conditions that decide whether to fire its workflow based on the event payload (severity, event reason, resource kind, etc.).
 
 ```
 Event Hub Topic: k8s-events
     │
-    ├── consumer-critical  → Sensor → Workflow → SRE Remediation Agent (cloud LLM)
-    ├── consumer-warnings  → Sensor → Workflow → SRE Triage Agent (hosted LLM)
-    ├── consumer-network   → Sensor → Workflow → Network Specialist Agent
-    ├── consumer-domain    → Sensor → Workflow → Domain Specialist Agent
-    └── consumer-infra     → Sensor → Workflow → SRE Read-Only Agent
+    │  (every event goes to every consumer group)
+    │
+    ├── consumer-critical  → EventSource → Sensor (filter: severity=critical)  → Workflow → SRE Remediation Agent (cloud LLM)
+    ├── consumer-warnings  → EventSource → Sensor (filter: severity=warning)   → Workflow → SRE Triage Agent (hosted LLM)
+    ├── consumer-network   → EventSource → Sensor (filter: kind=NetworkPolicy)  → Workflow → Network Specialist Agent
+    ├── consumer-domain    → EventSource → Sensor (filter: app-specific labels) → Workflow → Domain Specialist Agent
+    └── consumer-infra     → EventSource → Sensor (filter: kind=Node)           → Workflow → SRE Read-Only Agent
 ```
 
-- [ ] Define the full list of consumer groups and what events each handles
+**Alternative:** If we want actual routing at the Event Hub level, we'd need separate topics (`k8s-events-critical`, `k8s-events-warnings`, etc.) with Alloy or a relay publishing to the right topic. This adds complexity at the producer side but simplifies consumers.
+
+- [ ] Decide: single topic + sensor filters vs multiple topics
+- [ ] Define sensor filter conditions for each tier (severity, reason, resource kind, labels)
 - [ ] Define which KAgent agent each tier routes to
 - [ ] Create EventSource + Sensor + WorkflowTemplate per tier
-- [ ] Create consumer groups in Event Hub
+- [ ] Create consumer groups in Event Hub (one per consumer, to avoid offset conflicts)
 
 ---
 
