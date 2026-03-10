@@ -66,7 +66,7 @@ Maximum 5 workflow triggers per minute from this sensor. Any events beyond that 
 
 ## Layer 3: Argo Workflows memoize (Management Cluster)
 
-**What it catches:** Same pod + same reason + same namespace + same cluster within 24 hours, regardless of whether the pod was recreated (new UID).
+**What it catches:** Same reason + same namespace + same cluster within 24 hours, regardless of which pod triggered it. OOMKilled on pod-abc and pod-xyz in the same namespace = one alert.
 
 **What it misses:** Nothing — this is the final dedup net.
 
@@ -77,24 +77,24 @@ Maximum 5 workflow triggers per minute from this sensor. Any events beyond that 
 ```yaml
 - name: investigate-and-report
   memoize:
-    key: "{{inputs.parameters.cluster}}-{{inputs.parameters.object-namespace}}-{{inputs.parameters.object-name}}-{{inputs.parameters.event-reason}}"
+    key: "{{inputs.parameters.cluster}}-{{inputs.parameters.object-namespace}}-{{inputs.parameters.event-reason}}"
     maxAge: "24h"
     cache:
       configMap:
         name: event-dedup-cache
 ```
 
-The cache key is `{cluster}-{namespace}-{pod}-{reason}`. On first occurrence, the full pipeline runs (KAgent analysis, GitLab issue, Mattermost notification) and the result is cached in ConfigMap `event-dedup-cache`. Any identical event within 24h is skipped — the step completes instantly without running.
+The cache key is `{cluster}-{namespace}-{reason}`. On first occurrence, the full pipeline runs (KAgent analysis, GitLab issue, Mattermost notification) and the result is cached in ConfigMap `event-dedup-cache`. Any identical event within 24h is skipped — the step completes instantly without running. This means OOMKilled on different pods in the same namespace only triggers one alert per 24h window.
 
 ### What is NOT deduped (by design)
 
 | Scenario | Deduped? | Why |
 |----------|----------|-----|
-| Same pod, same reason, within 24h | Yes | Same cache key |
-| Same pod, same reason, after 24h | No | Cache entry expired |
-| Same reason, different pod | No | Different `object-name` in key |
-| Same pod, different reason | No | Different `event-reason` in key |
-| Same pod, same reason, different cluster | No | Different `cluster` in key |
+| Same namespace, same reason, within 24h | Yes | Same cache key |
+| Same namespace, same reason, after 24h | No | Cache entry expired |
+| Same reason, different pod, same namespace | Yes | Pod name not in key |
+| Same namespace, different reason | No | Different `event-reason` in key |
+| Same reason, same namespace, different cluster | No | Different `cluster` in key |
 
 ### RBAC requirement
 
@@ -133,5 +133,5 @@ kubectl delete configmap event-dedup-cache -n argo --ignore-not-found
 |-------|------|-------|-----------|-------|
 | **1. Alloy** | `workload-cluster/02-alloy-config.yaml` | 90-94, 103-107 | `stage.drop` (count>1) + `stage.limit` (10/s) | Per-UID, rate-based |
 | **2. Sensor** | `tier-critical/sensor.yaml` | 31-33 | `rateLimit: 5/min` | Rate-based, not content-aware |
-| **3. Argo memoize** | `tier-critical/workflow-template.yaml` | 315-320 | ConfigMap cache, 24h TTL | Content-aware (pod+reason+ns+cluster) |
+| **3. Argo memoize** | `tier-critical/workflow-template.yaml` | 315-320 | ConfigMap cache, 24h TTL | Content-aware (reason+ns+cluster) |
 | **RBAC** | `00-controller-rbac-patch.yaml` | — | Supplemental ClusterRole | Controller ConfigMap access |

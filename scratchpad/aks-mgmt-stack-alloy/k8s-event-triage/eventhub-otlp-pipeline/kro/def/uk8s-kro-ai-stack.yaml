@@ -434,6 +434,12 @@ spec:
 
             # ── Step 2: Classify severity + post Mattermost alert ─────────────
             - name: classify-and-alert
+              memoize:
+                key: "{{inputs.parameters.cluster}}-{{inputs.parameters.object-namespace}}-{{inputs.parameters.event-reason}}"
+                maxAge: "24h"
+                cache:
+                  configMap:
+                    name: event-dedup-cache
               inputs:
                 parameters:
                   - name: cluster

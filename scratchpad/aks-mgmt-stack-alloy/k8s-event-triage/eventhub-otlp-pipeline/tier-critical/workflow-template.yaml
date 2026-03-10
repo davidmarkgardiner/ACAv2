@@ -313,7 +313,7 @@ spec:
     # -------------------------------------------------------------------------
     - name: investigate-and-report
       memoize:
-        key: "{{inputs.parameters.cluster}}-{{inputs.parameters.object-namespace}}-{{inputs.parameters.object-name}}-{{inputs.parameters.event-reason}}"
+        key: "{{inputs.parameters.cluster}}-{{inputs.parameters.object-namespace}}-{{inputs.parameters.event-reason}}"
         maxAge: "24h"
         cache:
           configMap:
