@@ -197,6 +197,117 @@ kubectl logs -n kagent deploy/sre-triage-agent --tail=50
 
 ---
 
+## Debugging Connection Errors (exec into pods)
+
+When the UI shows a connection error, work layer by layer to isolate where the break is.
+
+### Step 1: Is the controller API alive?
+
+```bash
+# Exec into the controller pod itself — no network hops
+kubectl exec -it -n kagent deploy/kagent-controller -- sh
+
+# Hit the API from localhost (bypasses all service/DNS issues)
+wget -qO- http://localhost:8083/api/v1/agents 2>&1 | head -50
+
+exit
+```
+
+If this fails, the controller process is broken:
+```bash
+kubectl logs -n kagent deploy/kagent-controller --tail=100
+```
+
+### Step 2: Can the controller reach agent pods?
+
+```bash
+kubectl exec -it -n kagent deploy/kagent-controller -- sh
+
+# Each agent has its own service on port 8080
+wget -qO- http://sre-triage-agent.kagent.svc.cluster.local:8080/ 2>&1
+wget -qO- http://k8s-agent.kagent.svc.cluster.local:8080/ 2>&1
+
+exit
+```
+
+### Step 3: Can the controller reach LiteLLM (the LLM backend)?
+
+```bash
+kubectl exec -it -n kagent deploy/kagent-controller -- sh
+
+wget -qO- http://litellm.litellm.svc.cluster.local:4000/health 2>&1
+
+exit
+```
+
+If LiteLLM is unreachable, agents can't call the model — this is the most common cause of "connection error" in the UI.
+
+### Step 4: Can the UI reach the controller?
+
+```bash
+# This is the path the UI takes — if this fails, that's your error
+kubectl exec -it -n kagent deploy/kagent-ui -- sh
+
+wget -qO- http://kagent-controller.kagent.svc.cluster.local:8083/api/v1/agents 2>&1
+
+exit
+```
+
+If this fails, check what URL the UI is configured to use:
+```bash
+kubectl get deploy kagent-ui -n kagent -o yaml | grep -A5 -i env
+```
+
+The UI might be hardcoded to a wrong service name (`kagent-controller-manager`) or port (`8082`).
+
+### Step 5: Full A2A end-to-end from the UI pod
+
+```bash
+kubectl exec -it -n kagent deploy/kagent-ui -- sh
+
+wget -qO- --post-data='{
+  "jsonrpc":"2.0",
+  "method":"message/send",
+  "id":"debug-1",
+  "params":{
+    "message":{
+      "role":"user",
+      "parts":[{"kind":"text","text":"hello"}]
+    }
+  }
+}' \
+  --header="Content-Type: application/json" \
+  "http://kagent-controller.kagent.svc.cluster.local:8083/api/a2a/kagent/k8s-agent/" 2>&1
+
+exit
+```
+
+### Quick diagnostic dump
+
+Run all of these and share the output to quickly pinpoint the issue:
+
+```bash
+kubectl get svc -n kagent
+kubectl get endpoints -n kagent                    # <none> = selector mismatch
+kubectl get pods -n kagent -o wide
+kubectl logs -n kagent deploy/kagent-controller --tail=30
+kubectl logs -n kagent deploy/kagent-ui --tail=30
+kubectl get modelconfigs -n kagent -o yaml
+```
+
+The `endpoints` command is the most important — if a service shows `<none>`, the pod selector doesn't match and nothing will connect regardless of DNS.
+
+### Most likely culprits
+
+| Rank | Cause | How to confirm |
+|------|-------|----------------|
+| 1 | **UI env var** points to wrong controller name/port | Step 4 fails, check `kubectl get deploy kagent-ui -o yaml` |
+| 2 | **LiteLLM down** — controller reaches agent, agent calls LiteLLM, timeout | Step 3 fails |
+| 3 | **Endpoints mismatch** — service exists but no backing pods | `kubectl get endpoints -n kagent` shows `<none>` |
+| 4 | **KMCP controller crashloop** — 201 restarts on `kagent-kmcp-controller-manager` | Check pod restarts, may cause cascading errors |
+
+---
+
 ## Common Gotchas
 
 1. **Port 8083, not 8082** — Some config files still reference the old port. The actual service is `kagent-controller:8083`.
