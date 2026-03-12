@@ -1,0 +1,52 @@
+---
+# EventSource - Consume K8s events from Azure Event Hub via Kafka protocol
+# REPLACE all placeholders before applying
+# IMPORTANT: Requires Event Hub Standard or Premium tier (Basic doesn't support Kafka)
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: eventhub-k8s-events
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  kafka:
+    k8s-events:
+      # REPLACE with your Event Hub namespace
+      url: "REPLACE_EVENTHUB_NAMESPACE.servicebus.windows.net:9093"
+      # REPLACE with your Event Hub name
+      topic: "REPLACE_EVENTHUB_NAME"
+      consumerGroup:
+        # REPLACE with your consumer group (use a fresh one to avoid backlog)
+        groupName: "REPLACE_CONSUMER_GROUP"
+      # TLS required for Event Hub port 9093
+      # Argo Events v1.9.x requires caCertSecret when tls is set (tls: {} fails validation)
+      # Generate the CA cert once per Event Hub namespace — it rarely changes:
+      #   echo | openssl s_client -connect REPLACE_EVENTHUB_NAMESPACE.servicebus.windows.net:9093 \
+      #     -showcerts 2>/dev/null | awk '/BEGIN CERT/,/END CERT/' > /tmp/eh-ca.pem
+      #   kubectl create secret generic eventhub-tls-ca -n argo-events --from-file=ca.pem=/tmp/eh-ca.pem
+      tls:
+        caCertSecret:
+          name: eventhub-tls-ca
+          key: ca.pem
+      sasl:
+        mechanism: "PLAIN"
+        userSecret:
+          name: eventhub-credentials
+          key: username
+        passwordSecret:
+          name: eventhub-credentials
+          key: connection-string
+      jsonBody: true
+      partition: ""
+      version: "2.1.0"
