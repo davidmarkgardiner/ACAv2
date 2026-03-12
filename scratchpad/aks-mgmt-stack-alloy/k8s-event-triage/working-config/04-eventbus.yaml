@@ -28,3 +28,8 @@ spec:
       storageClassName: managed-csi
       accessMode: ReadWriteOnce
       volumeSize: 5Gi
+
+  # # Or if your ACR supports direct import (no local Docker needed):
+  # az acr import --name your-registry --source docker.io/nats:2.10.10
+  # az acr import --name your-registry --source docker.io/natsio/nats-server-config-reloader:0.14.2
+  # az acr import --name your-registry --source docker.io/natsio/prometheus-nats-exporter:0.14.0
