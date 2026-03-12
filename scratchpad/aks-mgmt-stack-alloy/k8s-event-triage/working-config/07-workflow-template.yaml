@@ -1,0 +1,121 @@
+---
+# WorkflowTemplate - Simple event triage (proof of concept)
+# Receives OTLP JSON from Event Hub, parses K8s events, logs results
+# In production: add LLM triage step and/or GitLab issue creation
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-event-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  ttlStrategy:
+    secondsAfterCompletion: 300
+    secondsAfterSuccess: 120
+    secondsAfterFailure: 600
+  podGC:
+    strategy: OnPodCompletion
+    deleteDelayDuration: "60s"
+  arguments:
+    parameters:
+      - name: event-payload
+        description: "Event payload from Event Hub (OTLP JSON or raw K8s event)"
+  templates:
+    - name: triage-pipeline
+      steps:
+        - - name: parse-and-log
+            template: parse-and-log
+            arguments:
+              parameters:
+                - name: payload
+                  value: "{{workflow.parameters.event-payload}}"
+
+    # -------------------------------------------------------------------------
+    # Parse event payload and log it
+    # Handles both OTLP envelope (from Alloy) and raw K8s event JSON
+    # Also handles base64-encoded payloads from Argo Events Kafka source
+    # -------------------------------------------------------------------------
+    - name: parse-and-log
+      inputs:
+        parameters:
+          - name: payload
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        source: |
+          echo "=== K8s Event Triage Workflow ==="
+          echo "Received event payload, parsing..."
+
+          # Write payload to file (avoids shell quoting issues)
+          cat > /tmp/raw_input.json << '__EOF__'
+          {{inputs.parameters.payload}}
+          __EOF__
+
+          # Try base64 decode first (Argo Events Kafka source encodes payloads)
+          if echo '{{inputs.parameters.payload}}' | base64 -d > /tmp/decoded.json 2>/dev/null; then
+            # Check if decoded content is valid JSON
+            if jq empty /tmp/decoded.json 2>/dev/null; then
+              echo "Payload was base64-encoded, decoded successfully"
+              cp /tmp/decoded.json /tmp/input.json
+            else
+              cp /tmp/raw_input.json /tmp/input.json
+            fi
+          else
+            cp /tmp/raw_input.json /tmp/input.json
+          fi
+
+          echo ""
+          echo "=== Parsed Event ==="
+
+          # Check if OTLP envelope (has resourceLogs)
+          if jq -e '.resourceLogs' /tmp/input.json > /dev/null 2>&1; then
+            echo "Format: OTLP envelope"
+            echo ""
+
+            # Extract K8s events from OTLP envelope
+            jq -r '
+              def attrs: [.[]? | {(.key): (.value.stringValue // (.value.intValue // ""))}] | add // {};
+              .resourceLogs[]? |
+              (.resource.attributes // [] | attrs) as $res |
+              .scopeLogs[]?.logRecords[]? |
+              (.attributes // [] | attrs) as $a |
+              (.body.stringValue // "" | if . != "" then (fromjson? // {}) else {} end) as $ev |
+              "  Cluster:   \($a.cluster // $res.cluster // "unknown")",
+              "  Namespace: \($a.obj_namespace // $ev.involvedObject.namespace // "unknown")",
+              "  Kind:      \($a.obj_kind // $ev.involvedObject.kind // "unknown")",
+              "  Name:      \($ev.involvedObject.name // "unknown")",
+              "  Type:      \($a.event_type // $ev.type // "unknown")",
+              "  Reason:    \($a.event_reason // $ev.reason // "unknown")",
+              "  Message:   \($ev.message // "")[0:200]",
+              "  ---"
+            ' /tmp/input.json
+          else
+            echo "Format: Raw K8s event"
+            echo ""
+            jq -r '
+              "  Namespace: \(.involvedObject.namespace // .metadata.namespace // "unknown")",
+              "  Kind:      \(.involvedObject.kind // "unknown")",
+              "  Name:      \(.involvedObject.name // "unknown")",
+              "  Type:      \(.type // "unknown")",
+              "  Reason:    \(.reason // "unknown")",
+              "  Message:   \(.message // "")[0:200]"
+            ' /tmp/input.json 2>/dev/null || echo "  (could not parse as K8s event)"
+          fi
+
+          echo ""
+          echo "=== What would happen in production ==="
+          echo "1. LLM triage step would classify severity (critical/warning/info)"
+          echo "2. If critical/warning: create GitLab issue via API"
+          echo "3. Send notification to Mattermost/Telegram"
+          echo ""
+          echo "=== Workflow completed successfully ==="
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
