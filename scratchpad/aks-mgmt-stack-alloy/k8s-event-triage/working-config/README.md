@@ -206,15 +206,22 @@ kubectl delete pod test-warning -n default
 | `01-namespaces.yaml` | argo, argo-events, monitoring namespaces |
 | `02-secrets.yaml` | Secret templates (DO NOT apply directly — use kubectl create) |
 | `03-alloy.yaml` | Alloy ConfigMap + Deployment + RBAC + Service |
-| `04-eventbus.yaml` | JetStream EventBus (NATS) |
+| `04-eventbus.yaml` | Native NATS EventBus (switched from JetStream — see GOTCHAS #13) |
 | `05-eventsource.yaml` | Kafka EventSource (Event Hub consumer) |
 | `06-rbac.yaml` | Service accounts and roles |
-| `07-workflow-template.yaml` | Simple parse-and-log workflow |
+| `07-workflow-template.yaml` | Simple parse-and-log workflow (PoC) |
 | `08-sensor.yaml` | Event -> Workflow routing with rate limiting |
+| `09-workflow-template-llm.yaml` | Enhanced DAG workflow: parse-and-log -> LLM triage (Ollama qwen2.5:7b) |
+| `10-gitea-issue-step.yaml` | Gitea issue creation step (conditional on LLM triage output) |
+| `11-gitea-credentials-secret.yaml` | Gitea credentials secret template + label bootstrap Job |
+| `helm-values-argo-events.yaml` | Helm values for private registry image overrides |
+| `PRIVATE-REGISTRY.md` | Full guide: import images to ACR, deploy with Helm, verify |
+| `TEARDOWN.md` | Full teardown guide — reverse dependency order, stuck resource fixes |
+| `PRODUCTION-PLAN.md` | Full production deployment plan (7 phases, scaling, monitoring, rollback) |
 
 ## Production Enhancements
 
-To make this production-ready, add these steps to the workflow template:
+The following manifests implement production enhancements. See `PRODUCTION-PLAN.md` for the full deployment plan.
 
 ### 1. LLM Triage Step
 Add a step after `parse-and-log` that calls an LLM (Ollama/OpenAI) to classify severity and recommend remediation.
@@ -280,6 +287,11 @@ Expand the Alloy `namespaces` list in `03-alloy.yaml` to include your applicatio
   kubectl delete eventsource <name> -n argo-events
   kubectl patch eventbus default -n argo-events --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]'
   ```
+
+### EventBus pods stuck in ImagePullBackOff (private registry)
+- The controller ignores CR-level image overrides for sidecars — see GOTCHAS.md #12
+- **Fix:** Use `helm-values-argo-events.yaml` to override images at the Helm level
+- See `PRIVATE-REGISTRY.md` for the complete guide
 
 ### Alloy not forwarding events
 - Check Alloy logs: `kubectl logs -n monitoring deploy/alloy`

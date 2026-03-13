@@ -1,6 +1,8 @@
 ---
-# EventBus - JetStream (NATS) for internal event routing
+# EventBus - Native NATS for internal event routing
 # EventSource -> EventBus -> Sensor
+# Native NATS is simpler than JetStream — no persistence, no clustering issues
+# Trade-off: events in-flight are lost if NATS restarts (fine for event triage)
 apiVersion: argoproj.io/v1alpha1
 kind: EventBus
 metadata:
@@ -9,27 +11,18 @@ metadata:
   labels:
     app.kubernetes.io/part-of: k8s-event-triage
 spec:
-  jetstream:
-    version: "2.10.10"
-    replicas: 1
-    # To use your own registry, uncomment and update containerTemplate:
-    # containerTemplate:
-    #   resources:
-    #     requests:
-    #       cpu: 50m
-    #       memory: 128Mi
-    #   imagePullPolicy: Always
-    # # Override the NATS image (default: nats:2.10.10)
-    # streamImage: "your-registry.azurecr.io/nats:2.10.10"
-    # # Override the NATS config-reloader sidecar
-    # metricsImage: "your-registry.azurecr.io/natsio/prometheus-nats-exporter:0.14.0"
-    # reloaderImage: "your-registry.azurecr.io/natsio/nats-server-config-reloader:0.14.2"
-    persistence:
-      storageClassName: managed-csi
-      accessMode: ReadWriteOnce
-      volumeSize: 5Gi
-
-  # # Or if your ACR supports direct import (no local Docker needed):
-  # az acr import --name your-registry --source docker.io/nats:2.10.10
-  # az acr import --name your-registry --source docker.io/natsio/nats-server-config-reloader:0.14.2
-  # az acr import --name your-registry --source docker.io/natsio/prometheus-nats-exporter:0.14.0
+  nats:
+    native:
+      replicas: 3
+      auth: token
+      # # To use your own registry, uncomment:
+      # containerTemplate:
+      #   resources:
+      #     requests:
+      #       cpu: 50m
+      #       memory: 128Mi
+      #   imagePullPolicy: Always
+      # # Override the NATS image:
+      # natsImage: "your-registry.azurecr.io/nats:2.9.23"
+      # # Override the metrics exporter:
+      # metricsImage: "your-registry.azurecr.io/natsio/prometheus-nats-exporter:0.14.0"
