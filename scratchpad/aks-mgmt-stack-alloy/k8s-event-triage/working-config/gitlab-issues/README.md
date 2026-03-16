@@ -49,3 +49,38 @@ Copy each `.md` file as a new GitLab issue. Suggested labels and milestones are 
 | # | File | Title |
 |---|------|-------|
 | 17 | `17-go-nogo-checklist.md` | Production go/no-go checklist and cutover |
+
+---
+
+## Work Split (2026-03-16)
+
+### David — KAgent Agent Quality (Kind cluster → lift to AKS)
+
+**Phase 1 — Kind cluster (battle-test locally):**
+| Namespace | Status | Notes |
+|-----------|--------|-------|
+| cert-manager | Partially tested (2/5 faults) | Existing agent, needs more scenarios |
+| kyverno | Not started | Policy engine — admission webhooks, policy violations |
+| external-secrets | Not started | ESO, SecretStore connectivity, sync failures |
+| kro | Not started | Kubernetes Resource Orchestrator |
+| reloader | Not started | ConfigMap/Secret change → rollout restart |
+
+**Phase 2 — AKS cluster (production environment):**
+| Namespace | Notes |
+|-----------|-------|
+| flux-system | GitOps controller |
+| aks-istio-ingress | AKS Istio addon (NOT ingress-nginx — dropped #16) |
+| gateway | Gateway API resources |
+
+Process: onboard → test → tune → battle-test → lift-and-shift to AKS
+
+### Colleagues — Can Be Picked Up Independently
+| # | Title | Notes |
+|---|-------|-------|
+| 5/6 | LLM fallback option | What happens when primary LLM is down |
+| 6 | Teams notifications | Swap Mattermost webhooks for Teams |
+| 10 | Prometheus monitoring & alerting | PrometheusRules, Grafana dashboards, Azure Monitor |
+| 19 | KAgent logging via Alloy/LGTM | Logs/traces/metrics into Loki/Tempo/Mimir |
+| 20 | LiteLLM token/cost monitoring | Dashboard + budget alerts |
+| 21 | Hybrid cluster architecture | Explore AI stack on worker clusters |
+| 22 | SAD security & compliance docs | Solution Architecture Document |
