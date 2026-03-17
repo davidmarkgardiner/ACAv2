@@ -1,0 +1,12 @@
+<h2>&#x26A0;&#xFE0F; KAgent Triage Alert</h2>
+<table>
+<tr><td><strong>&#x1F525; Event</strong></td><td>@{triggerBody()?['event_reason']}</td></tr>
+<tr><td><strong>&#x1F3E2; Cluster</strong></td><td>@{coalesce(triggerBody()?['cluster'],'unknown')}</td></tr>
+<tr><td><strong>&#x1F4E6; Namespace</strong></td><td>@{triggerBody()?['event_namespace']}</td></tr>
+<tr><td><strong>&#x1F3AF; Resource</strong></td><td>@{triggerBody()?['resource_kind']}/@{triggerBody()?['resource_name']}</td></tr>
+<tr><td><strong>&#x26A1; Risk</strong></td><td>@{if(equals(triggerBody()?['risk_level'],'High'),'&#x1F534; HIGH',if(equals(triggerBody()?['risk_level'],'Medium'),'&#x1F7E0; MEDIUM',if(equals(triggerBody()?['risk_level'],'Low'),'&#x1F7E2; LOW','&#x2753; Unknown')))}</td></tr>
+<tr><td><strong>&#x1F552; Time</strong></td><td>@{coalesce(triggerBody()?['timestamp'],'N/A')}</td></tr>
+</table>
+<hr>
+<h3>&#x1F9E0; AI Diagnosis</h3>
+<pre>@{triggerBody()?['agent_diagnosis']}</pre>
