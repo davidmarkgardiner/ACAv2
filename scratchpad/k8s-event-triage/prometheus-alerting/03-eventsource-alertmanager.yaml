@@ -1,0 +1,30 @@
+---
+# EventSource - Receive AlertManager webhook notifications
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: alertmanager
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    alertmanager:
+      port: "12000"
+      endpoint: /alerts
+      method: POST

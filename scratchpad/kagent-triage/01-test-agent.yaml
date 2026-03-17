@@ -1,0 +1,125 @@
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: test-ns-agent
+  namespace: kagent
+  labels:
+    app.kubernetes.io/name: test-ns-agent
+    app.kubernetes.io/part-of: kagent
+    kagent-triage: enabled
+    managed-namespace: test-ns
+spec:
+  declarative:
+    a2aConfig:
+      skills:
+        - id: namespace-diagnostics
+          name: Namespace Diagnostics
+          description: Specialized diagnostic capabilities for the test-ns namespace including pod failures, image pull errors, OOM kills, and crashloops.
+          tags:
+            - namespace
+            - diagnostics
+            - test-ns
+          examples:
+            - "Diagnose failing pods in test-ns"
+            - "Why is my pod in ImagePullBackOff?"
+            - "Check for OOMKilled events in test-ns"
+            - "Analyze CrashLoopBackOff in test-ns"
+        - id: resource-analysis
+          name: Resource Analysis
+          description: Analyze resource usage, limits, and requests for pods in test-ns namespace.
+          tags:
+            - resources
+            - limits
+            - test-ns
+          examples:
+            - "Check resource usage in test-ns"
+            - "Which pods are hitting memory limits?"
+            - "Analyze CPU throttling in test-ns"
+    deployment:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+    modelConfig: default-model-config
+    promptTemplate:
+      dataSources:
+        - alias: builtin
+          kind: ConfigMap
+          name: kagent-builtin-prompts
+    runtime: python
+    systemMessage: |
+      # Kubernetes Diagnostic Agent for test-ns Namespace
+
+      You are a Kubernetes diagnostic agent specialized in the test-ns namespace. When you receive an event, diagnose the issue using kubectl-like tools, identify root cause, and suggest remediation. Focus on: pod failures, image pull errors, OOM kills, crashloops.
+
+      ## Your Specialization
+
+      You are namespace-scoped to **test-ns**. Your job is to:
+      1. **Diagnose quickly** - Identify the root cause of issues in test-ns
+      2. **Be specific** - Reference exact pod names, container names, and error messages
+      3. **Suggest remediation** - Provide actionable fixes, not just analysis
+      4. **Prioritize safety** - Never suggest destructive operations without context
+
+      ## Common Issues to Watch For
+
+      - **ImagePullBackOff**: Check image tags, registry access, imagePullSecrets
+      - **CrashLoopBackOff**: Examine container logs, command/args, resource limits
+      - **OOMKilled**: Memory limits too low, memory leaks, unbounded growth
+      - **Evicted**: Disk pressure, memory pressure, node issues
+      - **Pending**: Resource constraints, affinity rules, PVC binding issues
+
+      ## Diagnostic Workflow
+
+      1. Get events for the namespace: `GetEvents` with namespace filter
+      2. Describe the failing resource: `DescribeResource` 
+      3. Get logs: `GetPodLogs` for relevant pods
+      4. Check resource YAML: `GetResourceYAML` for configuration issues
+      5. Formulate root cause hypothesis
+      6. Provide specific remediation steps
+
+      ## Response Format
+
+      When responding to diagnostic requests:
+
+      1. **Event Summary**: Briefly summarize what event triggered the diagnosis
+      2. **Initial Findings**: What you found from events and resource inspection
+      3. **Root Cause Analysis**: Your assessment of the underlying issue
+      4. **Remediation Steps**: Specific, actionable commands or configuration changes
+      5. **Prevention Tips**: How to avoid this in the future
+
+      ## Limitations
+
+      - You only have read access to test-ns namespace resources
+      - You cannot modify cluster-wide resources
+      - You cannot execute commands inside pods (only view logs)
+      - Always verify your analysis before suggesting changes
+    tools:
+      - mcpServer:
+          apiGroup: kagent.dev
+          kind: RemoteMCPServer
+          name: kagent-tool-server
+          toolNames:
+            - k8s_check_service_connectivity
+            - k8s_patch_resource
+            - k8s_remove_annotation
+            - k8s_annotate_resource
+            - k8s_remove_label
+            - k8s_label_resource
+            - k8s_create_resource
+            - k8s_create_resource_from_url
+            - k8s_get_events
+            - k8s_get_available_api_resources
+            - k8s_get_cluster_configuration
+            - k8s_describe_resource
+            - k8s_delete_resource
+            - k8s_get_resource_yaml
+            - k8s_execute_command
+            - k8s_apply_manifest
+            - k8s_get_resources
+            - k8s_get_pod_logs
+        type: McpServer
+  description: A namespace-scoped Kubernetes diagnostic agent specialized for test-ns namespace troubleshooting.
+  type: Declarative

@@ -1,0 +1,142 @@
+  ---
+  # Grafana Alloy - Phase 1: Critical events from target app namespaces
+  #
+  # Pipeline: loki.source.kubernetes_events → loki.process → otelcol.receiver.loki → otelcol.exporter.kafka
+  # Encoding: otlp_json (one topic, consumer-side filtering by tier)
+  #
+  # Phase 1: Start with specific app namespaces only
+  # Phase 3: Add infra namespaces (external-dns, cert-manager, etc.)
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: alloy-config
+    namespace: monitoring
+    labels:
+      app: alloy
+      app.kubernetes.io/part-of: k8s-event-triage
+  data:
+    config.alloy: |
+      logging {
+        level  = "info"
+        format = "logfmt"
+      }
+
+      // =========================================================================
+      // Phase 1: Target app namespaces only
+      // Replace with your actual application namespaces
+      // =========================================================================
+      loki.source.kubernetes_events "cluster_events" {
+        namespaces = [
+          "REPLACE_APP_NAMESPACE_1",
+          "REPLACE_APP_NAMESPACE_2",
+          // Add more app namespaces as needed
+        ]
+        job_name   = "kubernetes-events"
+        log_format = "json"
+
+        forward_to = [loki.process.enrich.receiver]
+      }
+
+      // =========================================================================
+      // Event Enrichment - Add cluster metadata + parse event fields
+      // =========================================================================
+      loki.process "enrich" {
+        // REPLACE these values with your actual cluster details
+        stage.static_labels {
+          values = {
+            cluster     = "REPLACE_CLUSTER_NAME",
+            environment = "REPLACE_ENVIRONMENT",
+            region      = "REPLACE_AZURE_REGION",
+            source      = "alloy",
+          }
+        }
+
+        // Parse K8s event JSON to extract fields for labeling
+        stage.json {
+          expressions = {
+            event_type     = "type",
+            event_reason   = "reason",
+            event_message  = "message",
+            event_count    = "count",
+            obj_kind       = "involvedObject.kind",
+            obj_name       = "involvedObject.name",
+            obj_namespace  = "involvedObject.namespace",
+            obj_uid        = "involvedObject.uid",
+            first_time     = "firstTimestamp",
+            last_time      = "lastTimestamp",
+            source_comp    = "source.component",
+            source_host    = "source.host",
+          }
+        }
+
+        // Promote useful fields to labels (become OTLP attributes)
+        stage.labels {
+          values = {
+            event_type    = "",
+            event_reason  = "",
+            obj_kind      = "",
+            obj_namespace = "",
+          }
+        }
+
+        // Dedup: Only forward first occurrence (count == 1)
+        stage.drop {
+          source              = "event_count"
+          expression          = "^[2-9]|^[1-9][0-9]+"
+          drop_counter_reason = "duplicate_event"
+        }
+
+        // Rate limit: prevent flooding during event storms
+        stage.limit {
+          rate  = 10
+          burst = 25
+          drop  = true
+        }
+
+        forward_to = [otelcol.receiver.loki.bridge.receiver]
+      }
+
+      // =========================================================================
+      // Loki → OTLP Bridge → Kafka Export
+      // =========================================================================
+      otelcol.receiver.loki "bridge" {
+        output {
+          logs = [otelcol.processor.batch.default.input]
+        }
+      }
+
+      otelcol.processor.batch "default" {
+        timeout         = "2s"
+        send_batch_size = 100
+        output {
+          logs = [otelcol.exporter.kafka.eventhub.input]
+        }
+      }
+
+      otelcol.exporter.kafka "eventhub" {
+        // REPLACE with your Event Hub namespace
+        brokers          = ["REPLACE_EVENTHUB_NAMESPACE.servicebus.windows.net:9093"]
+        protocol_version = "1.0.0"
+
+        logs {
+          // REPLACE with your Event Hub name
+          topic    = "REPLACE_EVENTHUB_NAME"
+          encoding = "otlp_json"
+        }
+
+        authentication {
+          tls {
+            insecure = false
+          }
+          sasl {
+            username  = "$ConnectionString"
+            password  = sys.env("EVENTHUB_CONNECTION_STRING")
+            mechanism = "PLAIN"
+          }
+        }
+
+        sending_queue {
+          enabled    = true
+          queue_size = 1000
+        }
+      }

@@ -1,0 +1,398 @@
+# k8s-event-triage-llm.yaml
+#
+# WorkflowTemplate: k8s-event-triage
+# Namespace:        argo-events
+#
+# Enhanced two-step DAG pipeline:
+#
+#   1. parse-and-log  — Extract K8s event fields from raw payload using
+#                       badouralix/curl-jq:alpine (sh + jq).
+#                       Outputs: kind, reason, message, namespace, name.
+#
+#   2. llm-triage     — Call Ollama (qwen2.5:7b) to classify severity and
+#                       generate a remediation recommendation.
+#                       Outputs: severity, remediation, create-issue.
+#                       Falls back gracefully if Ollama is unreachable.
+#
+# Runtime requirements:
+#   - Ollama service reachable at http://ollama.argo-events.svc:11434
+#   - Model qwen2.5:7b pre-pulled on the Ollama pod
+#
+# ttlStrategy:  success pods cleaned up after 10 min, failed after 30 min.
+# podGC:        pods deleted OnPodCompletion (keeps node disk clean).
+#
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-event-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: argo-events
+    app.kubernetes.io/component: workflow-template
+    app.kubernetes.io/name: k8s-event-triage
+    app.kubernetes.io/version: "2.0.0"
+spec:
+  # ── Global arguments ──────────────────────────────────────────────────────
+  arguments:
+    parameters:
+      - name: event-payload
+        value: "{}"
+
+  # ── Entrypoint ────────────────────────────────────────────────────────────
+  entrypoint: triage-dag
+
+  # Allow up to 5 minutes for the full workflow before hard-killing it.
+  activeDeadlineSeconds: 300
+
+  # TTL: clean up finished workflows automatically.
+  ttlStrategy:
+    secondsAfterSuccess: 600    # 10 minutes after successful completion
+    secondsAfterFailure: 1800   # 30 minutes after failure (retain for debugging)
+
+  # Delete completed pods immediately to free node disk/pid pressure.
+  podGC:
+    strategy: OnPodCompletion
+
+  # ── Templates ─────────────────────────────────────────────────────────────
+  templates:
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DAG: parse first, then LLM triage
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: triage-dag
+      dag:
+        tasks:
+
+          # Step 1 — parse the raw event payload and emit structured fields
+          - name: parse-and-log
+            template: parse-and-log
+            arguments:
+              parameters:
+                - name: event-payload
+                  value: "{{workflow.parameters.event-payload}}"
+
+          # Step 2 — LLM triage; depends on Step 1 outputs
+          - name: llm-triage
+            template: llm-triage
+            dependencies: [parse-and-log]
+            arguments:
+              parameters:
+                - name: kind
+                  value: "{{tasks.parse-and-log.outputs.parameters.kind}}"
+                - name: reason
+                  value: "{{tasks.parse-and-log.outputs.parameters.reason}}"
+                - name: message
+                  value: "{{tasks.parse-and-log.outputs.parameters.message}}"
+                - name: namespace
+                  value: "{{tasks.parse-and-log.outputs.parameters.namespace}}"
+                - name: name
+                  value: "{{tasks.parse-and-log.outputs.parameters.name}}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Template 1: parse-and-log
+    #
+    # Image:   badouralix/curl-jq:alpine  (sh + curl + jq)
+    # Inputs:  event-payload (raw JSON string — bare K8s Event or OTLP-wrapped)
+    # Outputs: kind, reason, message (≤500 chars), namespace, name
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: parse-and-log
+      inputs:
+        parameters:
+          - name: event-payload
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        source: |
+          set -euo pipefail
+
+          PAYLOAD="${EVENT_PAYLOAD}"
+
+          # ── Helper: extract a field; print empty string on null/missing ────
+          jqf() { printf '%s' "${PAYLOAD}" | jq -r "${1} // empty" 2>/dev/null || true; }
+
+          # ── Detect OTLP envelope vs. bare K8s Event ───────────────────────
+          IS_OTLP=$(printf '%s' "${PAYLOAD}" | jq -e '.resourceLogs' >/dev/null 2>&1 && echo yes || echo no)
+
+          if [ "${IS_OTLP}" = "yes" ]; then
+            # OTLP log-record path: unwrap body.stringValue
+            BODY_STR=$(printf '%s' "${PAYLOAD}" | \
+              jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].body.stringValue // "{}"')
+            PAYLOAD="${BODY_STR}"
+          fi
+
+          # ── Extract standard K8s Event fields ────────────────────────────
+          KIND=$(      jqf '.involvedObject.kind // .kind')
+          REASON=$(    jqf '.reason')
+          MESSAGE=$(   jqf '.message'                   | cut -c1-500)
+          NAMESPACE=$( jqf '.metadata.namespace // .involvedObject.namespace')
+          NAME=$(      jqf '.involvedObject.name // .metadata.name')
+
+          # ── Apply defaults for missing fields ─────────────────────────────
+          KIND="${KIND:-Unknown}"
+          REASON="${REASON:-Unknown}"
+          MESSAGE="${MESSAGE:-}"
+          NAMESPACE="${NAMESPACE:-default}"
+          NAME="${NAME:-unknown}"
+
+          # ── Log for visibility in Argo UI ─────────────────────────────────
+          echo "=== parse-and-log: K8s Event Fields ==="
+          echo "  kind:      ${KIND}"
+          echo "  reason:    ${REASON}"
+          echo "  namespace: ${NAMESPACE}"
+          echo "  name:      ${NAME}"
+          echo "  message:   ${MESSAGE}"
+
+          # ── Write output parameters ───────────────────────────────────────
+          mkdir -p /tmp/argo-outputs
+          printf '%s' "${KIND}"      > /tmp/argo-outputs/kind
+          printf '%s' "${REASON}"    > /tmp/argo-outputs/reason
+          printf '%s' "${MESSAGE}"   > /tmp/argo-outputs/message
+          printf '%s' "${NAMESPACE}" > /tmp/argo-outputs/namespace
+          printf '%s' "${NAME}"      > /tmp/argo-outputs/name
+
+          echo "=== parse-and-log: done ==="
+        env:
+          - name: EVENT_PAYLOAD
+            value: "{{inputs.parameters.event-payload}}"
+      outputs:
+        parameters:
+          - name: kind
+            valueFrom:
+              path: /tmp/argo-outputs/kind
+          - name: reason
+            valueFrom:
+              path: /tmp/argo-outputs/reason
+          - name: message
+            valueFrom:
+              path: /tmp/argo-outputs/message
+          - name: namespace
+            valueFrom:
+              path: /tmp/argo-outputs/namespace
+          - name: name
+            valueFrom:
+              path: /tmp/argo-outputs/name
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Template 2: llm-triage
+    #
+    # Image:   python:3.12-slim
+    # Inputs:  kind, reason, message, namespace, name  (from parse-and-log)
+    # Calls:   Ollama at http://ollama.argo-events.svc:11434/api/generate
+    #          Model: qwen2.5:7b   temperature: 0.1   max_tokens: 256
+    # Outputs: severity       — critical | warning | info
+    #          remediation    — short remediation recommendation (≤1000 chars)
+    #          create-issue   — "true" | "false"
+    #
+    # Fallback (Ollama unreachable or parse error):
+    #          severity=warning, create-issue=true, generic remediation message
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: llm-triage
+      inputs:
+        parameters:
+          - name: kind
+          - name: reason
+          - name: message
+          - name: namespace
+          - name: name
+      script:
+        image: python:3.12-slim
+        command: [python]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        source: |
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          # ── Inputs from parse-and-log ─────────────────────────────────────
+          kind      = os.environ.get("KIND",      "Unknown")
+          reason    = os.environ.get("REASON",    "Unknown")
+          message   = os.environ.get("MESSAGE",   "")
+          namespace = os.environ.get("NAMESPACE", "default")
+          name      = os.environ.get("NAME",      "unknown")
+
+          OLLAMA_URL = "http://ollama.argo-events.svc:11434/api/generate"
+          MODEL      = "qwen2.5:7b"
+
+          # ── Prompt ────────────────────────────────────────────────────────
+          # Tight, structured prompt — low temperature reduces hallucination.
+          PROMPT = f"""You are a Kubernetes SRE. Analyse the event below and respond with a \
+          JSON object ONLY — no explanation, no markdown fences, just raw JSON.
+
+          Event:
+            kind:      {kind}
+            name:      {name}
+            namespace: {namespace}
+            reason:    {reason}
+            message:   {message}
+
+          Required JSON schema (all keys mandatory):
+          {{
+            "severity":    "<critical|warning|info>",
+            "remediation": "<one or two sentences describing the corrective action>",
+            "create-issue": <true|false>
+          }}
+
+          Classification rules:
+          - critical  → immediate action required (OOMKilling, CrashLoopBackOff, NodeNotReady, Evicted)
+          - warning   → degraded but not yet critical (BackOff, FailedMount, Unhealthy, FailedScheduling)
+          - info      → routine/informational event
+          - create-issue = true  when severity is critical or warning
+          - create-issue = false when severity is info
+          """
+
+          # ── Call Ollama ───────────────────────────────────────────────────
+          def call_ollama(prompt: str) -> str:
+              body = json.dumps({
+                  "model":  MODEL,
+                  "prompt": prompt,
+                  "stream": False,
+                  "options": {
+                      "temperature": 0.1,
+                      "num_predict": 256,
+                  },
+              }).encode("utf-8")
+
+              req = urllib.request.Request(
+                  OLLAMA_URL,
+                  data=body,
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  data = json.loads(resp.read().decode("utf-8"))
+                  return data["response"]
+
+          # ── Parse LLM JSON (strip markdown fences if present) ─────────────
+          def parse_llm_json(text: str) -> dict:
+              text = text.strip()
+              if text.startswith("```"):
+                  lines = text.splitlines()
+                  # Drop opening fence (```json or ```) and closing fence
+                  start = 1
+                  end   = len(lines) - 1 if lines[-1].strip().startswith("```") else len(lines)
+                  text  = "\n".join(lines[start:end])
+              # Some models wrap the JSON in a larger explanation; find the object
+              brace_start = text.find("{")
+              brace_end   = text.rfind("}") + 1
+              if brace_start != -1 and brace_end > brace_start:
+                  text = text[brace_start:brace_end]
+              return json.loads(text.strip())
+
+          # ── Main logic ────────────────────────────────────────────────────
+          fallback = False
+          result   = {}
+
+          try:
+              raw_response = call_ollama(PROMPT)
+              print(f"[llm-triage] raw LLM response:\n{raw_response}", file=sys.stderr)
+              result = parse_llm_json(raw_response)
+
+          except urllib.error.URLError as exc:
+              print(
+                  f"[llm-triage] Ollama unreachable ({OLLAMA_URL}): {exc} — activating fallback",
+                  file=sys.stderr,
+              )
+              fallback = True
+
+          except (json.JSONDecodeError, KeyError, ValueError) as exc:
+              print(
+                  f"[llm-triage] Could not parse LLM response: {exc} — activating fallback",
+                  file=sys.stderr,
+              )
+              fallback = True
+
+          except Exception as exc:  # noqa: BLE001
+              print(
+                  f"[llm-triage] Unexpected error: {exc} — activating fallback",
+                  file=sys.stderr,
+              )
+              fallback = True
+
+          # ── Fallback defaults (Ollama unreachable or bad response) ─────────
+          if fallback:
+              result = {
+                  "severity":    "warning",
+                  "remediation": (
+                      f"Ollama LLM service unavailable — manual review required for "
+                      f"{kind}/{name} in namespace '{namespace}'. "
+                      f"Event reason: {reason}."
+                  ),
+                  "create-issue": True,
+              }
+
+          # ── Normalise outputs ─────────────────────────────────────────────
+          severity = str(result.get("severity", "warning")).lower().strip()
+          if severity not in ("critical", "warning", "info"):
+              print(
+                  f"[llm-triage] Unexpected severity value '{severity}' — defaulting to 'warning'",
+                  file=sys.stderr,
+              )
+              severity = "warning"
+
+          remediation = str(result.get("remediation", "Manual review required.")).strip()
+          remediation = remediation[:1000]  # guard against runaway LLM output
+
+          raw_ci = result.get("create-issue", True)
+          if isinstance(raw_ci, bool):
+              create_issue = raw_ci
+          elif isinstance(raw_ci, str):
+              create_issue = raw_ci.lower() in ("true", "1", "yes")
+          else:
+              # Default: open an issue for anything non-info
+              create_issue = severity in ("critical", "warning")
+
+          # ── Write output files ────────────────────────────────────────────
+          os.makedirs("/tmp/argo-outputs", exist_ok=True)
+          with open("/tmp/argo-outputs/severity",     "w") as fh:
+              fh.write(severity)
+          with open("/tmp/argo-outputs/remediation",  "w") as fh:
+              fh.write(remediation)
+          with open("/tmp/argo-outputs/create-issue", "w") as fh:
+              fh.write(str(create_issue).lower())
+
+          # ── Summary log ───────────────────────────────────────────────────
+          summary = {
+              "severity":    severity,
+              "remediation": remediation,
+              "create-issue": str(create_issue).lower(),
+              "llm-fallback": fallback,
+              "model":       MODEL if not fallback else "N/A (fallback)",
+          }
+          print(f"[llm-triage] result:\n{json.dumps(summary, indent=2)}")
+        env:
+          - name: KIND
+            value: "{{inputs.parameters.kind}}"
+          - name: REASON
+            value: "{{inputs.parameters.reason}}"
+          - name: MESSAGE
+            value: "{{inputs.parameters.message}}"
+          - name: NAMESPACE
+            value: "{{inputs.parameters.namespace}}"
+          - name: NAME
+            value: "{{inputs.parameters.name}}"
+      outputs:
+        parameters:
+          - name: severity
+            valueFrom:
+              path: /tmp/argo-outputs/severity
+          - name: remediation
+            valueFrom:
+              path: /tmp/argo-outputs/remediation
+          - name: create-issue
+            valueFrom:
+              path: /tmp/argo-outputs/create-issue

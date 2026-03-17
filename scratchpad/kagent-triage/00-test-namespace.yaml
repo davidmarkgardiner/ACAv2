@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-ns
+  labels:
+    kagent-triage: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-ns-sa
+  namespace: test-ns
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: test-ns-reader
+  namespace: test-ns
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: test-ns-reader-binding
+  namespace: test-ns
+subjects:
+  - kind: ServiceAccount
+    name: test-ns-sa
+    namespace: test-ns
+roleRef:
+  kind: Role
+  name: test-ns-reader
+  apiGroup: rbac.authorization.k8s.io

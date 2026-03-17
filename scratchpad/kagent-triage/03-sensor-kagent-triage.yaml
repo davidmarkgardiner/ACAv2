@@ -1,0 +1,96 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: kagent-triage-sensor
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/name: kagent-triage-sensor
+    app.kubernetes.io/part-of: kagent-triage
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+  dependencies:
+  - name: k8s-events
+    eventSourceName: k8s-warning-events
+    eventName: k8s-events
+    filters:
+      data:
+      - path: body.involvedObject.namespace
+        type: string
+        value:
+        - test-ns
+      - path: body.reason
+        type: string
+        comparator: '!='
+        value:
+        - PolicyViolation
+      - path: body.involvedObject.namespace
+        type: string
+        comparator: '!='
+        value:
+        - argo-events
+        - argo
+  triggers:
+  - template:
+      name: kagent-triage-trigger
+      argoWorkflow:
+        operation: submit
+        source:
+          resource:
+            apiVersion: argoproj.io/v1alpha1
+            kind: Workflow
+            metadata:
+              generateName: kagent-triage-
+              labels:
+                triggered-by: kagent-triage-sensor
+                event-type: k8s-warning
+            spec:
+              serviceAccountName: argo-events-sa
+              workflowTemplateRef:
+                name: kagent-triage
+              arguments:
+                parameters:
+                - name: event-namespace
+                  value: ''
+                - name: event-name
+                  value: ''
+                - name: event-reason
+                  value: ''
+                - name: event-message
+                  value: ''
+                - name: resource-kind
+                  value: ''
+                - name: resource-name
+                  value: ''
+        parameters:
+        - dest: spec.arguments.parameters.0.value
+          src:
+            dataKey: body.involvedObject.namespace
+            dependencyName: k8s-events
+        - dest: spec.arguments.parameters.1.value
+          src:
+            dataKey: body.involvedObject.name
+            dependencyName: k8s-events
+        - dest: spec.arguments.parameters.2.value
+          src:
+            dataKey: body.reason
+            dependencyName: k8s-events
+        - dest: spec.arguments.parameters.3.value
+          src:
+            dataKey: body.message
+            dependencyName: k8s-events
+        - dest: spec.arguments.parameters.4.value
+          src:
+            dataKey: body.involvedObject.kind
+            dependencyName: k8s-events
+        - dest: spec.arguments.parameters.5.value
+          src:
+            dataKey: body.involvedObject.name
+            dependencyName: k8s-events
+      rateLimit:
+        unit: Minute
+        requestsPerUnit: 5
+    policy:
+      allow:
+        duration: 12s

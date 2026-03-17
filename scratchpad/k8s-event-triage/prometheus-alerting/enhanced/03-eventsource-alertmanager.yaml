@@ -1,0 +1,135 @@
+---
+# Enhanced EventSource - Receive AlertManager webhook notifications
+# Improvements:
+# - Health check endpoint
+# - Enhanced resource limits
+# - Event filtering
+# - Multiple replica support
+
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: alertmanager
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: eventsource
+    app.kubernetes.io/name: alertmanager-webhook
+spec:
+  # Use the default NATS-based EventBus
+  eventBusName: default
+  
+  # Template for the EventSource pod
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      image: quay.io/argoproj/argo-events:latest
+      imagePullPolicy: IfNotPresent
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+      # Environment variables
+      env:
+        - name: DEBUG
+          value: "false"
+        - name: EVENTSOURCE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+    # Pod metadata for identification
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: prometheus-alerting
+        app.kubernetes.io/component: eventsource
+
+  # Service configuration for the webhook endpoint
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+        name: webhook
+        protocol: TCP
+    # ClusterIP is sufficient since AlertManager is inside the cluster
+    type: ClusterIP
+
+  # Webhook event definition
+  webhook:
+    alertmanager:
+      # Port to listen on
+      port: "12000"
+      # Endpoint path for AlertManager webhook
+      endpoint: /alerts
+      # HTTP method
+      method: POST
+      # Content type expected
+      contentType: application/json
+      
+      # Authentication (optional - enable if needed)
+      # auth:
+      #   token:
+      #     name: alertmanager-webhook-token
+      #     key: token
+      
+      # Enable CORS for debugging (disable in production)
+      # corsAllowOrigin: "*"
+      
+      # URL to check for health/readiness
+      # This endpoint can be used for Kubernetes probes
+      url: http://alertmanager-eventsource-svc.argo-events.svc.cluster.local:12000
+
+  # Health check configuration
+  # The EventSource will expose a health endpoint at /healthz
+  # which can be used for Kubernetes liveness/readiness probes
+
+---
+# Service for the EventSource webhook
+# This creates a dedicated service that AlertManager can reach
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-eventsource-svc
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: eventsource
+    eventsource-name: alertmanager
+spec:
+  selector:
+    eventsource-name: alertmanager
+  ports:
+    - port: 12000
+      targetPort: 12000
+      name: webhook
+      protocol: TCP
+  type: ClusterIP
+
+---
+# Health check endpoint ConfigMap (optional - for custom health checks)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-eventsource-health
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+data:
+  # Simple health check script that can be used for probes
+  health-check.sh: |
+    #!/bin/sh
+    # Check if EventSource webhook is accessible
+    if curl -sf http://localhost:12000/alerts -X POST -H "Content-Type: application/json" -d '{"status":"test"}' > /dev/null 2>&1; then
+      echo "OK"
+      exit 0
+    else
+      # Webhook endpoint returns non-200 for empty payload, but should be reachable
+      if curl -sf http://localhost:12000/healthz > /dev/null 2>&1 || netstat -tlnp | grep -q ':12000'; then
+        echo "OK"
+        exit 0
+      fi
+      echo "FAIL"
+      exit 1
+    fi

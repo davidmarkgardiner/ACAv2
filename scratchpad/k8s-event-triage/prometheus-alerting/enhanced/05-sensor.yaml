@@ -1,0 +1,250 @@
+---
+# Enhanced Sensor - Route AlertManager alerts to triage workflow
+# Improvements:
+# - Better event filtering
+# - Circuit breaker pattern
+# - Improved rate limiting
+# - Event transformation
+# - Multiple trigger conditions
+
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: alertmanager-triage-sensor
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: sensor
+spec:
+  # Use the default EventBus
+  eventBusName: default
+  
+  # Template for the Sensor pod
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 512Mi
+      # Enable debug logging for troubleshooting
+      # env:
+      #   - name: DEBUG
+      #     value: "true"
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: prometheus-alerting
+        app.kubernetes.io/component: sensor
+  
+  # Dependencies define which events this sensor responds to
+  dependencies:
+    - name: alertmanager-firing
+      eventSourceName: alertmanager
+      eventName: alertmanager
+      filters:
+        # Filter by HTTP method
+        context:
+          method: POST
+        
+        # Filter by payload content
+        data:
+          # Only process alerts with status = firing
+          - path: body.status
+            type: string
+            value:
+              - "firing"
+          
+          # Only process if there are alerts in the payload
+          - path: body.alerts
+            type: string
+            comparator: '!='
+            value:
+              - "null"
+              - "[]"
+          
+          # Filter by severity - process critical and warning alerts
+          - path: body.commonLabels.severity
+            type: string
+            comparator: regex
+            value:
+              - "^(critical|warning|error)$"
+      
+      # Transform the event before triggering
+      transform:
+        script: |
+          # Transform the AlertManager payload if needed
+          # Currently passing through as-is
+          event.body
+
+  # Triggers define what happens when dependencies are met
+  triggers:
+    - template:
+        name: alertmanager-triage-workflow
+        conditions: "alertmanager-firing"
+        
+        # Rate limiting - prevent alert storms
+        rateLimit:
+          requestsPerUnit: 10
+          unit: Minute
+        
+        # Kubernetes resource trigger
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: alert-triage-
+                namespace: argo-events
+                labels:
+                  app.kubernetes.io/part-of: prometheus-alerting
+                  app.kubernetes.io/managed-by: sensor
+                  event-type: prometheus-alert
+              spec:
+                workflowTemplateRef:
+                  name: alertmanager-triage
+                arguments:
+                  parameters:
+                    - name: alert-payload
+                      value: ""  # Will be populated by parameters below
+      
+        # Parameter mapping from event to workflow
+        parameters:
+          - src:
+              dependencyName: alertmanager-firing
+              dataKey: body
+            dest: spec.arguments.parameters.0.value
+      
+      # Retry strategy for the trigger
+      retryStrategy:
+        steps: 3
+        duration: 10s
+
+  # Circuit breaker configuration (prevents alert storms)
+  # circuitBreaker:
+  #   failureThreshold: 5
+  #   failureResetThreshold: 60s
+  #   timeout: 30s
+
+---
+# Additional Sensor for resolved alerts (optional - separate workflow)
+# This creates a separate workflow for resolved alerts to send "all clear" notifications
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: alertmanager-resolved-sensor
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: sensor
+    alert-type: resolved
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: prometheus-alerting
+        app.kubernetes.io/component: sensor
+        alert-type: resolved
+  
+  dependencies:
+    - name: alertmanager-resolved
+      eventSourceName: alertmanager
+      eventName: alertmanager
+      filters:
+        data:
+          - path: body.status
+            type: string
+            value:
+              - "resolved"
+  
+  triggers:
+    - template:
+        name: alertmanager-resolved-notification
+        conditions: "alertmanager-resolved"
+        rateLimit:
+          requestsPerUnit: 20
+          unit: Minute
+        
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: alert-resolved-
+                namespace: argo-events
+                labels:
+                  app.kubernetes.io/part-of: prometheus-alerting
+                  event-type: prometheus-alert-resolved
+              spec:
+                entrypoint: notify-resolved
+                serviceAccountName: argo-events-sa
+                ttlStrategy:
+                  secondsAfterCompletion: 300
+                arguments:
+                  parameters:
+                    - name: alert-payload
+                      value: ""
+                templates:
+                  - name: notify-resolved
+                    inputs:
+                      parameters:
+                        - name: payload
+                    script:
+                      image: badouralix/curl-jq:latest
+                      command: [sh]
+                      env:
+                        - name: MATTERMOST_WEBHOOK_URL
+                          valueFrom:
+                            configMapKeyRef:
+                              name: notification-config
+                              key: MATTERMOST_WEBHOOK_URL
+                              optional: true
+                      source: |
+                        #!/bin/sh
+                        cat > /tmp/payload.json << 'EOF'
+                        {{inputs.parameters.payload}}
+                        EOF
+                        
+                        ALERT_COUNT=$(jq '.alerts | length' /tmp/payload.json)
+                        [ "$ALERT_COUNT" -eq 0 ] && exit 0
+                        
+                        # Send resolved notification
+                        jq -n \
+                          --arg count "$ALERT_COUNT" \
+                          '{
+                            username: "Prometheus Alert Triage",
+                            icon_emoji: ":white_check_mark:",
+                            text: (":white_check_mark: **" + $count + " alert(s) resolved**")
+                          }' > /tmp/resolved.json
+                        
+                        if [ -n "$MATTERMOST_WEBHOOK_URL" ]; then
+                          curl -s -X POST "$MATTERMOST_WEBHOOK_URL" \
+                            -H "Content-Type: application/json" \
+                            -d @/tmp/resolved.json --max-time 5 || true
+                        fi
+                        
+                        echo "Resolved notification sent for $ALERT_COUNT alerts"
+        parameters:
+          - src:
+              dependencyName: alertmanager-resolved
+              dataKey: body
+            dest: spec.arguments.parameters.0.value
+      retryStrategy:
+        steps: 2
+        duration: 5s

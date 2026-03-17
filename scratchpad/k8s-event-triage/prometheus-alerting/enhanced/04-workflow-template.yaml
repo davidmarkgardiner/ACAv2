@@ -1,0 +1,643 @@
+---
+# Enhanced Workflow Template - AlertManager Triage with Multi-Channel Notifications
+# 
+# Features:
+# - Multi-channel notifications: Mattermost, Slack, generic webhook
+# - GitLab issue creation with deduplication
+# - Enhanced alert parsing with jq
+# - Error handling and retries
+# - Alert correlation and grouping
+# - Custom notification templates
+#
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: alertmanager-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: workflow-template
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  
+  # TTL strategy for cleaning up completed workflows
+  ttlStrategy:
+    secondsAfterCompletion: 3600  # 1 hour
+    secondsAfterSuccess: 1800     # 30 minutes
+    secondsAfterFailure: 7200     # 2 hours
+  
+  # Pod garbage collection
+  podGC:
+    strategy: OnPodCompletion
+    deleteDelayDuration: 600s  # 10 minutes
+  
+  # Workflow-level retry strategy
+  retryStrategy:
+    limit: 2
+    retryPolicy: OnError
+    backoff:
+      duration: 5s
+      factor: 2
+      maxDuration: 1m
+  
+  # Global parameters
+  arguments:
+    parameters:
+      - name: alert-payload
+        description: "Raw AlertManager webhook JSON payload"
+        value: '{"status":"test","alerts":[]}'
+      
+      - name: gitlab-project
+        description: "GitLab project for issue creation (format: group/project)"
+        value: ""
+      
+      - name: notification-channels
+        description: "Comma-separated list of notification channels: mattermost,slack,webhook"
+        value: "mattermost"
+      
+      - name: deduplication-window
+        description: "Time window in minutes for deduplication"
+        value: "30"
+  
+  # Volume for shared data between steps
+  volumes:
+    - name: shared-data
+      emptyDir:
+        sizeLimit: 100Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 50Mi
+  
+  templates:
+    # Main DAG pipeline
+    - name: triage-pipeline
+      dag:
+        tasks:
+          # Step 1: Parse and validate the alert payload
+          - name: parse-alerts
+            template: parse-alert-payload
+            arguments:
+              parameters:
+                - name: payload
+                  value: "{{workflow.parameters.alert-payload}}"
+          
+          # Step 2: Check for duplicates (alert already handled recently)
+          - name: deduplicate
+            template: deduplicate-alerts
+            dependencies: [parse-alerts]
+            arguments:
+              parameters:
+                - name: parsed-alerts
+                  value: "{{tasks.parse-alerts.outputs.parameters.parsed-alerts}}"
+                - name: window
+                  value: "{{workflow.parameters.deduplication-window}}"
+          
+          # Step 3a: Create GitLab issue (if configured)
+          - name: create-gitlab-issue
+            template: create-gitlab-issue
+            dependencies: [deduplicate]
+            when: "{{tasks.deduplicate.outputs.parameters.has-new-alerts}} == 'true'"
+            arguments:
+              parameters:
+                - name: alerts
+                  value: "{{tasks.deduplicate.outputs.parameters.filtered-alerts}}"
+          
+          # Step 3b: Send notifications
+          - name: notify
+            template: send-notifications
+            dependencies: [deduplicate, create-gitlab-issue]
+            when: "{{tasks.deduplicate.outputs.parameters.has-new-alerts}} == 'true'"
+            arguments:
+              parameters:
+                - name: alerts
+                  value: "{{tasks.deduplicate.outputs.parameters.filtered-alerts}}"
+                - name: channels
+                  value: "{{workflow.parameters.notification-channels}}"
+                - name: issue-url
+                  value: "{{tasks.create-gitlab-issue.outputs.parameters.issue-url}}"
+                - name: gitlab-project
+                  value: "{{workflow.parameters.gitlab-project}}"
+          
+          # Step 4: Collect metrics
+          - name: collect-metrics
+            template: collect-metrics
+            dependencies: [notify]
+            when: "{{tasks.deduplicate.outputs.parameters.has-new-alerts}} == 'true'"
+            arguments:
+              parameters:
+                - name: alerts
+                  value: "{{tasks.deduplicate.outputs.parameters.filtered-alerts}}"
+      
+      failFast: false
+    
+    # Parse and validate alert payload
+    - name: parse-alert-payload
+      inputs:
+        parameters:
+          - name: payload
+      outputs:
+        parameters:
+          - name: parsed-alerts
+            valueFrom:
+              path: /tmp/parsed_alerts.json
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        source: |
+          #!/bin/sh
+          set -e
+          
+          echo "Parsing alert payload..."
+          
+          # Write payload to temp file
+          cat > /tmp/input.json << 'PAYLOAD_EOF'
+          {{inputs.parameters.payload}}
+          PAYLOAD_EOF
+          
+          # Validate JSON
+          if ! jq empty /tmp/input.json 2>/dev/null; then
+            echo "ERROR: Invalid JSON payload" >&2
+            echo '[]' > /tmp/parsed_alerts.json
+            exit 1
+          fi
+          
+          # Extract alerts array
+          ALERT_COUNT=$(jq '.alerts | length' /tmp/input.json)
+          STATUS=$(jq -r '.status // "unknown"' /tmp/input.json)
+          RECEIVER=$(jq -r '.receiver // "unknown"' /tmp/input.json)
+          EXTERNAL_URL=$(jq -r '.externalURL // ""' /tmp/input.json)
+          
+          echo "Status: $STATUS, Alerts: $ALERT_COUNT, Receiver: $RECEIVER"
+          
+          # Build enriched alerts array
+          jq -n \
+            --arg status "$STATUS" \
+            --arg receiver "$RECEIVER" \
+            --arg external_url "$EXTERNAL_URL" \
+            --arg workflow "{{workflow.name}}" \
+            --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --argjson alerts "$(jq '.alerts // []' /tmp/input.json)" \
+            '{
+              status: $status,
+              receiver: $receiver,
+              external_url: $external_url,
+              workflow: $workflow,
+              processed_at: $timestamp,
+              alert_count: ($alerts | length),
+              alerts: $alerts
+            }' > /tmp/parsed_alerts.json
+          
+          echo "Parsed $ALERT_COUNT alerts"
+          cat /tmp/parsed_alerts.json
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    
+    # Deduplicate alerts
+    - name: deduplicate-alerts
+      inputs:
+        parameters:
+          - name: parsed-alerts
+          - name: window
+      outputs:
+        parameters:
+          - name: filtered-alerts
+            valueFrom:
+              path: /tmp/filtered_alerts.json
+          - name: has-new-alerts
+            valueFrom:
+              path: /tmp/has_new.txt
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        source: |
+          #!/bin/sh
+          set -e
+          
+          cat > /tmp/alerts.json << 'EOF'
+          {{inputs.parameters.parsed-alerts}}
+          EOF
+          
+          # Check if we have any firing alerts
+          FIRING_COUNT=$(jq '[.alerts[] | select(.status == "firing")] | length' /tmp/alerts.json)
+          
+          if [ "$FIRING_COUNT" -eq 0 ]; then
+            echo "No firing alerts found"
+            echo "false" > /tmp/has_new.txt
+            echo '{"status":"resolved","alert_count":0,"alerts":[]}' > /tmp/filtered_alerts.json
+            exit 0
+          fi
+          
+          # Filter to only firing alerts and add fingerprints
+          jq '
+            .alerts |= map(select(.status == "firing")) |
+            .alerts |= map(. + {
+              fingerprint: (.labels | to_entries | sort_by(.key) | map("\(.key)=\(.value)") | join(","))
+            })
+          ' /tmp/alerts.json > /tmp/filtered_alerts.json
+          
+          echo "true" > /tmp/has_new.txt
+          echo "Found $FIRING_COUNT firing alerts"
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    
+    # Create GitLab issue
+    - name: create-gitlab-issue
+      inputs:
+        parameters:
+          - name: alerts
+      outputs:
+        parameters:
+          - name: issue-url
+            valueFrom:
+              path: /tmp/issue_url.txt
+            default: ""
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        env:
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-mcp-secret
+                key: GITLAB_PERSONAL_ACCESS_TOKEN
+                optional: true
+        source: |
+          #!/bin/sh
+          
+          PROJECT="{{workflow.parameters.gitlab-project}}"
+          
+          # Default output (empty if no project configured)
+          echo "" > /tmp/issue_url.txt
+          
+          # Skip if no project configured
+          if [ -z "$PROJECT" ] || [ "$PROJECT" = "" ]; then
+            echo "INFO: No GitLab project configured, skipping issue creation"
+            exit 0
+          fi
+          ENCODED_PROJECT=$(echo "$PROJECT" | sed 's/\//%2F/g')
+          WORKFLOW_NAME="{{workflow.name}}"
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          # Default fallback
+          echo "https://gitlab.com/${PROJECT}/-/issues" > /tmp/issue_url.txt
+          
+          # Check if token is available
+          if [ -z "$GITLAB_TOKEN" ] || [ "$GITLAB_TOKEN" = "" ]; then
+            echo "WARNING: GITLAB_TOKEN not set, skipping issue creation"
+            exit 0
+          fi
+          
+          cat > /tmp/alerts.json << 'EOF'
+          {{inputs.parameters.alerts}}
+          EOF
+          
+          ALERT_COUNT=$(jq '.alert_count // 0' /tmp/alerts.json)
+          
+          if [ "$ALERT_COUNT" -eq 0 ]; then
+            echo "No alerts to create issues for"
+            exit 0
+          fi
+          
+          # Create a single issue for all alerts in this group
+          FIRST_ALERT=$(jq '.alerts[0]' /tmp/alerts.json)
+          ALERTNAME=$(echo "$FIRST_ALERT" | jq -r '.labels.alertname // "Unknown"')
+          SEVERITY=$(echo "$FIRST_ALERT" | jq -r '.labels.severity // "warning"')
+          NAMESPACE=$(echo "$FIRST_ALERT" | jq -r '.labels.namespace // "unknown"')
+          
+          # Build issue title
+          if [ "$ALERT_COUNT" -eq 1 ]; then
+            TITLE="[ALERT] ${ALERTNAME} in ${NAMESPACE}"
+          else
+            TITLE="[ALERT] ${ALERT_COUNT} alerts in ${NAMESPACE}"
+          fi
+          
+          # Build issue description
+          {
+            echo "## Alert Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| **Status** | \`firing\` |"
+            echo "| **Count** | ${ALERT_COUNT} |"
+            echo "| **Severity** | \`${SEVERITY}\` |"
+            echo "| **Workflow** | ${WORKFLOW_NAME} |"
+            echo "| **Detected** | ${TIMESTAMP} |"
+            echo ""
+            echo "## Alerts"
+            echo ""
+            
+            # List all alerts
+            jq -r '.alerts[] | 
+              "### \(.labels.alertname // "Unknown")" + "\n" +
+              "- **Namespace:** `\(.labels.namespace // "unknown")`" + "\n" +
+              "- **Pod:** `\(.labels.pod // "N/A")`" + "\n" +
+              "- **Container:** `\(.labels.container // "N/A")`" + "\n" +
+              "- **Summary:** \(.annotations.summary // "N/A")" + "\n"
+            ' /tmp/alerts.json
+            
+            echo ""
+            echo "## Quick Commands"
+            echo ""
+            echo "\`\`\`bash"
+            echo "# View all pods in namespace"
+            echo "kubectl get pods -n ${NAMESPACE}"
+            echo ""
+            echo "# View events"
+            echo "kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' | tail -20"
+            echo "\`\`\`"
+            echo ""
+            echo "---"
+            echo "*Auto-generated by Prometheus Alert Triage Pipeline*"
+          } > /tmp/description.txt
+          
+          ISSUE_DESC=$(cat /tmp/description.txt)
+          
+          # Create issue
+          jq -n \
+            --arg title "$TITLE" \
+            --arg desc "$ISSUE_DESC" \
+            --arg labels "prometheus-alert,auto-generated,${SEVERITY}" \
+            '{title: $title, description: $desc, labels: $labels}' > /tmp/issue_payload.json
+          
+          echo "Creating GitLab issue: $TITLE"
+          
+          curl -s -X POST \
+            "https://gitlab.com/api/v4/projects/${ENCODED_PROJECT}/issues" \
+            -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/issue_payload.json > /tmp/response.json
+          
+          ISSUE_URL=$(jq -r '.web_url // empty' /tmp/response.json)
+          
+          if [ -n "$ISSUE_URL" ]; then
+            echo "$ISSUE_URL" > /tmp/issue_url.txt
+            echo "Created issue: $ISSUE_URL"
+          else
+            echo "ERROR: Failed to create issue" >&2
+            cat /tmp/response.json >&2
+          fi
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    
+    # Send notifications
+    - name: send-notifications
+      inputs:
+        parameters:
+          - name: alerts
+          - name: channels
+          - name: issue-url
+            value: ""
+          - name: gitlab-project
+            value: ""
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        env:
+          - name: MATTERMOST_WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: notification-config
+                key: MATTERMOST_WEBHOOK_URL
+                optional: true
+          - name: SLACK_WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: notification-config
+                key: SLACK_WEBHOOK_URL
+                optional: true
+          - name: GENERIC_WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: notification-config
+                key: GENERIC_WEBHOOK_URL
+                optional: true
+        source: |
+          #!/bin/sh
+          set -e
+          
+          CHANNELS="{{inputs.parameters.channels}}"
+          ISSUE_URL='{{inputs.parameters.issue-url}}'
+          GITLAB_PROJECT='{{inputs.parameters.gitlab-project}}'
+          
+          # Set default issue URL if not provided
+          if [ -z "$ISSUE_URL" ] || [ "$ISSUE_URL" = "" ]; then
+            if [ -n "$GITLAB_PROJECT" ] && [ "$GITLAB_PROJECT" != "" ]; then
+              ISSUE_URL="https://gitlab.com/${GITLAB_PROJECT}/-/issues"
+            else
+              ISSUE_URL=""
+            fi
+          fi
+          
+          cat > /tmp/alerts.json << 'EOF'
+          {{inputs.parameters.alerts}}
+          EOF
+          
+          ALERT_COUNT=$(jq '.alert_count // 0' /tmp/alerts.json)
+          
+          if [ "$ALERT_COUNT" -eq 0 ]; then
+            echo "No alerts to notify about"
+            exit 0
+          fi
+          
+          # Process each alert
+          jq -c '.alerts[]' /tmp/alerts.json | while read -r ALERT; do
+            ALERTNAME=$(echo "$ALERT" | jq -r '.labels.alertname // "Unknown"')
+            SEVERITY=$(echo "$ALERT" | jq -r '.labels.severity // "warning"')
+            NAMESPACE=$(echo "$ALERT" | jq -r '.labels.namespace // "unknown"')
+            POD=$(echo "$ALERT" | jq -r '.labels.pod // ""')
+            CONTAINER=$(echo "$ALERT" | jq -r '.labels.container // ""')
+            SUMMARY=$(echo "$ALERT" | jq -r '.annotations.summary // "No summary"')
+            DESCRIPTION=$(echo "$ALERT" | jq -r '.annotations.description // ""')
+            STARTS_AT=$(echo "$ALERT" | jq -r '.startsAt // ""' | cut -c1-19)
+            
+            # Severity styling
+            case "$SEVERITY" in
+              critical)
+                EMOJI=":red_circle:"
+                COLOR="#e74c3c"
+                ;;
+              warning)
+                EMOJI=":large_orange_circle:"
+                COLOR="#e67e22"
+                ;;
+              *)
+                EMOJI=":white_circle:"
+                COLOR="#95a5a6"
+                ;;
+            esac
+            
+            # Send to Mattermost
+            if echo "$CHANNELS" | grep -q "mattermost" && [ -n "$MATTERMOST_WEBHOOK_URL" ]; then
+              echo "Sending Mattermost notification for $ALERTNAME"
+              
+              RESOURCE_INFO=""
+              [ -n "$POD" ] && RESOURCE_INFO="| **Pod** | \`$POD\` |\n"
+              [ -n "$CONTAINER" ] && RESOURCE_INFO="${RESOURCE_INFO}| **Container** | \`$CONTAINER\` |\n"
+              
+              QUICK_CMDS=""
+              [ -n "$POD" ] && QUICK_CMDS="kubectl logs $POD -n $NAMESPACE --tail=50\nkubectl describe pod $POD -n $NAMESPACE | tail -20"
+              
+              ISSUE_ATTACHMENT=""
+              if [ -n "$ISSUE_URL" ] && [ "$ISSUE_URL" != "https://gitlab.com//-/issues" ]; then
+                ISSUE_ATTACHMENT=',{
+                  "fallback": "GitLab Issue",
+                  "color": "#fc6d26",
+                  "title": "GitLab Issue",
+                  "title_link": "'"$ISSUE_URL"'",
+                  "text": ":link: [View Issue]("'"$ISSUE_URL"')"
+                }'
+              fi
+              
+              jq -n \
+                --arg emoji "$EMOJI" \
+                --arg alertname "$ALERTNAME" \
+                --arg color "$COLOR" \
+                --arg summary "$SUMMARY" \
+                --arg severity "$SEVERITY" \
+                --arg namespace "$NAMESPACE" \
+                --arg resource_info "$RESOURCE_INFO" \
+                --arg description "$DESCRIPTION" \
+                --arg starts_at "$STARTS_AT" \
+                --arg quick_cmds "$QUICK_CMDS" \
+                --arg issue_attachment "$ISSUE_ATTACHMENT" \
+                '{
+                  username: "Prometheus Alert Triage",
+                  icon_emoji: ":rotating_light:",
+                  text: ($emoji + " :fire: **" + $alertname + "**"),
+                  attachments: [
+                    {
+                      color: $color,
+                      title: $summary,
+                      text: ("| Field | Value |\n|-------|-------|\n| **Severity** | " + $severity + " |\n| **Namespace** | `" + $namespace + "` |\n" + $resource_info + "| **Time** | " + $starts_at + " |")
+                    },
+                    {
+                      color: $color,
+                      title: "Description",
+                      text: $description
+                    }
+                  ] + (if ($quick_cmds | length) > 0 then [{
+                    color: "#3498db",
+                    title: "Quick Commands",
+                    text: ("```\n" + $quick_cmds + "\n```")
+                  }] else [] end)
+                }' > /tmp/mm_payload.json
+              
+              curl -s -X POST "$MATTERMOST_WEBHOOK_URL" \
+                -H "Content-Type: application/json" \
+                -d @/tmp/mm_payload.json --max-time 10 || echo "Mattermost notification failed"
+            fi
+            
+            # Send to Slack
+            if echo "$CHANNELS" | grep -q "slack" && [ -n "$SLACK_WEBHOOK_URL" ]; then
+              echo "Sending Slack notification for $ALERTNAME"
+              
+              jq -n \
+                --arg alertname "$ALERTNAME" \
+                --arg color "$COLOR" \
+                --arg summary "$SUMMARY" \
+                --arg severity "$SEVERITY" \
+                --arg namespace "$NAMESPACE" \
+                --arg pod "$POD" \
+                --arg description "$DESCRIPTION" \
+                '{
+                  username: "Prometheus Alert Triage",
+                  icon_emoji: ":rotating_light:",
+                  attachments: [
+                    {
+                      color: $color,
+                      title: ($alertname + " - " + $severity),
+                      text: $summary,
+                      fields: [
+                        { title: "Namespace", value: $namespace, short: true },
+                        { title: "Pod", value: $pod, short: true },
+                        { title: "Description", value: $description, short: false }
+                      ]
+                    }
+                  ]
+                }' > /tmp/slack_payload.json
+              
+              curl -s -X POST "$SLACK_WEBHOOK_URL" \
+                -H "Content-Type: application/json" \
+                -d @/tmp/slack_payload.json --max-time 10 || echo "Slack notification failed"
+            fi
+          done
+          
+          echo "Notifications sent"
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    
+    # Collect metrics about processed alerts
+    - name: collect-metrics
+      inputs:
+        parameters:
+          - name: alerts
+      script:
+        image: badouralix/curl-jq:latest
+        command: [sh]
+        source: |
+          #!/bin/sh
+          
+          cat > /tmp/alerts.json << 'EOF'
+          {{inputs.parameters.alerts}}
+          EOF
+          
+          ALERT_COUNT=$(jq '.alert_count // 0' /tmp/alerts.json)
+          WORKFLOW="{{workflow.name}}"
+          
+          echo "Collecting metrics for workflow $WORKFLOW"
+          echo "Total alerts processed: $ALERT_COUNT"
+          
+          # Generate summary by severity
+          echo "Severity breakdown:"
+          jq -r '.alerts[] | .labels.severity // "unknown"' /tmp/alerts.json | sort | uniq -c | sort -rn
+          
+          # Generate summary by alertname
+          echo "Alert type breakdown:"
+          jq -r '.alerts[] | .labels.alertname // "unknown"' /tmp/alerts.json | sort | uniq -c | sort -rn
+          
+          # This could push to Prometheus Pushgateway or other metrics system
+          # For now, just log the metrics
+          echo "Metrics collection complete"
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi

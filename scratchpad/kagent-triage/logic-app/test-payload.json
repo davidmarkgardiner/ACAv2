@@ -1,0 +1,11 @@
+{
+  "event_namespace": "test-ns",
+  "event_reason": "BackOff",
+  "resource_kind": "Pod",
+  "resource_name": "crashloop-test-pod",
+  "agent_diagnosis": "## Diagnosis Summary\n\nRoot cause: Container command `exit 1` causes immediate crash.\n\n### Root Cause\nThe container is configured with `command: [\"sh\", \"-c\", \"exit 1\"]` which exits immediately with code 1, triggering CrashLoopBackOff.\n\n### Remediation\n```bash\nkubectl delete pod crashloop-test-pod -n test-ns\n```\n\nOr fix the command:\n```bash\nkubectl patch pod crashloop-test-pod -n test-ns --type='merge' -p='{\"spec\":{\"containers\":[{\"name\":\"crash\",\"command\":[\"sh\",\"-c\",\"sleep infinity\"]}]}}'\n```\n\n### Risk Level\nLow — test pod with no dependencies.\n\n### Verification\n```bash\nkubectl get pod crashloop-test-pod -n test-ns\n```",
+  "risk_level": "Low",
+  "timestamp": "2026-03-16T15:31:29.834828+00:00",
+  "source": "kagent-triage-workflow",
+  "cluster": "kind-homelab"
+}

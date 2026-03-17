@@ -1,0 +1,240 @@
+---
+# Workflow Template - K8s Event Triage (OTLP-Aware)
+# Receives OTLP JSON envelope from Event Hub, parses K8s events, classifies + alerts via Mattermost
+#
+# Pipeline: OTLP payload → parse-otlp (extract K8s events) → fan-out → classify + Mattermost
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-event-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  ttlStrategy:
+    secondsAfterCompletion: 300
+    secondsAfterSuccess: 120
+    secondsAfterFailure: 600
+  podGC:
+    strategy: OnPodCompletion
+  arguments:
+    parameters:
+      - name: otlp-payload
+        description: "Full OTLP JSON envelope from Event Hub (Alloy otelcol.exporter.kafka with otlp_json encoding)"
+  templates:
+    - name: triage-pipeline
+      steps:
+        # Step 1: Parse OTLP envelope → extract and normalize K8s Warning events
+        - - name: parse-otlp
+            template: parse-otlp
+            arguments:
+              parameters:
+                - name: otlp-payload
+                  value: "{{workflow.parameters.otlp-payload}}"
+        # Step 2: Fan out over extracted events → classify severity + send Mattermost
+        # withParam with empty array [] safely creates zero iterations
+        - - name: process-event
+            template: classify-and-alert
+            withParam: "{{steps.parse-otlp.outputs.parameters.events}}"
+            arguments:
+              parameters:
+                - name: cluster
+                  value: "{{item.cluster}}"
+                - name: environment
+                  value: "{{item.environment}}"
+                - name: event-type
+                  value: "{{item.event_type}}"
+                - name: event-reason
+                  value: "{{item.event_reason}}"
+                - name: event-message
+                  value: "{{item.event_message}}"
+                - name: object-kind
+                  value: "{{item.object_kind}}"
+                - name: object-name
+                  value: "{{item.object_name}}"
+                - name: object-namespace
+                  value: "{{item.object_namespace}}"
+                - name: event-time
+                  value: "{{item.event_time}}"
+                - name: event-count
+                  value: "{{item.event_count}}"
+
+    # -------------------------------------------------------------------------
+    # Parse OTLP envelope → extract and normalize K8s events
+    # OTLP structure: resourceLogs[].scopeLogs[].logRecords[]
+    #   - body.stringValue = raw K8s event JSON
+    #   - attributes[] = Loki labels (cluster, environment, event_type, etc.)
+    # -------------------------------------------------------------------------
+    - name: parse-otlp
+      inputs:
+        parameters:
+          - name: otlp-payload
+      outputs:
+        parameters:
+          - name: events
+            valueFrom:
+              path: /tmp/events.json
+          - name: event-count
+            valueFrom:
+              path: /tmp/event-count.txt
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        source: |
+          cat > /tmp/otlp_input.json << '__OTLP_EOF__'
+          {{inputs.parameters.otlp-payload}}
+          __OTLP_EOF__
+
+          # Parse OTLP envelope, extract and normalize K8s Warning events
+          # OTLP structure: resourceLogs[].scopeLogs[].logRecords[]
+          #   body.stringValue = raw K8s event JSON
+          #   attributes[] = Loki labels (cluster, environment, event_type, etc.)
+          jq '
+            # Convert OTLP attribute array [{key,value}] to object
+            def attrs: [.[]? | {(.key): (.value.stringValue // (.value.intValue // .value.boolValue // "" | tostring))}] | add // {};
+
+            [
+              .resourceLogs[]? |
+              (.resource.attributes // [] | attrs) as $res |
+              .scopeLogs[]?.logRecords[]? |
+              (.attributes // [] | attrs) as $a |
+              (.body.stringValue // "" | if . != "" then (fromjson? // {}) else {} end) as $ev |
+
+              ($a.event_type // $ev.type // "Unknown") as $type |
+
+              select($type == "Warning") |
+
+              {
+                cluster:          ($a.cluster // $res.cluster // "unknown"),
+                environment:      ($a.environment // $res.environment // "unknown"),
+                event_type:       $type,
+                event_reason:     ($a.event_reason // $ev.reason // "Unknown"),
+                event_message:    ($ev.message // ""),
+                object_kind:      ($a.obj_kind // $ev.involvedObject.kind // ""),
+                object_name:      ($ev.involvedObject.name // ""),
+                object_namespace: ($a.obj_namespace // $ev.involvedObject.namespace // ""),
+                event_time:       ($ev.lastTimestamp // $ev.firstTimestamp // ""),
+                event_count:      ($ev.count // 1 | tostring)
+              }
+            ]
+          ' /tmp/otlp_input.json > /tmp/events.json
+
+          COUNT=$(jq length /tmp/events.json)
+          echo "$COUNT" > /tmp/event-count.txt
+          echo "Parsed $COUNT Warning event(s) from OTLP payload"
+          jq -r '.[] | "  - \(.event_reason): \(.object_kind)/\(.object_name) in \(.object_namespace)"' /tmp/events.json
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    # -------------------------------------------------------------------------
+    # Classify event severity + send Mattermost notification
+    # Uses jq for safe JSON construction (avoids special char issues in messages)
+    # Matches notification pattern from alertmanager-triage workflow
+    # -------------------------------------------------------------------------
+    - name: classify-and-alert
+      inputs:
+        parameters:
+          - name: cluster
+          - name: environment
+          - name: event-type
+          - name: event-reason
+          - name: event-message
+          - name: object-kind
+          - name: object-name
+          - name: object-namespace
+          - name: event-time
+          - name: event-count
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        env:
+          - name: WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: mattermost-webhook-config
+                key: WEBHOOK_URL
+        source: |
+          REASON="{{inputs.parameters.event-reason}}"
+
+          # Severity classification
+          case "$REASON" in
+            OOMKilled|CrashLoopBackOff|FailedScheduling|NodeNotReady)
+              SEVERITY="critical" ; EMOJI=":red_circle:" ; COLOR="#e74c3c" ;;
+            BackOff|Failed|Unhealthy|FailedMount|FailedAttachVolume)
+              SEVERITY="high" ; EMOJI=":large_orange_circle:" ; COLOR="#e67e22" ;;
+            Killing|Evicted|FailedCreate)
+              SEVERITY="medium" ; EMOJI=":warning:" ; COLOR="#f1c40f" ;;
+            *)
+              SEVERITY="low" ; EMOJI=":white_circle:" ; COLOR="#95a5a6" ;;
+          esac
+
+          echo "Event: $REASON -> severity=$SEVERITY"
+
+          # Write event message to file (avoids shell quoting issues)
+          cat > /tmp/event_message.txt << '__MSG_EOF__'
+          {{inputs.parameters.event-message}}
+          __MSG_EOF__
+
+          EVENT_MSG=$(cat /tmp/event_message.txt | head -c 500)
+
+          # Build Mattermost payload with attachments (matches alertmanager-triage style)
+          jq -n \
+            --arg emoji "$EMOJI" \
+            --arg severity "$SEVERITY" \
+            --arg color "$COLOR" \
+            --arg cluster "{{inputs.parameters.cluster}}" \
+            --arg environment "{{inputs.parameters.environment}}" \
+            --arg event_type "{{inputs.parameters.event-type}}" \
+            --arg event_reason "{{inputs.parameters.event-reason}}" \
+            --arg object_kind "{{inputs.parameters.object-kind}}" \
+            --arg object_name "{{inputs.parameters.object-name}}" \
+            --arg object_namespace "{{inputs.parameters.object-namespace}}" \
+            --arg event_count "{{inputs.parameters.event-count}}" \
+            --arg event_time "{{inputs.parameters.event-time}}" \
+            --arg event_message "$EVENT_MSG" \
+            '{
+              username: "K8s Event Triage",
+              icon_emoji: ":kubernetes:",
+              text: ($emoji + " **" + $event_reason + "** on " + $cluster),
+              attachments: [
+                {
+                  fallback: ($event_reason + " - " + $severity),
+                  color: $color,
+                  title: ($object_kind + "/" + $object_name),
+                  text: ("| Field | Value |\n|-------|-------|\n| **Severity** | " + $severity + " |\n| **Cluster** | `" + $cluster + "` |\n| **Environment** | `" + $environment + "` |\n| **Namespace** | `" + $object_namespace + "` |\n| **Type** | " + $event_type + " |\n| **Reason** | " + $event_reason + " |\n| **Count** | " + $event_count + " |\n| **Time** | " + $event_time + " |")
+                },
+                {
+                  fallback: "Event Message",
+                  color: $color,
+                  title: "Message",
+                  text: $event_message
+                }
+              ] + (if ($object_kind == "Pod") then [{
+                fallback: "Quick Commands",
+                color: "#3498db",
+                title: "Quick Commands",
+                text: ("```\nkubectl describe pod " + $object_name + " -n " + $object_namespace + " | tail -30\nkubectl logs " + $object_name + " -n " + $object_namespace + " --tail=50\nkubectl get events -n " + $object_namespace + " --field-selector involvedObject.name=" + $object_name + "\n```")
+              }] else [] end)
+            }' > /tmp/mattermost.json
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/mattermost.json \
+            --max-time 10)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "Mattermost response: HTTP $HTTP_CODE"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

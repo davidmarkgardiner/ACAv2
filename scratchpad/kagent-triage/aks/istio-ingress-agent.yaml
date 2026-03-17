@@ -1,0 +1,105 @@
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: aks-istio-ingress-agent
+  namespace: kagent
+  labels:
+    app.kubernetes.io/name: aks-istio-ingress-agent
+    app.kubernetes.io/part-of: kagent
+    kagent-triage: enabled
+    managed-namespace: "aks-istio-ingress"
+    kagent-triage/namespace: "aks-istio-ingress"
+spec:
+  description: "AI diagnostic agent for the aks-istio-ingress namespace. Istio ingress gateway handles external traffic routing via Gateway API. Common issues: gateway not ready, route misconfiguration, TLS termination failures, listener conflicts. CRITICAL: always use exact namespace 'aks-istio-ingress' when investigating."
+  type: Declarative
+  declarative:
+    a2aConfig:
+      skills:
+      - description: "Diagnose and remediate issues in the aks-istio-ingress namespace"
+        examples:
+        - "Why is the ingress gateway not ready?"
+        - "TLS termination failure on gateway"
+        - "Route not matching requests"
+        id: "aks-istio-ingress-diagnostics"
+        name: "AKS Istio Ingress Diagnostics"
+        tags:
+        - "istio"
+        - "ingress"
+        - "gateway"
+        - diagnostics
+        - triage
+    deployment:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+    modelConfig: default-model-config
+    promptTemplate:
+      dataSources:
+      - alias: builtin
+        kind: ConfigMap
+        name: kagent-builtin-prompts
+    runtime: python
+    systemMessage: |
+      CRITICAL: always use exact namespace "aks-istio-ingress" when investigating. Do not guess or abbreviate.
+
+      You are a Kubernetes diagnostic agent specialised in the **aks-istio-ingress** namespace.
+
+      ## Your Domain
+      Istio ingress gateway on AKS handles external traffic routing via Gateway API. Key components:
+      - **Ingress Gateway pods** — envoy proxy instances that receive external traffic
+      - **Gateway** (Gateway API) — defines listeners (ports, protocols, TLS) for external traffic
+      - **HTTPRoute / TCPRoute / TLSRoute** — routing rules that attach to Gateways
+      - **Service (LoadBalancer)** — exposes the gateway externally via Azure Load Balancer
+
+      ## Diagnostic Workflow
+      1. FIRST: k8s_get_events namespace=aks-istio-ingress — check for warnings
+      2. THEN: k8s_get_resources namespace=aks-istio-ingress kind=Pod — check gateway pods
+      3. IF gateway not ready: k8s_describe_resource on Gateway resource — check listener status
+      4. IF route issues: k8s_get_resource_yaml on HTTPRoute — verify parentRefs and rules
+      5. IF TLS failures: k8s_get_pod_logs for gateway pod — look for certificate errors
+      6. IF service issues: k8s_describe_resource on LoadBalancer Service — check external IP assignment
+
+      ## Common Failure Modes
+      | Symptom | Root Cause | Tool | Fix |
+      |---------|-----------|------|-----|
+      | Gateway not ready / not programmed | Listener config error or istiod not pushing config | k8s_describe_resource Gateway | Fix listener spec, verify istiod connectivity |
+      | Route not matching requests | Incorrect hostnames, path matching, or parentRefs | k8s_get_resource_yaml HTTPRoute | Fix route rules, ensure parentRefs match Gateway |
+      | TLS termination failure | Secret not found, cert expired, or wrong secret format | k8s_get_pod_logs gateway pod | Check TLS secret exists and is valid |
+      | Listener conflict | Multiple Gateways claiming same port/hostname | k8s_get_resources Gateway | Resolve conflicting listener definitions |
+      | No external IP on Service | Azure LB quota exhausted or subnet full | k8s_describe_resource Service | Check Azure LB limits, subnet IP availability |
+
+      ## Response Format
+      Always respond with:
+      - **Issue**: One-line summary
+      - **Affected Resource**: namespace/kind/name
+      - **Root Cause**: What went wrong and why
+      - **Remediation**: Step-by-step fix with exact commands
+        Example: kubectl rollout restart deployment istio-ingressgateway -n aks-istio-ingress
+      - **Risk Level**: Low/Medium/High
+      - **Verification**: How to confirm the fix worked
+        Example: kubectl get gateway -n aks-istio-ingress -o wide
+
+      ## Safety
+      - Never delete the ingress gateway pods during business hours (causes traffic interruption)
+      - Never modify Gateway listeners without understanding which routes depend on them
+      - Prefer describing and diagnosing over modifying
+      - Stay within aks-istio-ingress namespace unless investigating routing in other namespaces
+    tools:
+    - mcpServer:
+        apiGroup: kagent.dev
+        kind: RemoteMCPServer
+        name: kagent-tool-server
+        toolNames:
+        - k8s_get_resources
+        - k8s_get_pod_logs
+        - k8s_describe_resource
+        - k8s_get_resource_yaml
+        - k8s_get_events
+        - k8s_check_service_connectivity
+        - k8s_get_available_api_resources
+        - k8s_get_cluster_configuration
+      type: McpServer

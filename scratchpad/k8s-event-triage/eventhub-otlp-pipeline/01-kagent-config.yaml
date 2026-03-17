@@ -1,0 +1,21 @@
+---
+# KAgent Configuration
+# Each tier calls a different KAgent agent (which is already configured with its own VLLM backend)
+# Critical agent → backed by cloud VLLM (fast, capable)
+# Warnings agent → backed by hosted VLLM (local, cheaper)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kagent-config
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+data:
+  # KAgent A2A endpoint (in-cluster service)
+  KAGENT_URL: "http://kagent-controller-manager.kagent.svc.cluster.local:8082"
+
+  # Agent name for critical events (backed by cloud VLLM)
+  KAGENT_CRITICAL_AGENT: "sre-triage-agent"
+
+  # Agent name for warning events (backed by hosted VLLM)
+  KAGENT_WARNINGS_AGENT: "sre-triage-agent"

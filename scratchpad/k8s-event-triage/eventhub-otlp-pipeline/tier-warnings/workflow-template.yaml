@@ -1,0 +1,221 @@
+---
+# Workflow Template - Warnings Tier
+# Filters: Warning events EXCLUDING critical reasons (handled by critical tier)
+# Backend: KAgent (backed by hosted VLLM) — best effort
+# Calls KAgent via A2A protocol — KAgent knows which VLLM it's connected to
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-triage-warnings
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: warnings
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  ttlStrategy:
+    secondsAfterCompletion: 120
+    secondsAfterSuccess: 60
+    secondsAfterFailure: 300
+  podGC:
+    strategy: OnPodCompletion
+  arguments:
+    parameters:
+      - name: otlp-payload
+  templates:
+    - name: triage-pipeline
+      steps:
+        - - name: parse-otlp
+            template: parse-otlp
+            arguments:
+              parameters:
+                - name: otlp-payload
+                  value: "{{workflow.parameters.otlp-payload}}"
+        - - name: process-event
+            template: analyze-best-effort
+            withParam: "{{steps.parse-otlp.outputs.parameters.events}}"
+            arguments:
+              parameters:
+                - name: cluster
+                  value: "{{item.cluster}}"
+                - name: environment
+                  value: "{{item.environment}}"
+                - name: event-type
+                  value: "{{item.event_type}}"
+                - name: event-reason
+                  value: "{{item.event_reason}}"
+                - name: event-message
+                  value: "{{item.event_message}}"
+                - name: object-kind
+                  value: "{{item.object_kind}}"
+                - name: object-name
+                  value: "{{item.object_name}}"
+                - name: object-namespace
+                  value: "{{item.object_namespace}}"
+                - name: event-time
+                  value: "{{item.event_time}}"
+                - name: event-count
+                  value: "{{item.event_count}}"
+
+    # -------------------------------------------------------------------------
+    # Parse OTLP — NON-CRITICAL warnings only
+    # Excludes critical reasons (those are handled by tier-critical)
+    # -------------------------------------------------------------------------
+    - name: parse-otlp
+      inputs:
+        parameters:
+          - name: otlp-payload
+      outputs:
+        parameters:
+          - name: events
+            valueFrom:
+              path: /tmp/events.json
+          - name: event-count
+            valueFrom:
+              path: /tmp/event-count.txt
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        source: |
+          cat > /tmp/otlp_input.json << '__OTLP_EOF__'
+          {{inputs.parameters.otlp-payload}}
+          __OTLP_EOF__
+
+          # Parse OTLP envelope, extract K8s events, exclude critical reasons
+          jq '
+            def attrs: [.[]? | {(.key): (.value.stringValue // (.value.intValue // .value.boolValue // "" | tostring))}] | add // {};
+
+            # Critical reasons handled by tier-critical — skip them here
+            def is_critical: . as $r | ["CrashLoopBackOff","OOMKilled","OOMKilling","FailedScheduling","NodeNotReady","NodeNotSchedulable","FailedMount","FailedAttachVolume"] | any(. == $r);
+
+            [
+              .resourceLogs[]? |
+              (.resource.attributes // [] | attrs) as $res |
+              .scopeLogs[]?.logRecords[]? |
+              (.attributes // [] | attrs) as $a |
+              (.body.stringValue // "" | if . != "" then (fromjson? // {}) else {} end) as $ev |
+
+              ($a.event_reason // $ev.reason // "") as $reason |
+              ($a.event_type // $ev.type // "") as $type |
+
+              select($type == "Warning" and ($reason | is_critical | not)) |
+
+              {
+                cluster:          ($a.cluster // $res.cluster // "unknown"),
+                environment:      ($a.environment // $res.environment // "unknown"),
+                event_type:       $type,
+                event_reason:     $reason,
+                event_message:    ($ev.message // ""),
+                object_kind:      ($a.obj_kind // $ev.involvedObject.kind // ""),
+                object_name:      ($ev.involvedObject.name // ""),
+                object_namespace: ($a.obj_namespace // $ev.involvedObject.namespace // ""),
+                event_time:       ($ev.lastTimestamp // $ev.firstTimestamp // ""),
+                event_count:      ($ev.count // 1 | tostring)
+              }
+            ]
+          ' /tmp/otlp_input.json > /tmp/events.json
+
+          COUNT=$(jq length /tmp/events.json)
+          echo "$COUNT" > /tmp/event-count.txt
+          echo "[WARNINGS] $COUNT non-critical warning(s) from OTLP payload"
+          jq -r '.[] | "  - \(.event_reason): \(.object_kind)/\(.object_name) in \(.object_namespace)"' /tmp/events.json
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    # -------------------------------------------------------------------------
+    # KAgent analysis (best effort)
+    # Calls KAgent via A2A protocol — KAgent knows which VLLM it's connected to
+    # If KAgent is slow or down, the workflow just logs and moves on
+    # -------------------------------------------------------------------------
+    - name: analyze-best-effort
+      inputs:
+        parameters:
+          - name: cluster
+          - name: environment
+          - name: event-type
+          - name: event-reason
+          - name: event-message
+          - name: object-kind
+          - name: object-name
+          - name: object-namespace
+          - name: event-time
+          - name: event-count
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        env:
+          - name: KAGENT_URL
+            valueFrom:
+              configMapKeyRef:
+                name: kagent-config
+                key: KAGENT_URL
+          - name: KAGENT_AGENT
+            valueFrom:
+              configMapKeyRef:
+                name: kagent-config
+                key: KAGENT_WARNINGS_AGENT
+        source: |
+          REASON="{{inputs.parameters.event-reason}}"
+
+          echo "[WARNING] $REASON: {{inputs.parameters.object-kind}}/{{inputs.parameters.object-name}} in {{inputs.parameters.object-namespace}}"
+
+          cat > /tmp/event_message.txt << '__MSG_EOF__'
+          {{inputs.parameters.event-message}}
+          __MSG_EOF__
+
+          EVENT_MSG=$(cat /tmp/event_message.txt | head -c 1000)
+
+          # Best-effort KAgent analysis — if not reachable, just log
+          ANALYSIS="(KAgent not reachable)"
+
+          # Build A2A message/send request
+          # A2A trailing slash is REQUIRED
+          jq -n \
+            --arg reason "$REASON" \
+            --arg kind "{{inputs.parameters.object-kind}}" \
+            --arg name "{{inputs.parameters.object-name}}" \
+            --arg namespace "{{inputs.parameters.object-namespace}}" \
+            --arg message "$EVENT_MSG" \
+            --arg cluster "{{inputs.parameters.cluster}}" \
+            --arg id "warning-$(date +%s)" \
+            '{
+              jsonrpc: "2.0",
+              method: "message/send",
+              id: $id,
+              params: {
+                message: {
+                  role: "user",
+                  parts: [{
+                    text: ("K8s Warning on cluster " + $cluster + ":\nReason: " + $reason + "\nObject: " + $kind + "/" + $name + "\nCRITICAL: use exact namespace \"" + $namespace + "\"\nMessage: " + $message + "\n\nBriefly analyze this warning event. Provide a one-line root cause and one-line recommended action.")
+                  }]
+                }
+              }
+            }' > /tmp/kagent_request.json
+
+          echo "Calling KAgent agent: $KAGENT_AGENT"
+
+          KAGENT_RESPONSE=$(curl -s --max-time 90 \
+            -X POST "${KAGENT_URL}/api/a2a/kagent/${KAGENT_AGENT}/" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/kagent_request.json 2>&1)
+
+          KAGENT_STATUS=$(echo "$KAGENT_RESPONSE" | jq -r '.result.status.state // "unknown"' 2>/dev/null)
+          ANALYSIS=$(echo "$KAGENT_RESPONSE" | jq -r '.result.artifacts[0].parts[0].text // "(no analysis returned)"' 2>/dev/null)
+
+          echo "KAgent status: $KAGENT_STATUS"
+          echo "Analysis: $(echo "$ANALYSIS" | head -c 200)..."
+
+          echo "Done (best effort)"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

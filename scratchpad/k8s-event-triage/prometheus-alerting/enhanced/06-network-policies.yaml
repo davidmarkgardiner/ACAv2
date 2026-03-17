@@ -1,0 +1,183 @@
+---
+# Network Policies for Prometheus Alerting Pipeline
+# These policies restrict network traffic to improve security
+#
+# NOTE: Requires a CNI that supports NetworkPolicy (Calico, Cilium, etc.)
+# If using kind/standard CNI, these won't be enforced but won't break anything
+
+# Allow EventSource to receive webhook traffic from AlertManager
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alertmanager-webhook
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      eventsource-name: alertmanager
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+      ports:
+        - protocol: TCP
+          port: 12000
+      # Allow from any pod in cluster (AlertManager may be in different namespace)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 12000
+
+---
+# Allow Sensor to communicate with EventBus (NATS)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sensor-eventbus
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      sensor-name: alertmanager-triage-sensor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow EventBus to communicate back to Sensor
+    - from:
+        - podSelector:
+            matchLabels:
+              eventbus-name: default
+  egress:
+    # Allow Sensor to reach Kubernetes API
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 443
+    # Allow Sensor to reach EventBus
+    - to:
+        - podSelector:
+            matchLabels:
+              eventbus-name: default
+    # Allow Sensor to create Workflow pods
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: argo-events
+
+---
+# Default deny for Workflow pods (they should only talk to what they need)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workflow-default-egress
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      event-type: prometheus-alert
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow HTTP/HTTPS for webhooks and API calls
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    # Allow access to Kubernetes API
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+        - ipBlock:
+            cidr: 172.16.0.0/12
+        - ipBlock:
+            cidr: 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+
+---
+# Allow workflows to receive traffic from Sensor
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-workflow-ingress
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      event-type: prometheus-alert
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              sensor-name: alertmanager-triage-sensor
+        - namespaceSelector:
+            matchLabels:
+              name: argo-events
+
+---
+# NetworkPolicy for EventSource to communicate with EventBus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-eventsource-eventbus
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      eventsource-name: alertmanager
+  policyTypes:
+    - Egress
+  egress:
+    # Allow EventSource to reach EventBus
+    - to:
+        - podSelector:
+            matchLabels:
+              eventbus-name: default
+    # Allow DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53

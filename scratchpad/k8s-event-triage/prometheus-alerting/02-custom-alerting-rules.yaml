@@ -1,0 +1,90 @@
+---
+# PrometheusRule CRD - Supplementary alert rules for pod failures and resource thresholds
+# These rules trigger the Argo Events triage pipeline via AlertManager webhook
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: k8s-triage-alerting-rules
+  namespace: monitoring
+  labels:
+    release: kube-prom
+    app.kubernetes.io/part-of: prometheus-alerting
+spec:
+  groups:
+    # --- Pod failure alerts ---
+    - name: pod-failure-alerts
+      rules:
+        - alert: OOMKilledContainer
+          expr: kube_pod_container_status_last_terminated_reason{reason="OOMKilled", namespace!~"kube-system|argo-events|argo|monitoring"} > 0
+          for: 0m
+          labels:
+            severity: critical
+            triage: "true"
+          annotations:
+            summary: "Container OOMKilled in {{ $labels.namespace }}/{{ $labels.pod }}"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) was OOMKilled."
+
+        - alert: PodHighRestarts
+          expr: increase(kube_pod_container_status_restarts_total{namespace!~"kube-system|argo-events|argo|monitoring"}[5m]) > 3
+          for: 0m
+          labels:
+            severity: warning
+            triage: "true"
+          annotations:
+            summary: "Pod {{ $labels.pod }} restarting frequently in {{ $labels.namespace }}"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) has restarted more than 3 times in the last 5 minutes."
+
+        - alert: FailedScheduling
+          expr: kube_pod_status_unschedulable{namespace!~"kube-system|argo-events|argo|monitoring"} > 0
+          for: 2m
+          labels:
+            severity: warning
+            triage: "true"
+          annotations:
+            summary: "Pod {{ $labels.pod }} cannot be scheduled in {{ $labels.namespace }}"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been unschedulable for more than 2 minutes."
+
+    # --- Resource threshold alerts ---
+    - name: resource-threshold-alerts
+      rules:
+        - alert: ContainerCPUHigh
+          expr: |
+            (
+              rate(container_cpu_usage_seconds_total{container!="", container!="POD", namespace!~"kube-system|argo-events|argo|monitoring"}[5m])
+              / on(namespace, pod, container) kube_pod_container_resource_limits{resource="cpu"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            triage: "true"
+          annotations:
+            summary: "High CPU usage in {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) is using more than 80% of its CPU limit."
+
+        - alert: ContainerMemoryHigh
+          expr: |
+            (
+              container_memory_working_set_bytes{container!="", container!="POD", namespace!~"kube-system|argo-events|argo|monitoring"}
+              / on(namespace, pod, container) kube_pod_container_resource_limits{resource="memory"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            triage: "true"
+          annotations:
+            summary: "High memory usage in {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) is using more than 80% of its memory limit."
+
+        - alert: PVCNearCapacity
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{namespace!~"kube-system|argo-events|argo|monitoring"}
+              / kubelet_volume_stats_capacity_bytes
+            ) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            triage: "true"
+          annotations:
+            summary: "PVC near capacity in {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}"
+            description: "PVC {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} is using more than 85% of its capacity."

@@ -1,0 +1,19 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: kagent-ui
+  namespace: kagent
+  labels:
+    app.kubernetes.io/name: kagent-ui
+    app.kubernetes.io/part-of: kagent
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`kagent.xxx`)
+      kind: Rule
+      services:
+        - name: kagent-ui
+          port: 8080
+  tls:
+    certResolver: cloudflare

@@ -1,0 +1,48 @@
+# Argo Events Helm Values — Private Registry Override
+#
+# PURPOSE: Override ALL default image references so the controller uses your
+# private registry instead of Docker Hub / Quay.io. This is the ONLY reliable
+# way to control EventBus images — CR-level overrides (streamImage, natsImage)
+# are ignored by the controller for some images.
+#
+# USAGE:
+#   helm upgrade --install argo-events argo/argo-events \
+#     -n argo-events --create-namespace \
+#     -f helm-values-argo-events.yaml
+#
+# REPLACE: "REPLACE_REGISTRY" with your ACR/registry (e.g. myregistry.azurecr.io)
+#
+# PREREQUISITE: Import images first — see PRIVATE-REGISTRY.md
+
+# --- Controller image ---
+global:
+  image:
+    repository: "REPLACE_REGISTRY/argoproj/argo-events"
+    tag: "v1.9.10"
+    imagePullPolicy: IfNotPresent
+
+# --- JetStream EventBus images ---
+# The controller reads these from a ConfigMap, NOT from the EventBus CR.
+# This is why setting natsImage/streamImage on the CR doesn't work reliably.
+configs:
+  jetstream:
+    versions:
+      # "latest" is the version string matched when EventBus CR says version: "2.10.10"
+      # (the Helm chart maps "latest" to the newest version entry)
+      - version: "latest"
+        natsImage: "REPLACE_REGISTRY/nats:2.10.10"
+        configReloaderImage: "REPLACE_REGISTRY/natsio/nats-server-config-reloader:0.14.0"
+        metricsExporterImage: "REPLACE_REGISTRY/natsio/prometheus-nats-exporter:0.14.0"
+        startCommand: "/nats-server"
+      - version: "2.10.10"
+        natsImage: "REPLACE_REGISTRY/nats:2.10.10"
+        configReloaderImage: "REPLACE_REGISTRY/natsio/nats-server-config-reloader:0.14.0"
+        metricsExporterImage: "REPLACE_REGISTRY/natsio/prometheus-nats-exporter:0.14.0"
+        startCommand: "/nats-server"
+
+  # --- Native NATS EventBus images (if using native instead of JetStream) ---
+  nats:
+    versions:
+      - version: "latest"
+        natsStreamingImage: "REPLACE_REGISTRY/nats-streaming:0.25.6"
+        metricsExporterImage: "REPLACE_REGISTRY/natsio/prometheus-nats-exporter:0.14.0"

@@ -1,0 +1,123 @@
+---
+# Alloy Deployment - Workload Cluster
+# Collects K8s events and sends to Azure Event Hub via OTLP/Kafka
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  namespace: monitoring
+  labels:
+    app: alloy
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alloy
+  template:
+    metadata:
+      labels:
+        app: alloy
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: alloy
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.12.2
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --storage.path=/var/lib/alloy/data
+            - --server.http.listen-addr=0.0.0.0:12345
+          ports:
+            - containerPort: 12345
+              name: http
+          env:
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: alloy-eventhub
+                  key: connection-string
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+            - name: data
+              mountPath: /var/lib/alloy/data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 12345
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 12345
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+        - name: data
+          emptyDir: {}
+---
+# ServiceAccount for Alloy
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: monitoring
+  labels:
+    app: alloy
+    app.kubernetes.io/part-of: k8s-event-triage
+---
+# ClusterRole - Alloy needs to watch K8s events
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy-k8s-events
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy-k8s-events
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: alloy-k8s-events
+  apiGroup: rbac.authorization.k8s.io
+---
+# Service for Alloy HTTP endpoint (health checks, metrics)
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy
+  namespace: monitoring
+  labels:
+    app: alloy
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  selector:
+    app: alloy
+  ports:
+    - port: 12345
+      targetPort: 12345
+      name: http

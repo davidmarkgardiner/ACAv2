@@ -1,0 +1,57 @@
+---
+# Sensor - Routes Event Hub events to triage workflow
+# Rate limited to 5/minute to prevent workflow storms
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: k8s-event-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  dependencies:
+    - name: k8s-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-events
+  triggers:
+    - template:
+        name: triage-workflow
+        conditions: "k8s-event"
+        rateLimit:
+          requestsPerUnit: 5
+          unit: Minute
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: k8s-triage-
+                namespace: argo-events
+                labels:
+                  app.kubernetes.io/part-of: k8s-event-triage
+              spec:
+                workflowTemplateRef:
+                  name: k8s-event-triage
+                arguments:
+                  parameters:
+                    - name: event-payload
+          parameters:
+            - src:
+                dependencyName: k8s-event
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+      retryStrategy:
+        steps: 3
+        duration: 10s

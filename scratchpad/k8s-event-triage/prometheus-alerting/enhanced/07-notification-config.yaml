@@ -1,0 +1,117 @@
+---
+# Notification Configuration
+# This ConfigMap contains webhook URLs and notification settings
+# 
+# IMPORTANT: For security, webhook URLs with tokens should be stored in Secrets
+# instead of ConfigMaps. Use this for non-sensitive configuration.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notification-config
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: notification
+data:
+  # Mattermost webhook URL (without the token)
+  # Format: http://mattermost.mattermost.svc.cluster.local:8065/hooks/
+  # The token should be stored in the mattermost-webhook-secret
+  MATTERMOST_WEBHOOK_URL: ""
+  
+  # Slack webhook URL (without the token)
+  # Format: https://hooks.slack.com/services/
+  # The token should be stored in the slack-webhook-secret
+  SLACK_WEBHOOK_URL: ""
+  
+  # Generic webhook URL for custom integrations
+  GENERIC_WEBHOOK_URL: ""
+  
+  # Notification settings
+  NOTIFICATION_TIMEOUT: "10"
+  NOTIFICATION_RETRIES: "3"
+  
+  # Default notification channels (comma-separated)
+  DEFAULT_CHANNELS: "mattermost"
+  
+  # Message formatting options
+  INCLUDE_QUICK_COMMANDS: "true"
+  INCLUDE_RUNBOOK_LINKS: "true"
+  INCLUDE_GITLAB_LINKS: "true"
+
+---
+# Secret template for Mattermost webhook token
+# Create this secret with the actual webhook token:
+#
+# kubectl create secret generic mattermost-webhook-secret \
+#   --namespace argo-events \
+#   --from-literal=WEBHOOK_TOKEN="your-webhook-token-here"
+#
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mattermost-webhook-secret
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: notification
+type: Opaque
+data:
+  # Base64 encoded webhook token
+  # echo -n "your-token" | base64
+  WEBHOOK_TOKEN: ""
+
+---
+# Secret template for Slack webhook token
+# Create this secret with the actual webhook token:
+#
+# kubectl create secret generic slack-webhook-secret \
+#   --namespace argo-events \
+#   --from-literal=WEBHOOK_TOKEN="your-webhook-token-here"
+#
+apiVersion: v1
+kind: Secret
+metadata:
+  name: slack-webhook-secret
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: notification
+type: Opaque
+data:
+  WEBHOOK_TOKEN: ""
+
+---
+# Secret template for GitLab token
+# Create this secret with your GitLab personal access token:
+#
+# kubectl create secret generic gitlab-mcp-secret \
+#   --namespace argo-events \
+#   --from-literal=GITLAB_PERSONAL_ACCESS_TOKEN="your-token-here"
+#
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitlab-mcp-secret
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: gitlab-integration
+type: Opaque
+data:
+  GITLAB_PERSONAL_ACCESS_TOKEN: ""
+
+---
+# Secret template for generic webhook authentication
+apiVersion: v1
+kind: Secret
+metadata:
+  name: generic-webhook-secret
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: notification
+type: Opaque
+data:
+  AUTH_TOKEN: ""
+  AUTH_HEADER: ""

@@ -1,0 +1,67 @@
+---
+# Service Account for Argo Events (EventSource + Sensor)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-events-sa
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+---
+# Sensor needs to create workflows in argo-events namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows", "workflowtemplates"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: sensor-workflow-creator
+  apiGroup: rbac.authorization.k8s.io
+---
+# Workflow pods need workflowtaskresults RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-executor
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflowtaskresults"]
+    verbs: ["create", "patch", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-executor
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: workflow-executor
+  apiGroup: rbac.authorization.k8s.io

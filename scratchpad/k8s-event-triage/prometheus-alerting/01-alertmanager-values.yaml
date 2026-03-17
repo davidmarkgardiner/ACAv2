@@ -1,0 +1,26 @@
+---
+# Helm values overlay - Add Argo Events webhook receiver to AlertManager
+# Usage: helm upgrade prometheus-stack prometheus-community/kube-prometheus-stack \
+#   --namespace monitoring --reuse-values -f 01-alertmanager-values.yaml
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: 'default-receiver'
+      group_by: ['alertname', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - receiver: 'argo-events-webhook'
+          matchers:
+            - alertname =~ "KubePod.*|KubeContainer.*|OOMKilled.*|PodHighRestarts|FailedScheduling|ContainerCPUHigh|ContainerMemoryHigh|PVCNearCapacity"
+          continue: true
+    receivers:
+      - name: 'default-receiver'
+      - name: 'argo-events-webhook'
+        webhook_configs:
+          - url: 'http://alertmanager-eventsource-svc.argo-events.svc.cluster.local:12000/alerts'
+            send_resolved: true
+            max_alerts: 10

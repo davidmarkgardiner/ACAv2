@@ -1,0 +1,88 @@
+---
+# Sensor - Route Event Hub OTLP events to triage workflow
+# NOTE: Event Hub messages are OTLP JSON envelopes (from Alloy otelcol.exporter.kafka),
+#       NOT raw K8s event JSON. Filtering is done inside the workflow, not here.
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: k8s-event-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  dependencies:
+    - name: k8s-event
+      eventSourceName: eventhub-k8s-events
+      eventName: k8s-events
+      # No filters — OTLP envelope structure doesn't match raw K8s event
+      # paths (body.type, body.reason, etc.). Filtering happens in the
+      # workflow's parse-otlp step instead.
+  triggers:
+    - template:
+        name: triage-workflow
+        conditions: "k8s-event"
+        rateLimit:
+          requestsPerUnit: 5
+          unit: Minute
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: k8s-triage-
+                namespace: argo-events
+                labels:
+                  app.kubernetes.io/part-of: k8s-event-triage
+                  event-type: k8s-event
+              spec:
+                workflowTemplateRef:
+                  name: k8s-event-triage
+                arguments:
+                  parameters:
+                    - name: otlp-payload
+          parameters:
+            # Pass the entire OTLP body as a single parameter
+            - src:
+                dependencyName: k8s-event
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+      retryStrategy:
+        steps: 3
+        duration: 10s
+---
+# RBAC for Sensor to create workflows
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows", "workflowtemplates"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sensor-workflow-creator
+  namespace: argo-events
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: Role
+  name: sensor-workflow-creator
+  apiGroup: rbac.authorization.k8s.io

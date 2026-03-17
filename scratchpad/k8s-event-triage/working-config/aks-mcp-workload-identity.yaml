@@ -1,0 +1,161 @@
+# AKS-MCP Server - Production deployment with Workload Identity (UAMI)
+# Extracted from working KRO definition (uk8s-aks-mcp.yaml)
+#
+# REPLACE before deploying:
+#   - <UAMI_CLIENT_ID>: Your User-Assigned Managed Identity client ID
+#   - <ACCESS_LEVEL>: readonly | readwrite | admin
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aks-mcp
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aks-mcp
+  namespace: aks-mcp
+  labels:
+    azure.workload.identity/use: "true"
+  annotations:
+    azure.workload.identity/client-id: "<UAMI_CLIENT_ID>"
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aks-mcp-admin
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "endpoints", "configmaps", "secrets", "namespaces", "nodes", "events", "persistentvolumeclaims", "persistentvolumes", "serviceaccounts"]
+    verbs: ["*"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "daemonsets", "statefulsets", "statefulsets/scale", "replicasets"]
+    verbs: ["*"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["*"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["*"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["*"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["*"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aks-mcp-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aks-mcp-admin
+subjects:
+  - kind: ServiceAccount
+    name: aks-mcp
+    namespace: aks-mcp
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aks-mcp
+  namespace: aks-mcp
+  labels:
+    app: aks-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aks-mcp
+  template:
+    metadata:
+      labels:
+        app: aks-mcp
+        azure.workload.identity/use: "true"       # CRITICAL: webhook injects token based on this pod label
+    spec:
+      serviceAccountName: aks-mcp
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532                           # mcp user inside the container
+        runAsGroup: 65532
+        fsGroup: 65532                             # CRITICAL: makes projected token volume readable
+      containers:
+        - name: aks-mcp
+          image: ghcr.io/azure/aks-mcp:v0.0.12
+          imagePullPolicy: IfNotPresent
+          args:
+            - --access-level=admin
+            - --transport=streamable-http
+            - --host=0.0.0.0
+            - --port=8000
+            - --timeout=600
+            - --log-level=debug
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: azure-cli-cache
+              mountPath: /home/mcp/.azure           # CRITICAL: az login writes token cache here
+            - name: kube-cache
+              mountPath: /home/mcp/.kube             # CRITICAL: az aks get-credentials writes kubeconfig here
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: azure-cli-cache
+          emptyDir: {}
+        - name: kube-cache
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aks-mcp
+  namespace: aks-mcp
+  labels:
+    app: aks-mcp
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: aks-mcp

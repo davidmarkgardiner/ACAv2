@@ -1,0 +1,48 @@
+---
+# Fault 1: CrashLoopBackOff in kro-system namespace
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-crashloop-kro
+  namespace: kro-system
+  labels:
+    app: kagent-test
+    test-type: crashloop
+spec:
+  containers:
+  - name: crash
+    image: busybox:latest
+    command: ["sh", "-c", "echo 'KRO component crash simulation'; exit 1"]
+    resources:
+      requests:
+        memory: "16Mi"
+        cpu: "10m"
+      limits:
+        memory: "32Mi"
+        cpu: "50m"
+  restartPolicy: Always
+---
+# Fault 2: ImagePullBackOff in kro-system namespace
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-bad-image-kro
+  namespace: kro-system
+  labels:
+    app: kagent-test
+    test-type: image-pull-error
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-bad-image-kro
+  template:
+    metadata:
+      labels:
+        app: test-bad-image-kro
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:nonexistent-tag-12345
+        ports:
+        - containerPort: 80

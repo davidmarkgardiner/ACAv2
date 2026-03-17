@@ -1,0 +1,510 @@
+---
+# Workflow Template - AlertManager Triage with GitLab Issue + Mattermost Notifications
+# Receives raw AlertManager webhook payload, creates GitLab issue, sends to Mattermost
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: alertmanager-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  ttlStrategy:
+    secondsAfterCompletion: 300
+    secondsAfterSuccess: 120
+    secondsAfterFailure: 600
+  podGC:
+    strategy: OnPodCompletion
+  arguments:
+    parameters:
+      - name: alert-payload
+        description: "Raw AlertManager webhook JSON payload"
+      - name: gitlab-project
+        description: "GitLab project for issue creation"
+        value: "davidmarkgardiner/mcp-test-repo"
+  templates:
+    - name: triage-pipeline
+      dag:
+        tasks:
+          - name: fetch-pod-details
+            template: fetch-pod-details
+            arguments:
+              parameters:
+                - name: payload
+                  value: "{{workflow.parameters.alert-payload}}"
+          - name: create-gitlab-issue
+            template: create-gitlab-issue
+            dependencies: [fetch-pod-details]
+            arguments:
+              parameters:
+                - name: payload
+                  value: "{{workflow.parameters.alert-payload}}"
+                - name: pod-details
+                  value: "{{tasks.fetch-pod-details.outputs.parameters.pod-details}}"
+          - name: notify-mattermost
+            template: notify-mattermost
+            dependencies: [fetch-pod-details, create-gitlab-issue]
+            arguments:
+              parameters:
+                - name: payload
+                  value: "{{workflow.parameters.alert-payload}}"
+                - name: issue-url
+                  value: "{{tasks.create-gitlab-issue.outputs.parameters.issue-url}}"
+                - name: pod-details
+                  value: "{{tasks.fetch-pod-details.outputs.parameters.pod-details}}"
+      failFast: false
+
+    # New Step: Fetch Pod Logs and Events
+    - name: fetch-pod-details
+      inputs:
+        parameters:
+          - name: payload
+      outputs:
+        parameters:
+          - name: pod-details
+            valueFrom:
+              path: /tmp/pod_details.json
+      script:
+        image: bitnami/kubectl:latest
+        command: [sh]
+        source: |
+          #!/bin/sh
+          # Fetches logs and events for the first firing alert's pod.
+          # Uses grep/sed for JSON parsing since bitnami/kubectl doesn't include jq.
+
+          echo "Processing payload to find pod details..."
+          cat > /tmp/payload.json << 'PAYLOAD_EOF'
+          {{inputs.parameters.payload}}
+          PAYLOAD_EOF
+
+          # Extract pod/namespace from the first alert using grep
+          NAMESPACE=$(grep -o '"namespace":"[^"]*"' /tmp/payload.json | head -1 | cut -d'"' -f4)
+          POD=$(grep -o '"pod":"[^"]*"' /tmp/payload.json | head -1 | cut -d'"' -f4)
+          STATUS=$(grep -o '"status":"[^"]*"' /tmp/payload.json | head -1 | cut -d'"' -f4)
+
+          echo "Found Pod: $POD in Namespace: $NAMESPACE (Status: $STATUS)"
+
+          # Initialize output
+          echo '{"error": "No pod info found"}' > /tmp/pod_details.json
+
+          if [ -n "$POD" ] && [ -n "$NAMESPACE" ] && [ "$POD" != "null" ]; then
+            echo "Fetching details for pod $POD..."
+
+            # Fetch logs, events, and describe output
+            LOGS=$(kubectl logs "$POD" -n "$NAMESPACE" --tail=50 2>&1 || echo "(no logs available)")
+            EVENTS_TXT=$(kubectl get events -n "$NAMESPACE" --field-selector involvedObject.name="$POD" --sort-by='.lastTimestamp' 2>&1 | tail -n 5 || echo "(no events)")
+            DESCRIBE=$(kubectl describe pod "$POD" -n "$NAMESPACE" 2>&1 | tail -n 30 || echo "(describe failed)")
+
+            # Write each field to a separate file, then assemble JSON safely
+            # This avoids issues with special chars in logs breaking string concatenation
+            printf '%s' "$POD" > /tmp/f_pod
+            printf '%s' "$NAMESPACE" > /tmp/f_ns
+            printf '%s' "$LOGS" > /tmp/f_logs
+            printf '%s' "$EVENTS_TXT" > /tmp/f_events
+            printf '%s' "$DESCRIBE" > /tmp/f_describe
+
+            # Build JSON using python if available, else use awk for safe escaping
+            if command -v python3 >/dev/null 2>&1; then
+              python3 -c "
+          import json, sys
+          d = {
+            'pod': open('/tmp/f_pod').read(),
+            'namespace': open('/tmp/f_ns').read(),
+            'logs': open('/tmp/f_logs').read(),
+            'events': open('/tmp/f_events').read(),
+            'describe': open('/tmp/f_describe').read()
+          }
+          json.dump(d, open('/tmp/pod_details.json','w'))
+          "
+            else
+              # Fallback: escape quotes and newlines for JSON safety
+              escape_json() { sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | awk '{printf "%s\\n", $0}' | sed '$ s/\\n$//'; }
+              E_POD=$(cat /tmp/f_pod | escape_json)
+              E_NS=$(cat /tmp/f_ns | escape_json)
+              E_LOGS=$(cat /tmp/f_logs | escape_json)
+              E_EVENTS=$(cat /tmp/f_events | escape_json)
+              E_DESCRIBE=$(cat /tmp/f_describe | escape_json)
+              printf '{"pod":"%s","namespace":"%s","logs":"%s","events":"%s","describe":"%s"}' \
+                "$E_POD" "$E_NS" "$E_LOGS" "$E_EVENTS" "$E_DESCRIBE" > /tmp/pod_details.json
+            fi
+            echo "Pod details collected successfully."
+          else
+            echo "No pod information found in alert payload."
+          fi
+
+    # Create GitLab issue for each alert group
+    - name: create-gitlab-issue
+      inputs:
+        parameters:
+          - name: payload
+          - name: pod-details
+      outputs:
+        parameters:
+          - name: issue-url
+            valueFrom:
+              path: /tmp/issue_url.txt
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        env:
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-mcp-secret
+                key: GITLAB_PERSONAL_ACCESS_TOKEN
+                optional: true
+        source: |
+          #!/bin/sh
+          # Note: no set -e - we handle errors gracefully so Mattermost step always runs
+
+          PROJECT="{{workflow.parameters.gitlab-project}}"
+          ENCODED_PROJECT=$(echo "$PROJECT" | sed 's/\//%2F/g')
+          WORKFLOW_NAME="{{workflow.name}}"
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          # Default fallback URL in case anything fails
+          echo "https://gitlab.com/${PROJECT}/issues" > /tmp/issue_url.txt
+          
+          # Save pod details
+          cat > /tmp/pod_details.json << 'DETAILS_EOF'
+          {{inputs.parameters.pod-details}}
+          DETAILS_EOF
+
+          # Check if GitLab token is available
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "WARNING: GITLAB_TOKEN not set, skipping issue creation"
+            exit 0
+          fi
+
+          # Write raw payload to file for jq processing
+          cat > /tmp/raw.json << 'PAYLOAD_EOF'
+          {{inputs.parameters.payload}}
+          PAYLOAD_EOF
+
+          STATUS=$(jq -r '.status // "unknown"' /tmp/raw.json)
+          ALERT_COUNT=$(jq '.alerts | length' /tmp/raw.json)
+
+          echo "Creating GitLab issues for $ALERT_COUNT alert(s)"
+
+          # Track the last issue URL (output for Mattermost step)
+          LAST_ISSUE_URL=""
+
+          INDEX=0
+          while [ "$INDEX" -lt "$ALERT_COUNT" ]; do
+            ALERTNAME=$(jq -r ".alerts[$INDEX].labels.alertname // \"Unknown\"" /tmp/raw.json)
+            SEVERITY=$(jq -r ".alerts[$INDEX].labels.severity // \"warning\"" /tmp/raw.json)
+            NAMESPACE=$(jq -r ".alerts[$INDEX].labels.namespace // \"unknown\"" /tmp/raw.json)
+            POD=$(jq -r ".alerts[$INDEX].labels.pod // \"\"" /tmp/raw.json)
+            CONTAINER=$(jq -r ".alerts[$INDEX].labels.container // \"\"" /tmp/raw.json)
+            ALERT_STATUS=$(jq -r ".alerts[$INDEX].status // \"$STATUS\"" /tmp/raw.json)
+            STARTS_AT=$(jq -r ".alerts[$INDEX].startsAt // \"\"" /tmp/raw.json | cut -c1-19)
+            SUMMARY=$(jq -r ".alerts[$INDEX].annotations.summary // \"No summary\"" /tmp/raw.json)
+            DESCRIPTION=$(jq -r ".alerts[$INDEX].annotations.description // \"\"" /tmp/raw.json)
+            RUNBOOK=$(jq -r ".alerts[$INDEX].annotations.runbook_url // \"\"" /tmp/raw.json)
+
+            # Build issue title
+            TITLE="[Prometheus] ${ALERTNAME}: ${NAMESPACE}"
+            if [ -n "$POD" ] && [ "$POD" != "" ]; then
+              TITLE="[Prometheus] ${ALERTNAME}: ${NAMESPACE}/${POD}"
+            fi
+
+            # Determine severity label
+            case "$SEVERITY" in
+              critical) SEVERITY_LABEL="severity-critical" ;;
+              warning)  SEVERITY_LABEL="severity-warning" ;;
+              *)        SEVERITY_LABEL="severity-info" ;;
+            esac
+
+            # Build description
+            echo "## Alert Summary" > /tmp/description.txt
+            echo "" >> /tmp/description.txt
+            echo "| Field | Value |" >> /tmp/description.txt
+            echo "|-------|-------|" >> /tmp/description.txt
+            echo "| **Alert** | \`${ALERTNAME}\` |" >> /tmp/description.txt
+            echo "| **Severity** | \`${SEVERITY}\` |" >> /tmp/description.txt
+            echo "| **Status** | \`${ALERT_STATUS}\` |" >> /tmp/description.txt
+            echo "| **Namespace** | \`${NAMESPACE}\` |" >> /tmp/description.txt
+            if [ -n "$POD" ] && [ "$POD" != "" ]; then
+              echo "| **Pod** | \`${POD}\` |" >> /tmp/description.txt
+            fi
+            if [ -n "$CONTAINER" ] && [ "$CONTAINER" != "" ]; then
+              echo "| **Container** | \`${CONTAINER}\` |" >> /tmp/description.txt
+            fi
+            echo "| **Started** | ${STARTS_AT} |" >> /tmp/description.txt
+            echo "| **Detected** | ${TIMESTAMP} |" >> /tmp/description.txt
+            echo "| **Workflow** | ${WORKFLOW_NAME} |" >> /tmp/description.txt
+            echo "" >> /tmp/description.txt
+            echo "## Summary" >> /tmp/description.txt
+            echo "" >> /tmp/description.txt
+            echo "${SUMMARY}" >> /tmp/description.txt
+            echo "" >> /tmp/description.txt
+            if [ -n "$DESCRIPTION" ] && [ "$DESCRIPTION" != "" ]; then
+              echo "## Description" >> /tmp/description.txt
+              echo "" >> /tmp/description.txt
+              echo "${DESCRIPTION}" >> /tmp/description.txt
+              echo "" >> /tmp/description.txt
+            fi
+            if [ -n "$RUNBOOK" ] && [ "$RUNBOOK" != "" ]; then
+              echo "## Runbook" >> /tmp/description.txt
+              echo "" >> /tmp/description.txt
+              echo "[View Runbook](${RUNBOOK})" >> /tmp/description.txt
+              echo "" >> /tmp/description.txt
+            fi
+            
+            # Add Pod Logs/Events if available for this specific pod
+            FETCHED_POD=$(jq -r '.pod // ""' /tmp/pod_details.json)
+            FETCHED_NS=$(jq -r '.namespace // ""' /tmp/pod_details.json)
+            
+            if [ "$POD" = "$FETCHED_POD" ] && [ "$NAMESPACE" = "$FETCHED_NS" ]; then
+                LOGS=$(jq -r '.logs // ""' /tmp/pod_details.json)
+                EVENTS=$(jq -r '.events // ""' /tmp/pod_details.json)
+                
+                if [ -n "$LOGS" ] && [ "$LOGS" != "" ]; then
+                  echo "## Pod Logs" >> /tmp/description.txt
+                  echo "\`\`\`" >> /tmp/description.txt
+                  echo "$LOGS" >> /tmp/description.txt
+                  echo "\`\`\`" >> /tmp/description.txt
+                  echo "" >> /tmp/description.txt
+                fi
+                
+                if [ -n "$EVENTS" ] && [ "$EVENTS" != "" ]; then
+                  echo "## Pod Events" >> /tmp/description.txt
+                  echo "\`\`\`" >> /tmp/description.txt
+                  echo "$EVENTS" >> /tmp/description.txt
+                  echo "\`\`\`" >> /tmp/description.txt
+                  echo "" >> /tmp/description.txt
+                fi
+            fi
+
+            if [ -n "$POD" ] && [ "$POD" != "" ]; then
+              echo "## Quick Commands" >> /tmp/description.txt
+              echo "" >> /tmp/description.txt
+              echo "\`\`\`bash" >> /tmp/description.txt
+              echo "kubectl describe pod ${POD} -n ${NAMESPACE} | tail -30" >> /tmp/description.txt
+              echo "kubectl logs ${POD} -n ${NAMESPACE} --tail=100" >> /tmp/description.txt
+              echo "kubectl get pod ${POD} -n ${NAMESPACE} -o wide" >> /tmp/description.txt
+              echo "kubectl get events -n ${NAMESPACE} --field-selector involvedObject.name=${POD} --sort-by='.lastTimestamp'" >> /tmp/description.txt
+              echo "\`\`\`" >> /tmp/description.txt
+              echo "" >> /tmp/description.txt
+            fi
+            echo "---" >> /tmp/description.txt
+            echo "*Auto-generated by Prometheus Alert Triage Pipeline*" >> /tmp/description.txt
+
+            ISSUE_DESC=$(cat /tmp/description.txt)
+
+            # Build JSON payload with jq
+            jq -n \
+              --arg title "$TITLE" \
+              --arg desc "$ISSUE_DESC" \
+              --arg labels "prometheus-alert,auto-generated,${ALERTNAME},${SEVERITY_LABEL}" \
+              '{title: $title, description: $desc, labels: $labels}' > /tmp/issue_payload.json
+
+            echo "[$((INDEX+1))/$ALERT_COUNT] Creating issue: $TITLE"
+
+            curl -s -X POST \
+              "https://gitlab.com/api/v4/projects/${ENCODED_PROJECT}/issues" \
+              -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/issue_payload.json > /tmp/gitlab_response.json
+
+            ISSUE_URL=$(jq -r '.web_url // empty' /tmp/gitlab_response.json)
+
+            if [ -n "$ISSUE_URL" ]; then
+              echo "  -> Issue created: $ISSUE_URL"
+              LAST_ISSUE_URL="$ISSUE_URL"
+            else
+              ERROR=$(jq -r '.message // .error // empty' /tmp/gitlab_response.json)
+              echo "  -> GitLab API Error: $ERROR"
+              LAST_ISSUE_URL="https://gitlab.com/${PROJECT}/issues"
+            fi
+
+            INDEX=$((INDEX + 1))
+          done
+
+          # Output the last issue URL (or project issues page if multiple)
+          if [ "$ALERT_COUNT" -gt 1 ] && [ -n "$LAST_ISSUE_URL" ]; then
+            echo "https://gitlab.com/${PROJECT}/-/issues?label_name=prometheus-alert" > /tmp/issue_url.txt
+          elif [ -n "$LAST_ISSUE_URL" ]; then
+            echo "$LAST_ISSUE_URL" > /tmp/issue_url.txt
+          else
+            echo "https://gitlab.com/${PROJECT}/issues" > /tmp/issue_url.txt
+          fi
+
+          echo "Done creating issues for $ALERT_COUNT alert(s)"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    # Send Mattermost notification with GitLab issue link
+    - name: notify-mattermost
+      inputs:
+        parameters:
+          - name: payload
+          - name: issue-url
+          - name: pod-details
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        env:
+          - name: WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: mattermost-webhook-config
+                key: WEBHOOK_URL
+        source: |
+          #!/bin/sh
+          set -e
+
+          ISSUE_URL='{{inputs.parameters.issue-url}}'
+          
+          cat > /tmp/pod_details.json << 'DETAILS_EOF'
+          {{inputs.parameters.pod-details}}
+          DETAILS_EOF
+
+          # Write raw payload to file for jq processing
+          cat > /tmp/raw.json << 'PAYLOAD_EOF'
+          {{inputs.parameters.payload}}
+          PAYLOAD_EOF
+
+          STATUS=$(jq -r '.status // "unknown"' /tmp/raw.json)
+          ALERT_COUNT=$(jq '.alerts | length' /tmp/raw.json)
+
+          echo "Processing $ALERT_COUNT alert(s), status: $STATUS"
+
+          # Process each alert
+          INDEX=0
+          while [ "$INDEX" -lt "$ALERT_COUNT" ]; do
+            ALERTNAME=$(jq -r ".alerts[$INDEX].labels.alertname // \"Unknown\"" /tmp/raw.json)
+            SEVERITY=$(jq -r ".alerts[$INDEX].labels.severity // \"warning\"" /tmp/raw.json)
+            NAMESPACE=$(jq -r ".alerts[$INDEX].labels.namespace // \"unknown\"" /tmp/raw.json)
+            POD=$(jq -r ".alerts[$INDEX].labels.pod // \"\"" /tmp/raw.json)
+            CONTAINER=$(jq -r ".alerts[$INDEX].labels.container // \"\"" /tmp/raw.json)
+            ALERT_STATUS=$(jq -r ".alerts[$INDEX].status // \"$STATUS\"" /tmp/raw.json)
+            STARTS_AT=$(jq -r ".alerts[$INDEX].startsAt // \"\"" /tmp/raw.json | cut -c1-19)
+            SUMMARY=$(jq -r ".alerts[$INDEX].annotations.summary // \"No summary\"" /tmp/raw.json)
+            DESCRIPTION=$(jq -r ".alerts[$INDEX].annotations.description // \"\"" /tmp/raw.json)
+            RUNBOOK=$(jq -r ".alerts[$INDEX].annotations.runbook_url // \"\"" /tmp/raw.json)
+
+            # Severity emoji for Mattermost
+            case "$SEVERITY" in
+              critical) EMOJI=":red_circle:" ; COLOR="#e74c3c" ;;
+              warning)  EMOJI=":large_orange_circle:" ; COLOR="#e67e22" ;;
+              *)        EMOJI=":white_circle:" ; COLOR="#95a5a6" ;;
+            esac
+
+            # Status indicator
+            case "$ALERT_STATUS" in
+              firing)   STATUS_ICON=":fire:" ;;
+              resolved) STATUS_ICON=":white_check_mark:" ;;
+              *)        STATUS_ICON=":question:" ;;
+            esac
+
+            # Build pod/container info
+            RESOURCE_INFO=""
+            if [ -n "$POD" ] && [ "$POD" != "" ]; then
+              RESOURCE_INFO="| **Pod** | \`$POD\` |\n"
+            fi
+            if [ -n "$CONTAINER" ] && [ "$CONTAINER" != "" ]; then
+              RESOURCE_INFO="${RESOURCE_INFO}| **Container** | \`$CONTAINER\` |\n"
+            fi
+
+            # Build runbook link
+            RUNBOOK_LINE=""
+            if [ -n "$RUNBOOK" ] && [ "$RUNBOOK" != "" ]; then
+              RUNBOOK_LINE="\n:book: [Runbook]($RUNBOOK)"
+            fi
+
+            # Build quick commands
+            QUICK_CMDS=""
+            if [ -n "$POD" ] && [ "$POD" != "" ]; then
+              QUICK_CMDS="kubectl describe pod $POD -n $NAMESPACE | tail -30\nkubectl logs $POD -n $NAMESPACE --tail=50"
+            fi
+            
+            # Add logs section if relevant for this pod
+            LOGS_SECTION=""
+            FETCHED_POD=$(jq -r '.pod // ""' /tmp/pod_details.json)
+            FETCHED_NS=$(jq -r '.namespace // ""' /tmp/pod_details.json)
+            
+            if [ "$POD" = "$FETCHED_POD" ] && [ "$NAMESPACE" = "$FETCHED_NS" ]; then
+                LOGS=$(jq -r '.logs // ""' /tmp/pod_details.json)
+                if [ -n "$LOGS" ] && [ "$LOGS" != "" ]; then
+                    LOGS_SECTION="**Recent Logs:**\n\`\`\`\n$LOGS\n\`\`\`"
+                fi
+            fi
+
+            # Build Mattermost payload with attachments
+            jq -n \
+              --arg emoji "$EMOJI" \
+              --arg status_icon "$STATUS_ICON" \
+              --arg alertname "$ALERTNAME" \
+              --arg severity "$SEVERITY" \
+              --arg alert_status "$ALERT_STATUS" \
+              --arg namespace "$NAMESPACE" \
+              --arg resource_info "$RESOURCE_INFO" \
+              --arg summary "$SUMMARY" \
+              --arg description "$DESCRIPTION" \
+              --arg starts_at "$STARTS_AT" \
+              --arg runbook_line "$RUNBOOK_LINE" \
+              --arg quick_cmds "$QUICK_CMDS" \
+              --arg logs_section "$LOGS_SECTION" \
+              --arg color "$COLOR" \
+              --arg issue_url "$ISSUE_URL" \
+              '{
+                username: "Prometheus Alert Triage",
+                icon_emoji: ":rotating_light:",
+                text: ($emoji + " " + $status_icon + " **" + $alertname + "**"),
+                attachments: [
+                  {
+                    fallback: ($alertname + " - " + $severity),
+                    color: $color,
+                    title: $summary,
+                    text: ("| Field | Value |\n|-------|-------|\n| **Severity** | " + $severity + " |\n| **Status** | " + $alert_status + " |\n| **Namespace** | `" + $namespace + "` |\n" + $resource_info + "| **Time** | " + $starts_at + " |"),
+                    fields: []
+                  },
+                  {
+                    fallback: "Description",
+                    color: $color,
+                    title: "Details",
+                    text: ($description + $runbook_line + "\n" + $logs_section)
+                  }
+                ] + (if ($quick_cmds | length) > 0 then [{
+                  fallback: "Quick Commands",
+                  color: "#3498db",
+                  title: "Quick Commands",
+                  text: ("```\n" + $quick_cmds + "\n```")
+                }] else [] end) + [{
+                  fallback: "GitLab Issue",
+                  color: "#fc6d26",
+                  title: "GitLab Issue",
+                  title_link: $issue_url,
+                  text: (":link: [View Issue in GitLab](" + $issue_url + ")")
+                }]
+              }' > /tmp/mm_payload.json
+
+            echo "[$((INDEX+1))/$ALERT_COUNT] Sending: $ALERTNAME ($SEVERITY/$ALERT_STATUS)"
+
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/mm_payload.json \
+              --max-time 10 2>&1)
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            echo "  -> HTTP $HTTP_CODE"
+
+            INDEX=$((INDEX + 1))
+          done
+
+          echo "Done processing $ALERT_COUNT alert(s)"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

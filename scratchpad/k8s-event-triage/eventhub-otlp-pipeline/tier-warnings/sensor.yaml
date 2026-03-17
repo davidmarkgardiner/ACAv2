@@ -1,0 +1,59 @@
+---
+# Sensor - Warnings tier (best effort)
+# Rate limit: 10/min — higher volume, KAgent works through the queue
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: k8s-triage-warnings
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: warnings
+spec:
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  dependencies:
+    - name: k8s-event
+      eventSourceName: eventhub-warnings
+      eventName: k8s-events
+  triggers:
+    - template:
+        name: warning-triage
+        conditions: "k8s-event"
+        rateLimit:
+          requestsPerUnit: 10
+          unit: Minute
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: triage-warning-
+                namespace: argo-events
+                labels:
+                  app.kubernetes.io/part-of: k8s-event-triage
+                  triage-tier: warnings
+              spec:
+                workflowTemplateRef:
+                  name: k8s-triage-warnings
+                arguments:
+                  parameters:
+                    - name: otlp-payload
+          parameters:
+            - src:
+                dependencyName: k8s-event
+                dataKey: body
+              dest: spec.arguments.parameters.0.value
+      retryStrategy:
+        steps: 3
+        duration: 10s

@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-events-triage-role
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-events-triage-binding
+  labels:
+    app.kubernetes.io/part-of: prometheus-alerting
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-sa
+    namespace: argo-events
+roleRef:
+  kind: ClusterRole
+  name: argo-events-triage-role
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,76 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "event_namespace": {
+                "type": "string",
+                "description": "Kubernetes namespace where the event occurred"
+              },
+              "event_reason": {
+                "type": "string",
+                "description": "K8s event reason (e.g., BackOff, ImagePullBackOff, OOMKilled)"
+              },
+              "resource_kind": {
+                "type": "string",
+                "description": "K8s resource type (e.g., Pod, Deployment, StatefulSet)"
+              },
+              "resource_name": {
+                "type": "string",
+                "description": "Name of the affected K8s resource"
+              },
+              "agent_diagnosis": {
+                "type": "string",
+                "description": "Full kagent AI diagnosis in markdown — includes root cause, remediation steps, risk level, verification commands"
+              },
+              "risk_level": {
+                "type": "string",
+                "description": "Risk assessment: Low, Medium, High, or unknown"
+              },
+              "timestamp": {
+                "type": "string",
+                "description": "ISO 8601 timestamp of when the diagnosis was generated"
+              },
+              "source": {
+                "type": "string",
+                "description": "Always 'kagent-triage-workflow'"
+              },
+              "cluster": {
+                "type": "string",
+                "description": "Name of the K8s cluster where the event originated"
+              }
+            },
+            "required": [
+              "event_namespace",
+              "event_reason",
+              "resource_kind",
+              "resource_name",
+              "agent_diagnosis"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Response": {
+        "type": "Response",
+        "kind": "Http",
+        "inputs": {
+          "statusCode": 200,
+          "body": {
+            "status": "received",
+            "message": "Triage event logged successfully"
+          }
+        },
+        "runAfter": {}
+      }
+    }
+  }
+}

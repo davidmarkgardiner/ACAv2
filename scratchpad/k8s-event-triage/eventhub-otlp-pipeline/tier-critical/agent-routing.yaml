@@ -1,0 +1,140 @@
+---
+# Agent Routing ConfigMap
+#
+# Controls which KAgent agent handles each event based on namespace or reason.
+# Update this ConfigMap to add specialist agents — no workflow redeployment needed.
+#
+# ============================================================================
+# HOW IT WORKS
+# ============================================================================
+#
+# When a K8s event comes in, the workflow picks an agent using this priority:
+#
+#   1. namespace-routes  →  Does the event's namespace match? Use that agent.
+#   2. reason-routes     →  Does the event's reason match? Use that agent.
+#   3. default-triage / default-remediation  →  Fallback for everything else.
+#
+# First match wins. If cert-manager namespace matches, it won't check reason-routes.
+#
+# ============================================================================
+# EXAMPLES
+# ============================================================================
+#
+# --- Example 1: Default (what's configured now) ---
+#
+# All events go to sre-triage-agent (read-only) or sre-remediation-agent (read-write).
+# No specialist routing. This is the starting point.
+#
+#   Event: CrashLoopBackOff in payments namespace
+#   → No namespace match, no reason match → sre-triage-agent
+#
+#   Event: OOMKilled in cert-manager namespace
+#   → No namespace match, no reason match → sre-triage-agent
+#
+# --- Example 2: Namespace routing ---
+#
+# You create a cert-manager-agent that knows about certificates, issuers, etc.
+# Set namespace-routes to:
+#
+#   {"cert-manager": "cert-manager-agent"}
+#
+# Now:
+#   Event: CrashLoopBackOff in payments namespace
+#   → No namespace match → falls through to default → sre-triage-agent
+#
+#   Event: OOMKilled in cert-manager namespace
+#   → Namespace matches "cert-manager" → cert-manager-agent
+#
+# --- Example 3: Multiple namespace specialists ---
+#
+# You've got agents for cert-manager, networking, and DNS:
+#
+#   {
+#     "cert-manager": "cert-manager-agent",
+#     "ingress-nginx": "network-specialist-agent",
+#     "external-dns": "dns-specialist-agent"
+#   }
+#
+# Now:
+#   Event: FailedMount in cert-manager    → cert-manager-agent
+#   Event: CrashLoopBackOff in ingress-nginx → network-specialist-agent
+#   Event: OOMKilled in payments          → sre-triage-agent (no match, default)
+#
+# --- Example 4: Reason routing ---
+#
+# You create a storage-specialist-agent for volume issues.
+# Set reason-routes to:
+#
+#   {"FailedMount": "storage-specialist-agent", "FailedAttachVolume": "storage-specialist-agent"}
+#
+# Now:
+#   Event: FailedMount in payments namespace
+#   → No namespace match → reason matches "FailedMount" → storage-specialist-agent
+#
+#   Event: CrashLoopBackOff in payments namespace
+#   → No namespace match → no reason match → sre-triage-agent (default)
+#
+# --- Example 5: Namespace AND reason routing together ---
+#
+# namespace-routes: {"cert-manager": "cert-manager-agent"}
+# reason-routes:    {"FailedMount": "storage-specialist-agent"}
+#
+# Now:
+#   Event: FailedMount in cert-manager namespace
+#   → Namespace matches "cert-manager" → cert-manager-agent
+#     (namespace wins — reason-routes is NOT checked)
+#
+#   Event: FailedMount in payments namespace
+#   → No namespace match → reason matches "FailedMount" → storage-specialist-agent
+#
+#   Event: CrashLoopBackOff in payments namespace
+#   → No namespace match → no reason match → sre-triage-agent (default)
+#
+# ============================================================================
+# HOW TO ADD A NEW SPECIALIST AGENT
+# ============================================================================
+#
+# Step 1: Create the agent CRD in kagent namespace
+#   kubectl apply -f my-specialist-agent.yaml -n kagent
+#
+# Step 2: Update this ConfigMap (no workflow redeployment needed)
+#   kubectl patch configmap agent-routing -n argo-events --type merge \
+#     -p '{"data":{"namespace-routes":"{\"my-namespace\":\"my-specialist-agent\"}"}}'
+#
+# Step 3: Test it
+#   Submit a test workflow with an event from that namespace.
+#   Check the step name in `argo get` — it shows target_agent in the step params.
+#
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-routing
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+data:
+  # Default agents — used when no namespace/reason route matches
+  default-triage: "sre-triage-agent"
+  default-remediation: "sre-remediation-agent"
+
+  # Namespace-based routing (JSON object)
+  # Keys = Kubernetes namespace name
+  # Values = KAgent agent name (must exist as an Agent CRD in kagent namespace)
+  #
+  # Empty {} means no namespace routing — all events use the default agent.
+  # To activate, replace {} with your mapping, e.g.:
+  #   {"cert-manager": "cert-manager-agent", "ingress-nginx": "network-specialist-agent"}
+  namespace-routes: |
+    {}
+
+  # Reason-based routing (JSON object)
+  # Keys = K8s event reason (e.g. CrashLoopBackOff, FailedMount, OOMKilled)
+  # Values = KAgent agent name (must exist as an Agent CRD in kagent namespace)
+  #
+  # Only checked if namespace-routes didn't match.
+  # Empty {} means no reason routing — all events use the default agent.
+  # To activate, replace {} with your mapping, e.g.:
+  #   {"FailedMount": "storage-specialist-agent", "FailedAttachVolume": "storage-specialist-agent"}
+  reason-routes: |
+    {}

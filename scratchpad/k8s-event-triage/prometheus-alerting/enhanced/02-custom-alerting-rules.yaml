@@ -1,0 +1,358 @@
+---
+# Enhanced PrometheusRule CRD - Comprehensive alert rules for k8s event triage
+# These rules trigger the Argo Events triage pipeline via AlertManager webhook
+#
+# Improvements over original:
+# - More alert types (CrashLoop, ImagePull, Node pressure, etc.)
+# - Better expressions with reduced false positives
+# - Grouping by alert category
+# - Additional labels for routing
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: k8s-triage-alerting-rules
+  namespace: monitoring
+  labels:
+    release: monitoring-kube-prometheus
+    app.kubernetes.io/part-of: prometheus-alerting
+    app.kubernetes.io/component: alerting-rules
+spec:
+  groups:
+    # =========================================================================
+    # Pod Failure Alerts - Critical pod lifecycle events
+    # =========================================================================
+    - name: pod-failure-alerts
+      interval: 30s
+      rules:
+        # OOMKilled containers - immediate notification
+        - alert: OOMKilledContainer
+          expr: |
+            kube_pod_container_status_last_terminated_reason{
+              reason="OOMKilled",
+              namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+            } > 0
+          for: 0m
+          labels:
+            severity: critical
+            category: pod-failure
+            triage: "true"
+            auto_remediate: "true"
+          annotations:
+            summary: "Container OOMKilled in {{ $labels.namespace }}/{{ $labels.pod }}"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) 
+              was terminated due to Out of Memory (OOMKilled).
+              
+              The container exceeded its memory limit. Consider increasing the memory limit
+              or investigating memory leaks in the application.
+            runbook_url: "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodcrashlooping"
+            dashboard_url: "https://grafana/d/prometheus-alert-triage"
+
+        # High restart rate pods - warning threshold
+        - alert: PodHighRestarts
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+            }[10m]) > 3
+          for: 1m
+          labels:
+            severity: warning
+            category: pod-failure
+            triage: "true"
+          annotations:
+            summary: "Pod {{ $labels.pod }} restarting frequently in {{ $labels.namespace }}"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) 
+              has restarted more than 3 times in the last 10 minutes.
+              This may indicate a crash loop or application instability.
+
+        # CrashLoopBackOff detection
+        - alert: PodCrashLoopBackOff
+          expr: |
+            kube_pod_container_status_waiting_reason{
+              reason="CrashLoopBackOff",
+              namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+            } > 0
+          for: 2m
+          labels:
+            severity: critical
+            category: pod-failure
+            triage: "true"
+            auto_remediate: "true"
+          annotations:
+            summary: "Pod {{ $labels.pod }} in CrashLoopBackOff in {{ $labels.namespace }}"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }})
+              is in CrashLoopBackOff state. The container keeps crashing and restarting.
+              Check container logs: kubectl logs {{ $labels.pod }} -n {{ $labels.namespace }} --previous
+
+        # ImagePullBackOff detection
+        - alert: PodImagePullBackOff
+          expr: |
+            kube_pod_container_status_waiting_reason{
+              reason=~"ImagePullBackOff|ErrImagePull",
+              namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+            } > 0
+          for: 2m
+          labels:
+            severity: warning
+            category: pod-failure
+            triage: "true"
+          annotations:
+            summary: "Pod {{ $labels.pod }} cannot pull image in {{ $labels.namespace }}"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }})
+              is experiencing ImagePullBackOff. The image cannot be pulled from the registry.
+              Possible causes: invalid image name, missing credentials, or registry unavailable.
+
+        # Container waiting too long
+        - alert: ContainerWaitingTooLong
+          expr: |
+            kube_pod_container_status_waiting_reason{
+              reason=~"ContainerCreating|PodInitializing",
+              namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+            } > 0
+          for: 5m
+          labels:
+            severity: warning
+            category: pod-failure
+            triage: "true"
+          annotations:
+            summary: "Container {{ $labels.container }} waiting too long in {{ $labels.namespace }}"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }})
+              has been waiting for more than 5 minutes. Current reason: {{ $labels.reason }}
+
+    # =========================================================================
+    # Scheduling Alerts - Pod placement and scheduling issues
+    # =========================================================================
+    - name: scheduling-alerts
+      interval: 30s
+      rules:
+        # Failed scheduling
+        - alert: FailedScheduling
+          expr: |
+            kube_pod_status_unschedulable{
+              namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+            } > 0
+          for: 2m
+          labels:
+            severity: warning
+            category: scheduling
+            triage: "true"
+          annotations:
+            summary: "Pod {{ $labels.pod }} cannot be scheduled in {{ $labels.namespace }}"
+            description: |
+              Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been unschedulable 
+              for more than 2 minutes. Check node resources, taints/tolerations, and pod affinity rules.
+              
+              Describe command: kubectl describe pod {{ $labels.pod }} -n {{ $labels.namespace }}
+
+        # Node resource pressure affecting scheduling
+        - alert: NodeMemoryPressure
+          expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
+          for: 2m
+          labels:
+            severity: critical
+            category: node
+            triage: "true"
+          annotations:
+            summary: "Node {{ $labels.node }} is under memory pressure"
+            description: |
+              Node {{ $labels.node }} is experiencing memory pressure. New pods will not be scheduled
+              on this node until the condition resolves. Consider scaling the cluster or evicting pods.
+
+        - alert: NodeDiskPressure
+          expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+          for: 2m
+          labels:
+            severity: critical
+            category: node
+            triage: "true"
+          annotations:
+            summary: "Node {{ $labels.node }} is under disk pressure"
+            description: |
+              Node {{ $labels.node }} is experiencing disk pressure. New pods will not be scheduled
+              on this node. Clean up unused images or expand node storage.
+
+        - alert: NodePIDPressure
+          expr: kube_node_status_condition{condition="PIDPressure",status="true"} == 1
+          for: 2m
+          labels:
+            severity: warning
+            category: node
+            triage: "true"
+          annotations:
+            summary: "Node {{ $labels.node }} is under PID pressure"
+            description: |
+              Node {{ $labels.node }} is running too many processes. Consider increasing max PIDs
+              or investigating process leaks.
+
+    # =========================================================================
+    # Resource Threshold Alerts - Capacity planning indicators
+    # =========================================================================
+    - name: resource-threshold-alerts
+      interval: 60s
+      rules:
+        # CPU usage approaching limit
+        - alert: ContainerCPUHigh
+          expr: |
+            (
+              rate(container_cpu_usage_seconds_total{
+                container!="",
+                container!="POD",
+                namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+              }[5m])
+              / on(namespace, pod, container) kube_pod_container_resource_limits{resource="cpu"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            category: resources
+            triage: "true"
+          annotations:
+            summary: "High CPU usage in {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) 
+              is using more than 80% of its CPU limit for more than 5 minutes.
+              Consider increasing CPU limits or optimizing the application.
+
+        # Memory usage approaching limit
+        - alert: ContainerMemoryHigh
+          expr: |
+            (
+              container_memory_working_set_bytes{
+                container!="",
+                container!="POD",
+                namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+              }
+              / on(namespace, pod, container) kube_pod_container_resource_limits{resource="memory"}
+            ) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            category: resources
+            triage: "true"
+          annotations:
+            summary: "High memory usage in {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace: {{ $labels.namespace }}) 
+              is using more than 85% of its memory limit for more than 5 minutes.
+              Risk of OOMKilled - consider increasing memory limits.
+
+        # PVC near capacity
+        - alert: PVCNearCapacity
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{
+                namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+              }
+              / kubelet_volume_stats_capacity_bytes
+            ) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            category: storage
+            triage: "true"
+          annotations:
+            summary: "PVC near capacity in {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}"
+            description: |
+              PVC {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} is using 
+              more than 85% of its capacity. Consider expanding the volume or cleaning up data.
+
+        # PVC critically full
+        - alert: PVCCriticalCapacity
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{
+                namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+              }
+              / kubelet_volume_stats_capacity_bytes
+            ) > 0.95
+          for: 1m
+          labels:
+            severity: critical
+            category: storage
+            triage: "true"
+          annotations:
+            summary: "PVC critically full in {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}"
+            description: |
+              PVC {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} is using 
+              more than 95% of its capacity. Immediate action required to prevent write failures!
+
+    # =========================================================================
+    # Node Health Alerts - Cluster infrastructure health
+    # =========================================================================
+    - name: node-health-alerts
+      interval: 60s
+      rules:
+        # Node not ready
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            category: node
+            triage: "true"
+          annotations:
+            summary: "Node {{ $labels.node }} is not ready"
+            description: |
+              Node {{ $labels.node }} has been not ready for more than 5 minutes.
+              Check node status: kubectl describe node {{ $labels.node }}
+
+        # Node high CPU
+        - alert: NodeHighCPU
+          expr: |
+            100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+          for: 10m
+          labels:
+            severity: warning
+            category: node
+            triage: "true"
+          annotations:
+            summary: "Node {{ $labels.instance }} has high CPU usage"
+            description: |
+              Node {{ $labels.instance }} CPU usage is above 85% for more than 10 minutes.
+              Consider scaling the cluster or redistributing workloads.
+
+        # Node high memory
+        - alert: NodeHighMemory
+          expr: |
+            (
+              node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes
+            ) / node_memory_MemTotal_bytes * 100 > 85
+          for: 10m
+          labels:
+            severity: warning
+            category: node
+            triage: "true"
+          annotations:
+            summary: "Node {{ $labels.instance }} has high memory usage"
+            description: |
+              Node {{ $labels.instance }} memory usage is above 85% for more than 10 minutes.
+              Consider scaling the cluster or investigating memory-intensive pods.
+
+    # =========================================================================
+    # Application Health Alerts - Service-level indicators
+    # =========================================================================
+    - name: application-health-alerts
+      interval: 60s
+      rules:
+        # Pod not ready for extended period
+        - alert: PodNotReady
+          expr: |
+            kube_pod_status_ready{
+              condition="true",
+              namespace!~"kube-system|kube-public|kube-node-lease|argo-events|argo|monitoring|calico.*|tigera.*"
+            } == 0
+          for: 10m
+          labels:
+            severity: warning
+            category: application
+            triage: "true"
+          annotations:
+            summary: "Pod {{ $labels.pod }} not ready in {{ $labels.namespace }}"
+            description: |
+              Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been not ready 
+              for more than 10 minutes. Check pod status and logs for issues.

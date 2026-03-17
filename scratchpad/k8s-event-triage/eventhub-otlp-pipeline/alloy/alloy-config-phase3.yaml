@@ -1,0 +1,141 @@
+---
+# Grafana Alloy - Phase 3: App namespaces + core infra namespaces
+#
+# Same pipeline as Phase 1, just with expanded namespace list.
+# Consumer-side filtering handles tier routing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: monitoring
+  labels:
+    app: alloy
+    app.kubernetes.io/part-of: k8s-event-triage
+data:
+  config.alloy: |
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+
+    // =========================================================================
+    // Phase 3: App namespaces + core infrastructure namespaces
+    // =========================================================================
+    loki.source.kubernetes_events "cluster_events" {
+      namespaces = [
+        // --- App namespaces (Phase 1) ---
+        "REPLACE_APP_NAMESPACE_1",
+        "REPLACE_APP_NAMESPACE_2",
+
+        // --- Core infra namespaces (Phase 3) ---
+        "external-dns",
+        "cert-manager",
+        "ingress-nginx",
+        "kube-system",
+        "monitoring",
+        "argo-events",
+        "argo",
+        // Add other infrastructure namespaces as needed
+      ]
+      job_name   = "kubernetes-events"
+      log_format = "json"
+
+      forward_to = [loki.process.enrich.receiver]
+    }
+
+    // =========================================================================
+    // Event Enrichment (identical to Phase 1)
+    // =========================================================================
+    loki.process "enrich" {
+      stage.static_labels {
+        values = {
+          cluster     = "REPLACE_CLUSTER_NAME",
+          environment = "REPLACE_ENVIRONMENT",
+          region      = "REPLACE_AZURE_REGION",
+          source      = "alloy",
+        }
+      }
+
+      stage.json {
+        expressions = {
+          event_type     = "type",
+          event_reason   = "reason",
+          event_message  = "message",
+          event_count    = "count",
+          obj_kind       = "involvedObject.kind",
+          obj_name       = "involvedObject.name",
+          obj_namespace  = "involvedObject.namespace",
+          obj_uid        = "involvedObject.uid",
+          first_time     = "firstTimestamp",
+          last_time      = "lastTimestamp",
+          source_comp    = "source.component",
+          source_host    = "source.host",
+        }
+      }
+
+      stage.labels {
+        values = {
+          event_type    = "",
+          event_reason  = "",
+          obj_kind      = "",
+          obj_namespace = "",
+        }
+      }
+
+      stage.drop {
+        source              = "event_count"
+        expression          = "^[2-9]|^[1-9][0-9]+"
+        drop_counter_reason = "duplicate_event"
+      }
+
+      stage.limit {
+        rate  = 10
+        burst = 25
+        drop  = true
+      }
+
+      forward_to = [otelcol.receiver.loki.bridge.receiver]
+    }
+
+    // =========================================================================
+    // OTLP Bridge + Kafka Export (identical to Phase 1)
+    // =========================================================================
+    otelcol.receiver.loki "bridge" {
+      output {
+        logs = [otelcol.processor.batch.default.input]
+      }
+    }
+
+    otelcol.processor.batch "default" {
+      timeout         = "2s"
+      send_batch_size = 100
+      output {
+        logs = [otelcol.exporter.kafka.eventhub.input]
+      }
+    }
+
+    otelcol.exporter.kafka "eventhub" {
+      brokers          = ["REPLACE_EVENTHUB_NAMESPACE.servicebus.windows.net:9093"]
+      protocol_version = "1.0.0"
+
+      logs {
+        topic    = "REPLACE_EVENTHUB_NAME"
+        encoding = "otlp_json"
+      }
+
+      authentication {
+        tls {
+          insecure = false
+        }
+        sasl {
+          username  = "$ConnectionString"
+          password  = sys.env("EVENTHUB_CONNECTION_STRING")
+          mechanism = "PLAIN"
+        }
+      }
+
+      sending_queue {
+        enabled    = true
+        queue_size = 1000
+      }
+    }

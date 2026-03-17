@@ -1,0 +1,157 @@
+---
+# Grafana Alloy - Workload Cluster → Event Hub
+# All configuration via environment variables (no templating required)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: monitoring
+  labels:
+    app: alloy
+    app.kubernetes.io/part-of: k8s-event-triage
+data:
+  config.alloy: |
+    // =============================================================================
+    // Grafana Alloy - K8s Events → Azure Event Hub
+    // All config read from environment variables via env()
+    // =============================================================================
+
+    logging {
+      level  = coalesce(env("LOG_LEVEL"), "info")
+      format = "logfmt"
+    }
+
+    // -----------------------------------------------------------------------------
+    // Kubernetes Events Collection
+    // -----------------------------------------------------------------------------
+    // Note: namespaces = [] means all namespaces
+    // To filter, set WATCH_NAMESPACES env var (not yet supported by loki.source)
+    loki.source.kubernetes_events "cluster_events" {
+      namespaces = []
+      job_name   = "kubernetes-events"
+      log_format = "json"
+
+      forward_to = [loki.process.enrich.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Event Enrichment - Add cluster metadata from env vars
+    // -----------------------------------------------------------------------------
+    loki.process "enrich" {
+      // Add cluster identification (all from env vars)
+      stage.static_labels {
+        values = {
+          cluster     = coalesce(env("CLUSTER_NAME"), "unknown"),
+          environment = coalesce(env("CLUSTER_ENVIRONMENT"), "unknown"),
+          region      = coalesce(env("CLUSTER_REGION"), "unknown"),
+          source      = "alloy",
+        }
+      }
+
+      // Parse event JSON
+      stage.json {
+        expressions = {
+          event_type     = "type",
+          event_reason   = "reason",
+          event_message  = "message",
+          event_count    = "count",
+          obj_kind       = "involvedObject.kind",
+          obj_name       = "involvedObject.name",
+          obj_namespace  = "involvedObject.namespace",
+          obj_uid        = "involvedObject.uid",
+          first_time     = "firstTimestamp",
+          last_time      = "lastTimestamp",
+          source_comp    = "source.component",
+          source_host    = "source.host",
+        }
+      }
+
+      // Promote useful fields to labels
+      stage.labels {
+        values = {
+          event_type    = "",
+          event_reason  = "",
+          obj_kind      = "",
+          obj_namespace = "",
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Deduplication: Only forward the first occurrence of a repeated event.
+      // K8s increments event.count on repeats. Drop events where count > 1
+      // so we only send the initial firing, not every update.
+      // -----------------------------------------------------------------------
+      stage.drop {
+        source              = "event_count"
+        expression          = "^[2-9]|^[1-9][0-9]+"
+        drop_counter_reason = "duplicate_event"
+      }
+
+      // -----------------------------------------------------------------------
+      // Rate Limiting: Cap event throughput to prevent flooding Event Hub
+      // and the downstream triage system during event storms.
+      //   - rate:  max events per second (sustained)
+      //   - burst: max events allowed in a burst
+      //   - drop:  true = silently drop excess (false = backpressure)
+      // -----------------------------------------------------------------------
+      stage.limit {
+        rate  = 10
+        burst = 25
+        drop  = true
+      }
+
+      // Output: Forward to OTEL bridge for Kafka export
+      forward_to = [otelcol.receiver.loki.bridge.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Bridge Loki → OTEL for Kafka export
+    // -----------------------------------------------------------------------------
+    otelcol.receiver.loki "bridge" {
+      output {
+        logs = [otelcol.processor.batch.events.input]
+      }
+    }
+
+    // Batch before sending (reduces API calls)
+    otelcol.processor.batch "events" {
+      timeout             = "10s"
+      send_batch_size     = 50
+      send_batch_max_size = 100
+
+      output {
+        logs = [otelcol.exporter.kafka.eventhub.input]
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Azure Event Hub Output (Kafka protocol)
+    // All connection details from env vars
+    // -----------------------------------------------------------------------------
+    otelcol.exporter.kafka "eventhub" {
+      protocol_version = "2.0.0"
+
+      // Broker address from env var
+      brokers = [env("EVENTHUB_FQDN") + ":9093"]
+      topic   = env("EVENTHUB_NAME")
+
+      encoding = "json"
+
+      auth {
+        sasl {
+          mechanism = "PLAIN"
+          username  = "$ConnectionString"
+          password  = env("EVENTHUB_CONNECTION_STRING")
+        }
+        tls {
+          insecure = false
+        }
+      }
+
+      retry_on_failure {
+        enabled          = true
+        initial_interval = "500ms"
+        max_interval     = "30s"
+        max_elapsed_time = "5m"
+      }
+    }

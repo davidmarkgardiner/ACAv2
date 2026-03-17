@@ -1,0 +1,596 @@
+# KAgent SRE Workflow
+# Uses kagent's SRE Triage Agent (readonly) or SRE Remediation Agent (readwrite)
+# via the A2A protocol to diagnose and optionally fix Kubernetes issues
+#
+# Flow: validate → KAgent A2A → GitLab issue → Mattermost
+#
+# Agents:
+# - sre-triage-agent: readonly investigation, root cause analysis (remediate=false)
+# - sre-remediation-agent: readwrite, can fix issues (remediate=true)
+# - Both use k8s tools + AKS-MCP via MCP tool servers
+#
+# Replaces Holmes with kagent — same parameters, same reporting pipeline,
+# different AI backend. Keep both to compare.
+#
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: kagent-sre-workflow
+  namespace: argo
+  labels:
+    app: k8s-triage
+    type: kagent-sre
+  annotations:
+    description: "KAgent SRE workflow - diagnoses and optionally fixes Kubernetes issues via A2A"
+    version: "1.0"
+spec:
+  serviceAccountName: argo
+  entrypoint: investigate-fix-report
+  activeDeadlineSeconds: 900
+
+  ttlStrategy:
+    secondsAfterCompletion: 600
+    secondsAfterSuccess: 300
+    secondsAfterFailure: 1800
+  podGC:
+    strategy: OnWorkflowCompletion
+
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        storageClassName: local-path
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 64Mi
+
+  arguments:
+    parameters:
+      - name: query
+        value: "Investigate and fix Kubernetes resource issue"
+      - name: event_type
+        value: "Unknown"
+      - name: cluster
+        value: "proxmox-k8s"
+      - name: namespace
+        value: "default"
+      - name: resource_kind
+        value: "Pod"
+      - name: resource_name
+        value: "unknown"
+      - name: severity
+        value: "medium"
+      - name: error_message
+        value: ""
+      - name: remediate
+        value: "false"
+      - name: gitlab_project_id
+        value: "68265584"
+      - name: gitlab_url
+        value: "https://gitlab.com"
+      - name: mattermost_webhook_url
+        value: "http://mattermost.mattermost:8065/hooks/placeholder"
+      - name: kagent_controller_url
+        value: "http://kagent-controller.kagent.svc.cluster.local:8083"
+
+  templates:
+    - name: investigate-fix-report
+      steps:
+        - - name: validate
+            template: validate-inputs
+        - - name: kagent-investigate
+            template: call-kagent
+        - - name: report
+            template: create-gitlab-issue
+            continueOn:
+              failed: true
+        - - name: notify
+            template: mattermost-notify
+
+    # Step 1: Validate inputs and KAgent connectivity
+    - name: validate-inputs
+      script:
+        image: curlimages/curl:8.5.0
+        command: [sh]
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        source: |
+          echo "=== KAgent SRE Workflow v1.0 ==="
+          echo "Controller: {{workflow.parameters.kagent_controller_url}}"
+          echo "Target: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}} in {{workflow.parameters.namespace}}"
+          REMEDIATE="{{workflow.parameters.remediate}}"
+          if [ "$REMEDIATE" = "true" ]; then
+            AGENT="sre-remediation-agent"
+            echo "Mode: REMEDIATION (sre-remediation-agent)"
+          else
+            AGENT="sre-triage-agent"
+            echo "Mode: TRIAGE (sre-triage-agent)"
+          fi
+
+          if [ -z "{{workflow.parameters.query}}" ]; then
+            echo "ERROR: query is required"; exit 1
+          fi
+
+          # Check kagent controller is reachable
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 \
+            "{{workflow.parameters.kagent_controller_url}}/api/agents" 2>/dev/null)
+
+          case "${HTTP_CODE}" in ''|*[!0-9]*) echo "ERROR: KAgent controller unreachable"; exit 1 ;; esac
+          if [ "${HTTP_CODE}" -eq 200 ]; then
+            echo "KAgent controller reachable (HTTP ${HTTP_CODE})"
+          else
+            echo "ERROR: KAgent controller not reachable (HTTP ${HTTP_CODE})"; exit 1
+          fi
+
+          # Check target agent exists
+          AGENT_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 \
+            "{{workflow.parameters.kagent_controller_url}}/api/agents/kagent/${AGENT}" 2>/dev/null)
+
+          if [ "${AGENT_CODE}" -eq 200 ]; then
+            echo "Agent ${AGENT} found and ready"
+          else
+            echo "WARNING: Agent ${AGENT} check returned HTTP ${AGENT_CODE} — may still work via A2A"
+          fi
+
+    # Step 2: Call KAgent via A2A protocol (message/send)
+    #
+    # remediate=false → sre-triage-agent (readonly: describe, logs, events)
+    # remediate=true  → sre-remediation-agent (readwrite: patch, create, delete, scale)
+    #
+    # A2A endpoint: POST /api/a2a/kagent/{agent-name}/  (trailing slash required)
+    # Protocol: Google A2A (JSON-RPC 2.0, method: message/send)
+    #
+    - name: call-kagent
+      retryStrategy:
+        limit: 1
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "15s"
+          factor: 2
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        source: |
+          REMEDIATE="{{workflow.parameters.remediate}}"
+
+          # Select agent and build prompt based on mode
+          if [ "$REMEDIATE" = "true" ]; then
+            AGENT_NAME="sre-remediation-agent"
+
+            cat > /tmp/prompt.txt << 'PROMPTEOF'
+          Fix this Kubernetes issue:
+
+          Cluster: {{workflow.parameters.cluster}}
+          Namespace: {{workflow.parameters.namespace}}
+          Resource: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}
+          Event: {{workflow.parameters.event_type}}
+          Severity: {{workflow.parameters.severity}}
+          Error: {{workflow.parameters.error_message}}
+
+          Query: {{workflow.parameters.query}}
+
+          CRITICAL: When calling any tool, you MUST use the exact namespace "{{workflow.parameters.namespace}}" — copy it exactly, do not retype it from memory.
+
+          Instructions:
+          1. Describe the resource to understand current state and get container names.
+          2. Check logs and events for the root cause.
+          3. Apply the minimum fix needed to resolve the issue.
+          4. After fixing, verify the resource is healthy (pods Running, no errors).
+          5. Report what you did in your standard output format (Action/Before/After/Status/Rollback).
+          PROMPTEOF
+          else
+            AGENT_NAME="sre-triage-agent"
+
+            cat > /tmp/prompt.txt << 'PROMPTEOF'
+          Investigate this Kubernetes issue:
+
+          Cluster: {{workflow.parameters.cluster}}
+          Namespace: {{workflow.parameters.namespace}}
+          Resource: {{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}
+          Event: {{workflow.parameters.event_type}}
+          Severity: {{workflow.parameters.severity}}
+          Error: {{workflow.parameters.error_message}}
+
+          Query: {{workflow.parameters.query}}
+
+          CRITICAL: When calling any tool, you MUST use the exact namespace "{{workflow.parameters.namespace}}" — copy it exactly, do not retype it from memory.
+
+          Use your tools to gather evidence. Do not guess. Report findings in your standard output format (Issue/Evidence/Root Cause/Recommended Fix).
+          PROMPTEOF
+          fi
+
+          PROMPT=$(cat /tmp/prompt.txt)
+          TASK_ID="argo-$(echo {{workflow.name}} | tr -cd 'a-z0-9-')-$(date +%s)"
+
+          # Build A2A message/send request (Google A2A JSON-RPC 2.0)
+          jq -n \
+            --arg task_id "$TASK_ID" \
+            --arg prompt "$PROMPT" \
+            '{
+              "jsonrpc": "2.0",
+              "id": $task_id,
+              "method": "message/send",
+              "params": {
+                "message": {
+                  "role": "user",
+                  "parts": [{"kind": "text", "text": $prompt}]
+                }
+              }
+            }' > /tmp/a2a-request.json
+
+          echo "Calling ${AGENT_NAME} via A2A (remediate=${REMEDIATE})..."
+          START=$(date +%s)
+
+          HTTP_CODE=$(curl -s -o /work/kagent-response.json -w "%{http_code}" \
+            --connect-timeout 10 --max-time 600 \
+            -X POST "{{workflow.parameters.kagent_controller_url}}/api/a2a/kagent/${AGENT_NAME}/" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/a2a-request.json)
+
+          DURATION=$(( $(date +%s) - START ))
+          echo "HTTP: ${HTTP_CODE}, Duration: ${DURATION}s"
+
+          case "${HTTP_CODE}" in ''|*[!0-9]*) echo "ERROR: curl failed — could not reach agent"; exit 1 ;; esac
+          if [ "${HTTP_CODE}" -ne 200 ]; then
+            echo "KAgent A2A call failed (HTTP ${HTTP_CODE})"
+            cat /work/kagent-response.json 2>/dev/null
+            exit 1
+          fi
+
+          # Check for JSON-RPC error
+          RPC_ERROR=$(jq -r '.error.message // empty' /work/kagent-response.json 2>/dev/null)
+          if [ -n "$RPC_ERROR" ]; then
+            echo "A2A RPC error: ${RPC_ERROR}"
+            exit 1
+          fi
+
+          # Check task state
+          STATE=$(jq -r '.result.status.state // "unknown"' /work/kagent-response.json)
+          echo "Task state: ${STATE}"
+
+          if [ "$STATE" = "failed" ]; then
+            echo "Agent task failed"
+            # status.message may be a string or an A2A Message object
+            jq -r '
+              if (.result.status.message | type) == "string" then .result.status.message
+              elif (.result.status.message | type) == "object" then (.result.status.message.parts[]?.text // "No details")
+              else "No error details"
+              end
+            ' /work/kagent-response.json
+            exit 1
+          fi
+
+          # Extract analysis from artifacts (primary source)
+          ANALYSIS=$(jq -r '
+            [.result.artifacts[]?.parts[]? | select(.kind == "text") | .text] | join("\n\n")
+          ' /work/kagent-response.json 2>/dev/null)
+
+          if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ] || [ "$ANALYSIS" = "" ]; then
+            # Fallback: last agent message from history
+            ANALYSIS=$(jq -r '
+              [.result.history[]? | select(.role == "agent") | .parts[]? | select(.kind == "text") | .text] | last // "No analysis returned"
+            ' /work/kagent-response.json 2>/dev/null)
+          fi
+
+          # Count conversation turns (proxy for tool call count)
+          NUM_HISTORY=$(jq -r '.result.history | length // 0' /work/kagent-response.json 2>/dev/null)
+          echo "Analysis: $(echo "$ANALYSIS" | wc -c | tr -d ' ') chars, History entries: ${NUM_HISTORY}, Duration: ${DURATION}s"
+
+          # Add metadata for downstream steps
+          jq --arg d "$DURATION" \
+             --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --arg r "$REMEDIATE" \
+             --arg a "$AGENT_NAME" \
+             --arg s "$STATE" \
+            '. + {_meta: {duration_s: ($d|tonumber), timestamp: $t, remediated: $r, agent: $a, state: $s}}' \
+            /work/kagent-response.json > /work/resp.json && mv /work/resp.json /work/kagent-response.json
+
+    # Step 3: Create GitLab issue with analysis/remediation results
+    - name: create-gitlab-issue
+      retryStrategy:
+        limit: 2
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "5s"
+          factor: 2
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        env:
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-token
+                key: GITLAB_TOKEN
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        source: |
+          set -e
+
+          RESPONSE="/work/kagent-response.json"
+          if [ ! -f "$RESPONSE" ]; then
+            echo "ERROR: kagent-response.json not found"
+            exit 1
+          fi
+
+          # Extract analysis from A2A artifacts (primary source)
+          ANALYSIS=$(jq -r '
+            [.result.artifacts[]?.parts[]? | select(.kind == "text") | .text] | join("\n\n")
+          ' "$RESPONSE" 2>/dev/null)
+
+          # Fallback: last agent message from history
+          if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ] || [ "$ANALYSIS" = "" ]; then
+            ANALYSIS=$(jq -r '
+              [.result.history[]? | select(.role == "agent") | .parts[]? | select(.kind == "text") | .text] | last // "_No analysis returned by agent_"
+            ' "$RESPONSE" 2>/dev/null)
+          fi
+
+          # Strip think tags (Qwen sometimes emits these)
+          ANALYSIS=$(echo "$ANALYSIS" | sed 's/<think>.*<\/think>//g')
+
+          # Extract metadata
+          STATE=$(jq -r '.result.status.state // "unknown"' "$RESPONSE")
+          DURATION=$(jq -r '._meta.duration_s // "N/A"' "$RESPONSE")
+          AGENT_NAME=$(jq -r '._meta.agent // "unknown"' "$RESPONSE")
+          REMEDIATED=$(jq -r '._meta.remediated // "false"' "$RESPONSE")
+          AGENT_TURNS=$(jq -r '[.result.history[]? | select(.role == "agent")] | length' "$RESPONSE")
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # Set labels based on mode
+          if [ "$REMEDIATED" = "true" ]; then
+            STATUS_EMOJI="wrench"
+            STATUS_LABEL="REMEDIATION APPLIED"
+            LABEL="remediation"
+            VERIFY_CHECKLIST="- [ ] Verify the fix is holding\n- [ ] Monitor for recurrence\n- [ ] Close when confirmed stable"
+          else
+            STATUS_EMOJI="mag"
+            STATUS_LABEL="TRIAGE ANALYSIS"
+            LABEL="triage"
+            VERIFY_CHECKLIST="- [ ] Review analysis findings\n- [ ] Apply recommended fixes manually\n- [ ] Verify and close"
+          fi
+
+          ERROR_MSG="{{workflow.parameters.error_message}}"
+          if [ -n "$ERROR_MSG" ]; then
+            ERROR_SECTION="\`\`\`\n${ERROR_MSG}\n\`\`\`"
+          else
+            ERROR_SECTION="_No error message_"
+          fi
+
+          # Truncate raw response for the details section
+          RAW_RESPONSE=$(jq -c '.' "$RESPONSE" | head -c 10000)
+
+          # Write analysis to file so jq can safely read it (avoids shell quoting issues)
+          printf '%s' "$ANALYSIS" > /tmp/analysis.txt
+          printf '%s' "$RAW_RESPONSE" > /tmp/raw_response.txt
+
+          # Build the issue body safely using jq
+          BODY=$(jq -n --rawfile analysis /tmp/analysis.txt \
+            --arg status_label "$STATUS_LABEL" \
+            --arg event_type "{{workflow.parameters.event_type}}" \
+            --arg cluster "{{workflow.parameters.cluster}}" \
+            --arg namespace "{{workflow.parameters.namespace}}" \
+            --arg resource "{{workflow.parameters.resource_kind}}/{{workflow.parameters.resource_name}}" \
+            --arg timestamp "$TIMESTAMP" \
+            --arg severity "{{workflow.parameters.severity}}" \
+            --arg agent_name "$AGENT_NAME" \
+            --arg state "$STATE" \
+            --arg agent_turns "$AGENT_TURNS" \
+            --arg duration "$DURATION" \
+            --arg error_section "$ERROR_SECTION" \
+            --arg verify "$VERIFY_CHECKLIST" \
+            --rawfile raw_response /tmp/raw_response.txt \
+            --arg workflow_name "{{workflow.name}}" \
+            -r '
+            "# " + $status_label + "\n\n" +
+            "| Field | Value |\n|-------|-------|\n" +
+            "| **Alert Type** | " + $event_type + " |\n" +
+            "| **Cluster** | " + $cluster + " |\n" +
+            "| **Namespace** | " + $namespace + " |\n" +
+            "| **Resource** | " + $resource + " |\n" +
+            "| **Timestamp** | " + $timestamp + " |\n" +
+            "| **Severity** | " + $severity + " |\n" +
+            "| **Mode** | " + $status_label + " |\n" +
+            "| **Agent** | " + $agent_name + " |\n" +
+            "| **Task State** | " + $state + " |\n" +
+            "| **Agent Turns** | " + $agent_turns + " |\n" +
+            "| **Duration** | " + $duration + "s |\n\n" +
+            "### Error Message\n" + $error_section + "\n\n---\n\n" +
+            "# KAgent Analysis\n\n" + $analysis + "\n\n---\n\n" +
+            "# Verification\n\n" + $verify + "\n\n" +
+            "<details><summary>Raw A2A Response</summary>\n\n```json\n" + $raw_response + "\n```\n</details>\n\n" +
+            "*KAgent " + $agent_name + " | " + $status_label + " | " + $workflow_name + "*"
+          ')
+
+          TITLE="[:${STATUS_EMOJI}:][{{workflow.parameters.cluster}}] {{workflow.parameters.event_type}}: {{workflow.parameters.namespace}}/{{workflow.parameters.resource_name}}"
+          LABELS="kagent,${LABEL},{{workflow.parameters.event_type}},{{workflow.parameters.severity}},auto-generated"
+
+          # Build GitLab API payload safely with jq
+          jq -n \
+            --arg title "$TITLE" \
+            --arg description "$BODY" \
+            --arg labels "$LABELS" \
+            '{title: $title, description: $description, labels: $labels}' > /tmp/gitlab-payload.json
+
+          echo "Creating GitLab issue: $TITLE"
+
+          HTTP_CODE=$(curl -s -o /work/gitlab-response.json -w "%{http_code}" \
+            -X POST "{{workflow.parameters.gitlab_url}}/api/v4/projects/{{workflow.parameters.gitlab_project_id}}/issues" \
+            -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/gitlab-payload.json)
+
+          echo "GitLab HTTP: ${HTTP_CODE}"
+
+          if [ "$HTTP_CODE" = "201" ]; then
+            ISSUE_URL=$(jq -r '.web_url' /work/gitlab-response.json)
+            ISSUE_IID=$(jq -r '.iid' /work/gitlab-response.json)
+            echo "Issue #${ISSUE_IID}: ${ISSUE_URL}"
+            printf '%s' "$ISSUE_URL" > /work/gitlab-issue-url.txt
+            printf '%s' "$ISSUE_IID" > /work/gitlab-issue-iid.txt
+          else
+            echo "GitLab error:"
+            cat /work/gitlab-response.json
+            exit 1
+          fi
+
+    # Step 4: Notify Mattermost with analysis summary and actionable commands
+    - name: mattermost-notify
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        env:
+          - name: MATTERMOST_WEBHOOK_URL
+            valueFrom:
+              secretKeyRef:
+                name: mattermost-webhook
+                key: url
+                optional: true
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+        source: |
+          # Use Secret if available, fall back to workflow parameter
+          WEBHOOK_URL="${MATTERMOST_WEBHOOK_URL:-{{workflow.parameters.mattermost_webhook_url}}}"
+
+          if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" = "" ]; then
+            echo "No Mattermost webhook configured, skipping notification"
+            exit 0
+          fi
+
+          ISSUE_URL=$(cat /work/gitlab-issue-url.txt 2>/dev/null || echo "unknown")
+          ISSUE_IID=$(cat /work/gitlab-issue-iid.txt 2>/dev/null || echo "?")
+          REMEDIATE="{{workflow.parameters.remediate}}"
+          RESPONSE="/work/kagent-response.json"
+
+          if [ "$REMEDIATE" = "true" ]; then
+            ICON=":wrench:"
+            STATUS="Remediation Applied"
+            AGENT="sre-remediation-agent"
+          else
+            ICON=":mag:"
+            STATUS="Triage Complete"
+            AGENT="sre-triage-agent"
+          fi
+
+          # Extract analysis from KAgent response
+          ANALYSIS=""
+          if [ -f "$RESPONSE" ]; then
+            ANALYSIS=$(jq -r '
+              [.result.artifacts[]?.parts[]? | select(.kind == "text") | .text] | join("\n\n")
+            ' "$RESPONSE" 2>/dev/null)
+
+            if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
+              ANALYSIS=$(jq -r '
+                [.result.history[]? | select(.role == "agent") | .parts[]? | select(.kind == "text") | .text] | last // ""
+              ' "$RESPONSE" 2>/dev/null)
+            fi
+
+            # Strip think tags
+            ANALYSIS=$(echo "$ANALYSIS" | sed 's/<think>.*<\/think>//g')
+
+            DURATION=$(jq -r '._meta.duration_s // "N/A"' "$RESPONSE")
+            AGENT_TURNS=$(jq -r '[.result.history[]? | select(.role == "agent")] | length' "$RESPONSE")
+          fi
+
+          # Truncate analysis for Mattermost (keep first 2000 chars)
+          ANALYSIS_TRIMMED=$(echo "$ANALYSIS" | head -c 2000)
+          if [ ${#ANALYSIS} -gt 2000 ]; then
+            ANALYSIS_TRIMMED="${ANALYSIS_TRIMMED}..."
+          fi
+
+          # Write analysis to file for safe jq reading
+          printf '%s' "$ANALYSIS_TRIMMED" > /tmp/analysis.txt
+
+          NS="{{workflow.parameters.namespace}}"
+          RES_NAME="{{workflow.parameters.resource_name}}"
+          RES_KIND="{{workflow.parameters.resource_kind}}"
+          RES_KIND_LOWER=$(echo "$RES_KIND" | tr '[:upper:]' '[:lower:]')
+
+          # Build quick commands based on resource type
+          COMMANDS="kubectl describe ${RES_KIND_LOWER} ${RES_NAME} -n ${NS}
+          kubectl logs ${RES_NAME} -n ${NS} --tail=100
+          kubectl get events -n ${NS} --field-selector involvedObject.name=${RES_NAME} --sort-by='.lastTimestamp'
+          kubectl get ${RES_KIND_LOWER} ${RES_NAME} -n ${NS} -o wide"
+
+          printf '%s' "$COMMANDS" > /tmp/commands.txt
+
+          # Build Mattermost payload with jq (safe JSON construction)
+          jq -n \
+            --rawfile analysis /tmp/analysis.txt \
+            --rawfile commands /tmp/commands.txt \
+            --arg icon "$ICON" \
+            --arg status "$STATUS" \
+            --arg cluster "{{workflow.parameters.cluster}}" \
+            --arg event_type "{{workflow.parameters.event_type}}" \
+            --arg resource "${RES_KIND}/${RES_NAME}" \
+            --arg namespace "$NS" \
+            --arg severity "{{workflow.parameters.severity}}" \
+            --arg agent "$AGENT" \
+            --arg duration "${DURATION:-N/A}" \
+            --arg turns "${AGENT_TURNS:-0}" \
+            --arg issue_iid "$ISSUE_IID" \
+            --arg issue_url "$ISSUE_URL" \
+            --arg workflow "{{workflow.name}}" \
+            '{
+              username: "KAgent SRE",
+              icon_url: "https://avatars.githubusercontent.com/u/193178627",
+              text: (
+                "### " + $icon + " " + $status + "\n" +
+                "| Field | Value |\n|---|---|\n" +
+                "| **Cluster** | " + $cluster + " |\n" +
+                "| **Event** | " + $event_type + " |\n" +
+                "| **Resource** | `" + $resource + "` |\n" +
+                "| **Namespace** | `" + $namespace + "` |\n" +
+                "| **Severity** | " + $severity + " |\n" +
+                "| **Agent** | " + $agent + " |\n" +
+                "| **Duration** | " + $duration + "s (" + $turns + " turns) |\n" +
+                "| **GitLab** | [#" + $issue_iid + "](" + $issue_url + ") |\n" +
+                "| **Workflow** | `" + $workflow + "` |\n\n" +
+                "---\n" +
+                "#### :clipboard: Analysis Summary\n" +
+                $analysis + "\n\n" +
+                "---\n" +
+                "#### :computer: Quick Commands\n" +
+                "```\n" + $commands + "\n```"
+              )
+            }' > /tmp/mm-payload.json
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/mm-payload.json)
+
+          echo "Mattermost HTTP: ${HTTP_CODE} (${STATUS}, agent: ${AGENT}, issue #${ISSUE_IID})"

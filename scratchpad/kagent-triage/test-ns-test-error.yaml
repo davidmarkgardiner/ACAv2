@@ -1,0 +1,62 @@
+---
+# Test 1: ImagePullBackOff - bad image tag
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-bad-image
+  namespace: test-ns
+  labels:
+    app: kagent-test
+    test-type: image-pull-error
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-bad-image
+  template:
+    metadata:
+      labels:
+        app: test-bad-image
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:nonexistent-tag-12345
+        ports:
+        - containerPort: 80
+---
+# Test 2: CrashLoopBackOff - bad command
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-crashloop
+  namespace: test-ns
+  labels:
+    app: kagent-test
+    test-type: crashloop
+spec:
+  containers:
+  - name: crash
+    image: busybox:latest
+    command: ["sh", "-c", "exit 1"]
+  restartPolicy: Always
+---
+# Test 3: OOMKilled - memory stress (very low limit)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-oom
+  namespace: test-ns
+  labels:
+    app: kagent-test
+    test-type: oom-killed
+spec:
+  containers:
+  - name: stress
+    image: polinux/stress
+    command: ["stress", "--vm", "1", "--vm-bytes", "256M"]
+    resources:
+      limits:
+        memory: "32Mi"
+      requests:
+        memory: "16Mi"
+  restartPolicy: Never
