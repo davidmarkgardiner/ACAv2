@@ -1,0 +1,147 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.4",
+  "body": [
+    {
+      "type": "ColumnSet",
+      "columns": [
+        {
+          "type": "Column",
+          "width": "auto",
+          "items": [
+            {
+              "type": "TextBlock",
+              "text": "${if(risk_level == 'High', '\uD83D\uDD34', if(risk_level == 'Medium', '\uD83D\uDFE0', if(risk_level == 'Low', '\uD83D\uDFE2', '\u26AA')))}",
+              "size": "Large"
+            }
+          ],
+          "verticalContentAlignment": "Center"
+        },
+        {
+          "type": "Column",
+          "width": "stretch",
+          "items": [
+            {
+              "type": "TextBlock",
+              "text": "\u26A0\uFE0F KAgent Triage Alert",
+              "weight": "Bolder",
+              "size": "Large",
+              "color": "Attention"
+            },
+            {
+              "type": "TextBlock",
+              "text": "${event_reason} in ${event_namespace}",
+              "spacing": "None",
+              "isSubtle": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ColumnSet",
+      "separator": true,
+      "spacing": "Medium",
+      "columns": [
+        {
+          "type": "Column",
+          "width": "stretch",
+          "items": [
+            {
+              "type": "TextBlock",
+              "text": "\uD83C\uDFE2 Cluster",
+              "isSubtle": true,
+              "size": "Small"
+            },
+            {
+              "type": "TextBlock",
+              "text": "${cluster}",
+              "weight": "Bolder",
+              "spacing": "None"
+            }
+          ]
+        },
+        {
+          "type": "Column",
+          "width": "stretch",
+          "items": [
+            {
+              "type": "TextBlock",
+              "text": "\uD83D\uDCE6 Namespace",
+              "isSubtle": true,
+              "size": "Small"
+            },
+            {
+              "type": "TextBlock",
+              "text": "${event_namespace}",
+              "weight": "Bolder",
+              "spacing": "None"
+            }
+          ]
+        },
+        {
+          "type": "Column",
+          "width": "stretch",
+          "items": [
+            {
+              "type": "TextBlock",
+              "text": "\u26A1 Risk",
+              "isSubtle": true,
+              "size": "Small"
+            },
+            {
+              "type": "TextBlock",
+              "text": "${if(risk_level == 'High', '\uD83D\uDD34 HIGH', if(risk_level == 'Medium', '\uD83D\uDFE0 MEDIUM', if(risk_level == 'Low', '\uD83D\uDFE2 LOW', '\u2753 Unknown')))}",
+              "weight": "Bolder",
+              "spacing": "None",
+              "color": "${if(risk_level == 'High', 'Attention', if(risk_level == 'Medium', 'Warning', 'Good'))}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "FactSet",
+      "separator": true,
+      "spacing": "Medium",
+      "facts": [
+        {
+          "title": "\uD83D\uDD25 Event",
+          "value": "${event_reason}"
+        },
+        {
+          "title": "\uD83C\uDFAF Resource",
+          "value": "${resource_kind}/${resource_name}"
+        },
+        {
+          "title": "\uD83D\uDD52 Time",
+          "value": "${timestamp}"
+        },
+        {
+          "title": "\uD83E\uDD16 Source",
+          "value": "${source}"
+        }
+      ]
+    },
+    {
+      "type": "TextBlock",
+      "text": "\uD83E\uDDE0 AI Diagnosis",
+      "weight": "Bolder",
+      "size": "Medium",
+      "separator": true,
+      "spacing": "Medium"
+    },
+    {
+      "type": "TextBlock",
+      "text": "${agent_diagnosis}",
+      "wrap": true,
+      "maxLines": 20,
+      "size": "Small",
+      "fontType": "Default"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  }
+}

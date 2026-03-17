@@ -1,0 +1,300 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logicAppName": {
+      "type": "string",
+      "defaultValue": "kagent-triage-webhook",
+      "metadata": {
+        "description": "Name of the Logic App"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for the Logic App"
+      }
+    },
+    "teamsWebhookUrl": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Teams Incoming Webhook URL. Leave empty to skip Teams posting (Logic App still accepts and logs payloads)."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('logicAppName')]",
+      "location": "[parameters('location')]",
+      "tags": {
+        "project": "k8s-event-triage",
+        "managed-by": "kagent"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "teamsWebhookUrl": {
+              "type": "SecureString",
+              "defaultValue": ""
+            }
+          },
+          "triggers": {
+            "manual": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event_namespace": { "type": "string" },
+                    "event_reason": { "type": "string" },
+                    "resource_kind": { "type": "string" },
+                    "resource_name": { "type": "string" },
+                    "agent_diagnosis": { "type": "string" },
+                    "risk_level": { "type": "string" },
+                    "timestamp": { "type": "string" },
+                    "source": { "type": "string" },
+                    "cluster": { "type": "string" }
+                  },
+                  "required": [
+                    "event_namespace",
+                    "event_reason",
+                    "resource_kind",
+                    "resource_name",
+                    "agent_diagnosis"
+                  ]
+                }
+              }
+            }
+          },
+          "actions": {
+            "Set_Risk_Display": {
+              "type": "Compose",
+              "inputs": "@if(equals(triggerBody()?['risk_level'],'High'),'\uD83D\uDD34 HIGH',if(equals(triggerBody()?['risk_level'],'Medium'),'\uD83D\uDFE0 MEDIUM',if(equals(triggerBody()?['risk_level'],'Low'),'\uD83D\uDFE2 LOW','\u2753 Unknown')))",
+              "runAfter": {}
+            },
+            "Set_Risk_Color": {
+              "type": "Compose",
+              "inputs": "@if(equals(triggerBody()?['risk_level'],'High'),'Attention',if(equals(triggerBody()?['risk_level'],'Medium'),'Warning','Good'))",
+              "runAfter": {}
+            },
+            "Set_Risk_Emoji": {
+              "type": "Compose",
+              "inputs": "@if(equals(triggerBody()?['risk_level'],'High'),'\uD83D\uDD34',if(equals(triggerBody()?['risk_level'],'Medium'),'\uD83D\uDFE0',if(equals(triggerBody()?['risk_level'],'Low'),'\uD83D\uDFE2','\u26AA')))",
+              "runAfter": {}
+            },
+            "Truncate_Diagnosis": {
+              "type": "Compose",
+              "inputs": "@if(greater(length(triggerBody()?['agent_diagnosis']),3000),concat(substring(triggerBody()?['agent_diagnosis'],0,3000),'\\n\\n_... truncated (full diagnosis in GitLab issue)_'),triggerBody()?['agent_diagnosis'])",
+              "runAfter": {}
+            },
+            "Post_to_Teams": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@{parameters('teamsWebhookUrl')}",
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "type": "message",
+                  "attachments": [
+                    {
+                      "contentType": "application/vnd.microsoft.card.adaptive",
+                      "contentUrl": null,
+                      "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.4",
+                        "msteams": {
+                          "width": "Full"
+                        },
+                        "body": [
+                          {
+                            "type": "ColumnSet",
+                            "columns": [
+                              {
+                                "type": "Column",
+                                "width": "auto",
+                                "items": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "@{outputs('Set_Risk_Emoji')}",
+                                    "size": "Large"
+                                  }
+                                ],
+                                "verticalContentAlignment": "Center"
+                              },
+                              {
+                                "type": "Column",
+                                "width": "stretch",
+                                "items": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "\u26A0\uFE0F KAgent Triage Alert",
+                                    "weight": "Bolder",
+                                    "size": "Large",
+                                    "color": "Attention"
+                                  },
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "@{triggerBody()?['event_reason']} in @{triggerBody()?['event_namespace']}",
+                                    "spacing": "None",
+                                    "isSubtle": true
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "type": "ColumnSet",
+                            "separator": true,
+                            "spacing": "Medium",
+                            "columns": [
+                              {
+                                "type": "Column",
+                                "width": "stretch",
+                                "items": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "\uD83C\uDFE2 Cluster",
+                                    "isSubtle": true,
+                                    "size": "Small"
+                                  },
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "@{coalesce(triggerBody()?['cluster'],'unknown')}",
+                                    "weight": "Bolder",
+                                    "spacing": "None"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "Column",
+                                "width": "stretch",
+                                "items": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "\uD83D\uDCE6 Namespace",
+                                    "isSubtle": true,
+                                    "size": "Small"
+                                  },
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "@{triggerBody()?['event_namespace']}",
+                                    "weight": "Bolder",
+                                    "spacing": "None"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "Column",
+                                "width": "stretch",
+                                "items": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "\u26A1 Risk",
+                                    "isSubtle": true,
+                                    "size": "Small"
+                                  },
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "@{outputs('Set_Risk_Display')}",
+                                    "weight": "Bolder",
+                                    "spacing": "None",
+                                    "color": "@{outputs('Set_Risk_Color')}"
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "type": "FactSet",
+                            "separator": true,
+                            "spacing": "Medium",
+                            "facts": [
+                              {
+                                "title": "\uD83D\uDD25 Event",
+                                "value": "@{triggerBody()?['event_reason']}"
+                              },
+                              {
+                                "title": "\uD83C\uDFAF Resource",
+                                "value": "@{triggerBody()?['resource_kind']}/@{triggerBody()?['resource_name']}"
+                              },
+                              {
+                                "title": "\uD83D\uDD52 Time",
+                                "value": "@{coalesce(triggerBody()?['timestamp'],'N/A')}"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "TextBlock",
+                            "text": "\uD83E\uDDE0 AI Diagnosis",
+                            "weight": "Bolder",
+                            "size": "Medium",
+                            "separator": true,
+                            "spacing": "Medium"
+                          },
+                          {
+                            "type": "TextBlock",
+                            "text": "@{outputs('Truncate_Diagnosis')}",
+                            "wrap": true,
+                            "size": "Small"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              "runAfter": {
+                "Set_Risk_Display": ["Succeeded"],
+                "Set_Risk_Color": ["Succeeded"],
+                "Set_Risk_Emoji": ["Succeeded"],
+                "Truncate_Diagnosis": ["Succeeded"]
+              },
+              "runtimeConfiguration": {
+                "staticResult": {
+                  "name": "Post_to_Teams0",
+                  "staticResultOptions": "Disabled"
+                }
+              }
+            },
+            "Response": {
+              "type": "Response",
+              "kind": "Http",
+              "inputs": {
+                "statusCode": 200,
+                "body": {
+                  "status": "received",
+                  "message": "Triage event logged and posted to Teams"
+                }
+              },
+              "runAfter": {
+                "Post_to_Teams": ["Succeeded", "Failed", "Skipped"]
+              }
+            }
+          }
+        },
+        "parameters": {
+          "teamsWebhookUrl": {
+            "value": "[parameters('teamsWebhookUrl')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('logicAppName'))]"
+    }
+  }
+}
