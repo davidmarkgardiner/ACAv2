@@ -1,12 +1,37 @@
-<h2>&#x26A0;&#xFE0F; KAgent Triage Alert</h2>
-<table>
-<tr><td><strong>&#x1F525; Event</strong></td><td>@{triggerBody()?['event_reason']}</td></tr>
-<tr><td><strong>&#x1F3E2; Cluster</strong></td><td>@{coalesce(triggerBody()?['cluster'],'unknown')}</td></tr>
-<tr><td><strong>&#x1F4E6; Namespace</strong></td><td>@{triggerBody()?['event_namespace']}</td></tr>
-<tr><td><strong>&#x1F3AF; Resource</strong></td><td>@{triggerBody()?['resource_kind']}/@{triggerBody()?['resource_name']}</td></tr>
-<tr><td><strong>&#x26A1; Risk</strong></td><td>@{if(equals(triggerBody()?['risk_level'],'High'),'&#x1F534; HIGH',if(equals(triggerBody()?['risk_level'],'Medium'),'&#x1F7E0; MEDIUM',if(equals(triggerBody()?['risk_level'],'Low'),'&#x1F7E2; LOW','&#x2753; Unknown')))}</td></tr>
-<tr><td><strong>&#x1F552; Time</strong></td><td>@{coalesce(triggerBody()?['timestamp'],'N/A')}</td></tr>
-</table>
-<hr>
-<h3>&#x1F9E0; AI Diagnosis</h3>
-<pre>@{triggerBody()?['agent_diagnosis']}</pre>
+<div style="font-family: Segoe UI, sans-serif; max-width: 600px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
+  <div style="background: #0078d4; color: #ffffff; padding: 16px 20px;">
+    <h2 style="margin: 0; font-size: 18px;">&#x26A0;&#xFE0F; KAgent Triage Alert</h2>
+  </div>
+  <div style="padding: 16px 20px;">
+    <table style="width: 100%; border-collapse: collapse;">
+      <tr style="border-bottom: 1px solid #f0f0f0;">
+        <td style="padding: 10px 8px; width: 120px; color: #555;">&#x1F525; Event</td>
+        <td style="padding: 10px 8px; font-weight: 600;">@{triggerBody()?['event_reason']}</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #f0f0f0; background: #fafafa;">
+        <td style="padding: 10px 8px; color: #555;">&#x1F3E2; Cluster</td>
+        <td style="padding: 10px 8px;">@{coalesce(triggerBody()?['cluster'],'unknown')}</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #f0f0f0;">
+        <td style="padding: 10px 8px; color: #555;">&#x1F4E6; Namespace</td>
+        <td style="padding: 10px 8px;">@{triggerBody()?['event_namespace']}</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #f0f0f0; background: #fafafa;">
+        <td style="padding: 10px 8px; color: #555;">&#x1F3AF; Resource</td>
+        <td style="padding: 10px 8px;">@{triggerBody()?['resource_kind']}/@{triggerBody()?['resource_name']}</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #f0f0f0;">
+        <td style="padding: 10px 8px; color: #555;">&#x1F3AB; GitLab Issue</td>
+        <td style="padding: 10px 8px;"><a href="@{triggerBody()?['gitlab_issue_url']}" style="color: #0078d4; text-decoration: none;">@{triggerBody()?['gitlab_issue_url']}</a></td>
+      </tr>
+      <tr>
+        <td style="padding: 10px 8px; color: #555;">&#x1F552; Time</td>
+        <td style="padding: 10px 8px;">@{coalesce(triggerBody()?['timestamp'],'N/A')}</td>
+      </tr>
+    </table>
+  </div>
+  <div style="padding: 0 20px 20px;">
+    <h3 style="font-size: 15px; color: #333; margin: 12px 0 8px;">&#x1F9E0; AI Diagnosis</h3>
+    <pre style="background: #f5f5f5; border: 1px solid #e0e0e0; border-radius: 6px; padding: 14px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; color: #333; margin: 0;">@{triggerBody()?['agent_diagnosis']}</pre>
+  </div>
+</div>
