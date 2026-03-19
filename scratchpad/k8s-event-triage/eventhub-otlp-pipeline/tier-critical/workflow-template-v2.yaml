@@ -1,0 +1,576 @@
+---
+# k8s-triage-critical v2 — simplified
+#
+# Flow: validate-kagent → parse-otlp → fan-out → investigate-and-report
+# Routing: namespace lookup hardcoded in jq (no ConfigMap needed)
+# To add a new agent: add a line to route_agent() in parse-otlp, redeploy
+#
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: k8s-triage-critical
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: k8s-event-triage
+    triage-tier: critical
+  annotations:
+    description: "Critical event triage — KAgent + GitLab + Logic App (Teams) + Mattermost"
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: triage-pipeline
+  activeDeadlineSeconds: 900
+  ttlStrategy:
+    secondsAfterCompletion: 600
+    secondsAfterSuccess: 300
+    secondsAfterFailure: 1800
+  podGC:
+    strategy: OnWorkflowCompletion
+  arguments:
+    parameters:
+      - name: otlp-payload
+        description: "OTLP JSON envelope from Event Hub"
+      - name: kagent-url
+        value: ""
+      - name: kagent-agent
+        value: ""
+      - name: remediate
+        value: "false"
+      - name: gitlab-project-id
+        value: "68265584"
+      - name: gitlab-url
+        value: "https://gitlab.com"
+
+  templates:
+    - name: triage-pipeline
+      steps:
+        - - name: validate-kagent
+            template: validate-kagent
+        - - name: parse-otlp
+            template: parse-otlp
+            arguments:
+              parameters:
+                - name: otlp-payload
+                  value: "{{workflow.parameters.otlp-payload}}"
+        - - name: process-event
+            template: investigate-and-report
+            withParam: "{{steps.parse-otlp.outputs.parameters.events}}"
+            arguments:
+              parameters:
+                - name: cluster
+                  value: "{{item.cluster}}"
+                - name: environment
+                  value: "{{item.environment}}"
+                - name: event-reason
+                  value: "{{item.event_reason}}"
+                - name: event-message
+                  value: "{{item.event_message}}"
+                - name: object-kind
+                  value: "{{item.object_kind}}"
+                - name: object-name
+                  value: "{{item.object_name}}"
+                - name: object-namespace
+                  value: "{{item.object_namespace}}"
+                - name: event-time
+                  value: "{{item.event_time}}"
+                - name: event-count
+                  value: "{{item.event_count}}"
+                - name: target-agent
+                  value: "{{item.target_agent}}"
+
+    # --- Validate KAgent reachability ---
+    - name: validate-kagent
+      script:
+        image: bitnami/kubectl:latest  # REPLACE with your private registry image at work
+        command: [sh]
+        env:
+          - name: KAGENT_URL
+            valueFrom:
+              configMapKeyRef:
+                name: kagent-config
+                key: KAGENT_URL
+        source: |
+          WF_URL="{{workflow.parameters.kagent-url}}"
+          [ -n "$WF_URL" ] && KAGENT_URL="$WF_URL"
+
+          if [ -z "$KAGENT_URL" ]; then
+            echo "WARNING: KAGENT_URL empty — analysis will be skipped"
+            exit 0
+          fi
+
+          HTTP_CODE=$(curl -s -o /tmp/agents.json -w "%{http_code}" \
+            --connect-timeout 5 --max-time 10 "${KAGENT_URL}/api/agents" 2>/dev/null)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: KAgent unreachable (HTTP ${HTTP_CODE:-timeout})"
+            exit 1
+          fi
+
+          AGENT_COUNT=$(jq 'length // 0' /tmp/agents.json 2>/dev/null)
+          echo "KAgent OK — ${AGENT_COUNT} agents available"
+          jq -r '.[]? | "  - \(.metadata.name // .name // "unknown")"' /tmp/agents.json 2>/dev/null || true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+
+    # --- Parse OTLP + route to agents ---
+    #
+    # To add a new namespace agent:
+    #   1. Deploy the agent CRD in kagent namespace
+    #   2. Add a line to route_agent() below
+    #   3. kubectl apply this workflow template
+    #
+    - name: parse-otlp
+      inputs:
+        parameters:
+          - name: otlp-payload
+      outputs:
+        parameters:
+          - name: events
+            valueFrom:
+              path: /tmp/events.json
+          - name: event-count
+            valueFrom:
+              path: /tmp/event-count.txt
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        source: |
+          REMEDIATE="{{workflow.parameters.remediate}}"
+
+          cat > /tmp/otlp_raw.txt << '__OTLP_EOF__'
+          {{inputs.parameters.otlp-payload}}
+          __OTLP_EOF__
+
+          # Decode payload — try JSON first, then Base64
+          if jq empty /tmp/otlp_raw.txt 2>/dev/null; then
+            cp /tmp/otlp_raw.txt /tmp/otlp_input.json
+          elif tr -d '[:space:]' < /tmp/otlp_raw.txt | base64 -d > /tmp/otlp_input.json 2>/dev/null && jq empty /tmp/otlp_input.json 2>/dev/null; then
+            echo "Decoded Base64 payload"
+          else
+            echo "ERROR: payload is neither JSON nor Base64"
+            echo "[]" > /tmp/events.json && echo "0" > /tmp/event-count.txt
+            exit 0
+          fi
+
+          echo "Payload: $(wc -c < /tmp/otlp_input.json | tr -d ' ') bytes"
+
+          # Parse OTLP, filter critical events, route to agents
+          jq --arg remediate "$REMEDIATE" '
+
+            # OTLP attribute array → object
+            def attrs: [.[]? | {(.key): (.value.stringValue // (.value.intValue // .value.boolValue // "" | tostring))}] | add // {};
+
+            # Only process these event reasons
+            def is_critical: . as $r |
+              ["CrashLoopBackOff","OOMKilled","OOMKilling","FailedScheduling",
+               "NodeNotReady","NodeNotSchedulable","FailedMount","FailedAttachVolume"]
+              | any(. == $r);
+
+            # --- Agent routing table ---
+            # Namespace → agent name. Add new entries here.
+            def route_agent($ns):
+              if   $ns == "kube-system"       then "kube-system-agent"
+              elif $ns == "flux-system"       then "flux-system-agent"
+              elif $ns == "gatekeeper-system" then "gatekeeper-system-agent"
+              elif $ns == "aks-istio-system"  then "aks-istio-system-agent"
+              elif $ns == "aks-istio-ingress" then "aks-istio-ingress-agent"
+              elif $remediate == "true"       then "sre-remediation-agent"
+              else                                 "sre-triage-agent"
+              end;
+
+            [
+              .resourceLogs[]? |
+              (.resource.attributes // [] | attrs) as $res |
+              .scopeLogs[]?.logRecords[]? |
+              (.attributes // [] | attrs) as $a |
+              (.body.stringValue // "" | if . != "" then (fromjson? // {}) else {} end) as $ev |
+
+              ($a.event_reason // $ev.reason // "") as $reason |
+              ($a.event_type // $ev.type // "") as $type |
+              ($a.obj_namespace // $ev.involvedObject.namespace // "") as $ns |
+
+              select($type == "Warning" and ($reason | is_critical)) |
+
+              {
+                cluster:          ($a.cluster // $res.cluster // "unknown"),
+                environment:      ($a.environment // $res.environment // "unknown"),
+                event_reason:     $reason,
+                event_message:    ($ev.message // ""),
+                object_kind:      ($a.obj_kind // $ev.involvedObject.kind // ""),
+                object_name:      ($ev.involvedObject.name // ""),
+                object_namespace: $ns,
+                event_time:       ($ev.lastTimestamp // $ev.firstTimestamp // ""),
+                event_count:      ($ev.count // 1 | tostring),
+                target_agent:     route_agent($ns)
+              }
+            ]
+          ' /tmp/otlp_input.json > /tmp/events.json
+
+          COUNT=$(jq length /tmp/events.json)
+          echo "$COUNT" > /tmp/event-count.txt
+          echo "[CRITICAL] $COUNT event(s)"
+          jq -r '.[] | "  \(.event_reason): \(.object_kind)/\(.object_name) in \(.object_namespace) → \(.target_agent)"' /tmp/events.json
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    # --- Per-event: dedup → KAgent → GitLab → Logic App → Mattermost ---
+    - name: investigate-and-report
+      inputs:
+        parameters:
+          - name: cluster
+          - name: environment
+          - name: event-reason
+          - name: event-message
+          - name: object-kind
+          - name: object-name
+          - name: object-namespace
+          - name: event-time
+          - name: event-count
+          - name: target-agent
+      retryStrategy:
+        limit: 1
+        retryPolicy: "OnFailure"
+        backoff:
+          duration: "15s"
+          factor: 2
+      script:
+        image: bitnami/kubectl:latest  # REPLACE with your private registry image at work
+        command: [sh]
+        env:
+          - name: WEBHOOK_URL
+            valueFrom:
+              configMapKeyRef:
+                name: mattermost-webhook-config
+                key: WEBHOOK_URL
+          - name: KAGENT_URL
+            valueFrom:
+              configMapKeyRef:
+                name: kagent-config
+                key: KAGENT_URL
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-token
+                key: GITLAB_TOKEN
+                optional: true
+          - name: LOGIC_APP_WEBHOOK_URL
+            valueFrom:
+              secretKeyRef:
+                name: logic-app-webhook-secret
+                key: url
+                optional: true
+        source: |
+          REASON="{{inputs.parameters.event-reason}}"
+          CLUSTER="{{inputs.parameters.cluster}}"
+          ENVIRONMENT="{{inputs.parameters.environment}}"
+          OBJ_KIND="{{inputs.parameters.object-kind}}"
+          OBJ_NAME="{{inputs.parameters.object-name}}"
+          OBJ_NS="{{inputs.parameters.object-namespace}}"
+          EVENT_TIME="{{inputs.parameters.event-time}}"
+          EVENT_COUNT="{{inputs.parameters.event-count}}"
+          REMEDIATE="{{workflow.parameters.remediate}}"
+          GITLAB_PROJECT_ID="{{workflow.parameters.gitlab-project-id}}"
+          GITLAB_URL="{{workflow.parameters.gitlab-url}}"
+
+          # Agent: use routed agent, allow workflow param override
+          KAGENT_AGENT="{{inputs.parameters.target-agent}}"
+          WF_AGENT="{{workflow.parameters.kagent-agent}}"
+          WF_URL="{{workflow.parameters.kagent-url}}"
+          [ -n "$WF_URL" ] && KAGENT_URL="$WF_URL"
+          [ -n "$WF_AGENT" ] && KAGENT_AGENT="$WF_AGENT"
+
+          MODE_LABEL="TRIAGE"
+          [ "$REMEDIATE" = "true" ] && MODE_LABEL="REMEDIATION"
+
+          echo "=========================================="
+          echo "[CRITICAL] $REASON: $OBJ_KIND/$OBJ_NAME in $OBJ_NS"
+          echo "Cluster: $CLUSTER | Agent: $KAGENT_AGENT | Mode: $MODE_LABEL"
+          echo "=========================================="
+
+          # --- Dedup (kubectl) ---
+          DEDUP_CM="event-dedup-cache"
+          DEDUP_NS="argo-events"
+          DEDUP_TTL=86400
+
+          # Strip hash suffixes: myapp-7f8b9c6d4f-abc12 → myapp
+          BASE_NAME=$(echo "$OBJ_NAME" | sed -E 's/-[a-z0-9]{8,10}-[a-z0-9]{5}$//')
+          [ "$BASE_NAME" = "$OBJ_NAME" ] && BASE_NAME=$(echo "$OBJ_NAME" | sed -E 's/-[0-9]+-[a-z0-9]{5}$//')
+          [ "$BASE_NAME" = "$OBJ_NAME" ] && BASE_NAME=$(echo "$OBJ_NAME" | sed -E 's/-[0-9]+$//')
+          [ "$BASE_NAME" = "$OBJ_NAME" ] && BASE_NAME=$(echo "$OBJ_NAME" | sed -E 's/-[a-z0-9]{5}$//')
+
+          DEDUP_KEY="${OBJ_NS}-${REASON}-${BASE_NAME}"
+          NOW=$(date +%s)
+
+          # Check cache
+          CACHED=$(kubectl get configmap "$DEDUP_CM" -n "$DEDUP_NS" \
+            -o jsonpath="{.data.${DEDUP_KEY}}" 2>/dev/null || true)
+
+          if [ -n "$CACHED" ]; then
+            CACHED_TIME=$(echo "$CACHED" | cut -d'|' -f1)
+            AGE=$(( NOW - CACHED_TIME ))
+            if [ "$AGE" -lt "$DEDUP_TTL" ]; then
+              echo "DUPLICATE: ${DEDUP_KEY} seen $(( AGE / 3600 ))h ago. Skipping."
+              exit 0
+            fi
+            echo "EXPIRED: reprocessing ($(( AGE / 3600 ))h old)"
+          fi
+
+          # Record in cache
+          kubectl get configmap "$DEDUP_CM" -n "$DEDUP_NS" >/dev/null 2>&1 || \
+            kubectl create configmap "$DEDUP_CM" -n "$DEDUP_NS"
+          kubectl patch configmap "$DEDUP_CM" -n "$DEDUP_NS" \
+            --type merge -p "{\"data\":{\"${DEDUP_KEY}\":\"${NOW}|${OBJ_NAME}\"}}" 2>/dev/null || true
+          echo "Dedup: ${DEDUP_KEY} recorded"
+
+          # --- Read event message safely ---
+          cat > /tmp/event_message.txt << '__MSG_EOF__'
+          {{inputs.parameters.event-message}}
+          __MSG_EOF__
+          EVENT_MSG=$(head -c 1000 /tmp/event_message.txt)
+
+          # =================================================================
+          # STEP 1: KAgent A2A Analysis
+          # =================================================================
+          ANALYSIS="(KAgent not reachable)"
+          KAGENT_STATUS="unknown"
+          DURATION="0"
+          AGENT_TURNS="0"
+
+          if [ -n "$KAGENT_URL" ] && [ -n "$KAGENT_AGENT" ]; then
+            jq -n \
+              --arg reason "$REASON" --arg kind "$OBJ_KIND" --arg name "$OBJ_NAME" \
+              --arg namespace "$OBJ_NS" --arg message "$EVENT_MSG" \
+              --arg cluster "$CLUSTER" --arg remediate "$REMEDIATE" \
+              --arg id "critical-$(date +%s)" \
+              '{
+                jsonrpc: "2.0", method: "message/send", id: $id,
+                params: { message: { role: "user", parts: [{"kind": "text", "text": (
+                  if $remediate == "true" then
+                    "Fix this CRITICAL K8s issue on cluster " + $cluster + ":\n"
+                  else
+                    "Investigate this CRITICAL K8s Event on cluster " + $cluster + ":\n"
+                  end +
+                  "Reason: " + $reason + "\nObject: " + $kind + "/" + $name + "\n" +
+                  "CRITICAL: use exact namespace \"" + $namespace + "\"\n" +
+                  "Message: " + $message + "\n\n" +
+                  if $remediate == "true" then
+                    "Apply the minimum fix. Verify healthy. Report: Action/Before/After/Status/Rollback."
+                  else
+                    "Triage this event. Gather evidence. Report: Issue/Evidence/Root Cause/Recommended Fix."
+                  end
+                )}]}}
+              }' > /tmp/kagent_request.json
+
+            echo "Calling KAgent: $KAGENT_AGENT..."
+            START=$(date +%s)
+
+            HTTP_CODE=$(curl -s -o /tmp/kagent_response.json -w "%{http_code}" \
+              --connect-timeout 10 --max-time 600 \
+              -X POST "${KAGENT_URL}/api/a2a/kagent/${KAGENT_AGENT}/" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/kagent_request.json)
+
+            DURATION=$(( $(date +%s) - START ))
+            echo "KAgent: HTTP $HTTP_CODE, ${DURATION}s"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              RPC_ERROR=$(jq -r '.error.message // empty' /tmp/kagent_response.json 2>/dev/null)
+              if [ -n "$RPC_ERROR" ]; then
+                ANALYSIS="(A2A error: $RPC_ERROR)"
+              else
+                KAGENT_STATUS=$(jq -r '.result.status.state // "unknown"' /tmp/kagent_response.json)
+
+                ANALYSIS=$(jq -r '
+                  [.result.artifacts[]?.parts[]? | select(.kind == "text" or .text) | (.text // "")] | join("\n\n")
+                ' /tmp/kagent_response.json 2>/dev/null)
+
+                [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ] && \
+                  ANALYSIS=$(jq -r '
+                    [.result.history[]? | select(.role == "agent") | .parts[]? | select(.kind == "text" or .text) | (.text // "")] | last // "(no analysis)"
+                  ' /tmp/kagent_response.json 2>/dev/null)
+
+                # Strip think tags (Qwen)
+                ANALYSIS=$(echo "$ANALYSIS" | sed 's/<think>.*<\/think>//g')
+                AGENT_TURNS=$(jq -r '[.result.history[]? | select(.role == "agent")] | length' /tmp/kagent_response.json 2>/dev/null)
+                echo "Status: $KAGENT_STATUS, Turns: $AGENT_TURNS, $(echo "$ANALYSIS" | wc -c | tr -d ' ') chars"
+              fi
+            else
+              ANALYSIS="(KAgent failed: HTTP $HTTP_CODE)"
+              cat /tmp/kagent_response.json 2>/dev/null
+            fi
+          else
+            echo "KAgent not configured, skipping"
+          fi
+
+          # =================================================================
+          # STEP 2: GitLab Issue
+          # =================================================================
+          ISSUE_URL=""
+          ISSUE_IID=""
+
+          if [ -n "$GITLAB_TOKEN" ] && [ -n "$GITLAB_PROJECT_ID" ]; then
+            printf '%s' "$ANALYSIS" > /tmp/analysis.txt
+
+            OBJ_KIND_LOWER=$(echo "$OBJ_KIND" | tr '[:upper:]' '[:lower:]')
+            printf '%s\n%s\n%s\n%s' \
+              "kubectl describe ${OBJ_KIND_LOWER} ${OBJ_NAME} -n ${OBJ_NS}" \
+              "kubectl logs ${OBJ_NAME} -n ${OBJ_NS} --tail=100" \
+              "kubectl get events -n ${OBJ_NS} --field-selector involvedObject.name=${OBJ_NAME} --sort-by='.lastTimestamp'" \
+              "kubectl get ${OBJ_KIND_LOWER} ${OBJ_NAME} -n ${OBJ_NS} -o wide" > /tmp/commands.txt
+
+            TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            if [ "$REMEDIATE" = "true" ]; then
+              STATUS_EMOJI="wrench"; STATUS_LABEL="REMEDIATION APPLIED"; LABEL="remediation"
+            else
+              STATUS_EMOJI="mag"; STATUS_LABEL="TRIAGE ANALYSIS"; LABEL="triage"
+            fi
+
+            BODY=$(jq -n --rawfile analysis /tmp/analysis.txt --rawfile commands /tmp/commands.txt \
+              --arg status_label "$STATUS_LABEL" --arg event_type "$REASON" \
+              --arg cluster "$CLUSTER" --arg namespace "$OBJ_NS" \
+              --arg resource "${OBJ_KIND}/${OBJ_NAME}" --arg timestamp "$TIMESTAMP" \
+              --arg agent_name "$KAGENT_AGENT" --arg state "$KAGENT_STATUS" \
+              --arg agent_turns "$AGENT_TURNS" --arg duration "$DURATION" \
+              --arg event_msg "$EVENT_MSG" --arg workflow_name "{{workflow.name}}" -r '
+              "# " + $status_label + "\n\n" +
+              "| Field | Value |\n|-------|-------|\n" +
+              "| **Event** | " + $event_type + " |\n" +
+              "| **Cluster** | " + $cluster + " |\n" +
+              "| **Namespace** | " + $namespace + " |\n" +
+              "| **Resource** | " + $resource + " |\n" +
+              "| **Timestamp** | " + $timestamp + " |\n" +
+              "| **Agent** | " + $agent_name + " (" + $state + ", " + $agent_turns + " turns, " + $duration + "s) |\n\n" +
+              "### Event Message\n```\n" + $event_msg + "\n```\n\n---\n\n" +
+              "# KAgent Analysis\n\n" + $analysis + "\n\n---\n\n" +
+              "## Quick Commands\n```bash\n" + $commands + "\n```\n\n" +
+              "*" + $workflow_name + "*"
+            ')
+
+            TITLE="[:${STATUS_EMOJI}:][${CLUSTER}] ${REASON}: ${OBJ_NS}/${OBJ_NAME}"
+
+            jq -n --arg title "$TITLE" --arg description "$BODY" \
+              --arg labels "kagent,${LABEL},${REASON},critical,auto-generated" \
+              '{title: $title, description: $description, labels: $labels}' > /tmp/gitlab-payload.json
+
+            GL_HTTP=$(curl -s -o /tmp/gitlab-response.json -w "%{http_code}" \
+              -X POST "${GITLAB_URL}/api/v4/projects/${GITLAB_PROJECT_ID}/issues" \
+              -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/gitlab-payload.json)
+
+            if [ "$GL_HTTP" = "201" ]; then
+              ISSUE_URL=$(jq -r '.web_url' /tmp/gitlab-response.json)
+              ISSUE_IID=$(jq -r '.iid' /tmp/gitlab-response.json)
+              echo "GitLab: #${ISSUE_IID} ${ISSUE_URL}"
+            else
+              echo "GitLab failed (HTTP $GL_HTTP):"
+              cat /tmp/gitlab-response.json 2>/dev/null
+            fi
+          fi
+
+          # =================================================================
+          # STEP 3: Logic App → Teams
+          # =================================================================
+          LA_HTTP=""
+          if [ -n "$LOGIC_APP_WEBHOOK_URL" ]; then
+            [ ! -f /tmp/analysis.txt ] && printf '%s' "$ANALYSIS" > /tmp/analysis.txt
+
+            jq -n --rawfile analysis /tmp/analysis.txt \
+              --arg namespace "$OBJ_NS" --arg reason "$REASON" \
+              --arg kind "$OBJ_KIND" --arg name "$OBJ_NAME" \
+              --arg cluster "$CLUSTER" --arg gitlab_issue_url "${ISSUE_URL:-}" \
+              --arg source "k8s-triage-critical" \
+              --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{
+                event_namespace: $namespace, event_reason: $reason,
+                resource_kind: $kind, resource_name: $name,
+                agent_diagnosis: ($analysis | .[0:4000]),
+                gitlab_issue_url: $gitlab_issue_url,
+                timestamp: $timestamp, source: $source, cluster: $cluster
+              }' > /tmp/logic-app.json
+
+            LA_HTTP=$(curl -s -o /tmp/la_response.txt -w "%{http_code}" \
+              -X POST "$LOGIC_APP_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d @/tmp/logic-app.json --max-time 10)
+
+            echo "Logic App: HTTP $LA_HTTP"
+            [ "$LA_HTTP" != "200" ] && [ "$LA_HTTP" != "202" ] && cat /tmp/la_response.txt 2>/dev/null
+          fi
+
+          # =================================================================
+          # STEP 4: Mattermost
+          # =================================================================
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "No Mattermost webhook, skipping"
+          else
+            printf '%s' "$(echo "$ANALYSIS" | head -c 2000)" > /tmp/analysis_mm.txt
+
+            OBJ_KIND_LOWER=$(echo "$OBJ_KIND" | tr '[:upper:]' '[:lower:]')
+            printf '%s\n%s\n%s' \
+              "kubectl describe ${OBJ_KIND_LOWER} ${OBJ_NAME} -n ${OBJ_NS} | tail -30" \
+              "kubectl logs ${OBJ_NAME} -n ${OBJ_NS} --tail=50" \
+              "kubectl get events -n ${OBJ_NS} --field-selector involvedObject.name=${OBJ_NAME}" > /tmp/mm_commands.txt
+
+            jq -n --rawfile analysis /tmp/analysis_mm.txt --rawfile commands /tmp/mm_commands.txt \
+              --arg cluster "$CLUSTER" --arg environment "$ENVIRONMENT" \
+              --arg event_reason "$REASON" --arg object_kind "$OBJ_KIND" \
+              --arg object_name "$OBJ_NAME" --arg object_namespace "$OBJ_NS" \
+              --arg event_count "$EVENT_COUNT" --arg event_time "$EVENT_TIME" \
+              --arg event_message "$EVENT_MSG" --arg agent "$KAGENT_AGENT" \
+              --arg duration "${DURATION}s" --arg turns "$AGENT_TURNS" \
+              --arg issue_iid "${ISSUE_IID:-N/A}" --arg issue_url "${ISSUE_URL:-}" \
+              --arg workflow "{{workflow.name}}" \
+              '{
+                username: "KAgent SRE",
+                icon_emoji: ":rotating_light:",
+                text: (":red_circle: **CRITICAL: " + $event_reason + "** on " + $cluster),
+                attachments: [
+                  {
+                    fallback: ($event_reason + " - critical"),
+                    color: "#e74c3c",
+                    title: ($object_kind + "/" + $object_name),
+                    text: ("| Field | Value |\n|-------|-------|\n| **Cluster** | `" + $cluster + "` |\n| **Namespace** | `" + $object_namespace + "` |\n| **Reason** | " + $event_reason + " |\n| **Count** | " + $event_count + " |\n| **Agent** | " + $agent + " (" + $duration + ", " + $turns + " turns) |" + (if $issue_url != "" then "\n| **GitLab** | [#" + $issue_iid + "](" + $issue_url + ") |" else "" end))
+                  },
+                  {
+                    fallback: "AI Analysis",
+                    color: "#3498db",
+                    title: ":robot_face: KAgent Analysis",
+                    text: $analysis
+                  }
+                ] + (if ($object_kind == "Pod") then [{
+                  fallback: "Quick Commands",
+                  color: "#2ecc71",
+                  title: "Quick Commands",
+                  text: ("```\n" + $commands + "\n```")
+                }] else [] end)
+              }' > /tmp/mattermost.json
+
+            MM_HTTP=$(curl -s -o /tmp/mm_response.txt -w "%{http_code}" \
+              -X POST "$WEBHOOK_URL" -H "Content-Type: application/json" \
+              -d @/tmp/mattermost.json --max-time 10)
+            echo "Mattermost: HTTP $MM_HTTP"
+            [ "$MM_HTTP" != "200" ] && cat /tmp/mm_response.txt 2>/dev/null
+          fi
+
+          echo "=========================================="
+          echo "Done: $REASON $OBJ_KIND/$OBJ_NAME in $OBJ_NS"
+          echo "  Agent: $KAGENT_AGENT | KAgent: $KAGENT_STATUS (${DURATION}s)"
+          echo "  GitLab: ${ISSUE_IID:-skipped} | Logic App: ${LA_HTTP:-skipped} | Mattermost: ${MM_HTTP:-skipped}"
+          echo "=========================================="
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
