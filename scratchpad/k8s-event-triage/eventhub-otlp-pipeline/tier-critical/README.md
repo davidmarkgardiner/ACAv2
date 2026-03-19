@@ -1,5 +1,7 @@
 # Critical Tier — K8s Event Triage Workflow
 
+https://excalidraw.com/#json=TGQpa2MlttaooWUykl1I2,FKY9werqeIDHOwPcuNgaEA
+
 Automated triage pipeline for critical Kubernetes events. Events flow from workload clusters through Azure Event Hub and are analysed by KAgent AI agents.
 
 ---
