@@ -1,0 +1,227 @@
+# Pod Cleanup CronJob
+# Removes stale pods (CrashLoopBackOff, Completed, Failed) to free disk space on AKS nodes.
+# Kubelet GC will then automatically reclaim unused container images.
+#
+# IMPORTANT: Replace bitnami/kubectl:latest with your private registry image for production use.
+# Example: myregistry.azurecr.io/bitnami/kubectl:1.31
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-cleanup
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: pod-cleanup
+    app.kubernetes.io/component: maintenance
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-cleanup
+  labels:
+    app.kubernetes.io/name: pod-cleanup
+    app.kubernetes.io/component: maintenance
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pod-cleanup
+  labels:
+    app.kubernetes.io/name: pod-cleanup
+    app.kubernetes.io/component: maintenance
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: pod-cleanup
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pod-cleanup
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: pod-cleanup
+    app.kubernetes.io/component: maintenance
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    description: "Cleans up stale pods (CrashLoopBackOff, Completed, Failed) across all namespaces except system namespaces"
+    owner: "platform-engineering"
+spec:
+  schedule: "0 * * * *"  # Every hour on the hour
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pod-cleanup
+        app.kubernetes.io/component: maintenance
+    spec:
+      ttlSecondsAfterFinished: 3600  # Clean up completed Job pods after 1 hour
+      backoffLimit: 2
+      activeDeadlineSeconds: 600  # Timeout after 10 minutes
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: pod-cleanup
+            app.kubernetes.io/component: maintenance
+        spec:
+          serviceAccountName: pod-cleanup
+          restartPolicy: Never
+          # Replace bitnami/kubectl:latest with your private registry image for production
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              env:
+                - name: DRY_RUN
+                  value: "false"  # Set to "true" to log without deleting
+                - name: EXCLUDED_NAMESPACES
+                  value: "kube-system,argo,argo-events,kagent"
+                - name: CRASHLOOP_RESTART_THRESHOLD
+                  value: "50"
+                - name: CRASHLOOP_AGE_HOURS
+                  value: "6"
+                - name: COMPLETED_AGE_HOURS
+                  value: "24"
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  # ── Configuration ──────────────────────────────────────────
+                  IFS=',' read -ra EXCLUDED <<< "${EXCLUDED_NAMESPACES}"
+                  RESTART_THRESHOLD="${CRASHLOOP_RESTART_THRESHOLD}"
+                  CRASHLOOP_AGE_SECONDS=$(( CRASHLOOP_AGE_HOURS * 3600 ))
+                  COMPLETED_AGE_SECONDS=$(( COMPLETED_AGE_HOURS * 3600 ))
+                  NOW=$(date +%s)
+                  DELETED=0
+                  SKIPPED=0
+
+                  log() {
+                    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+                  }
+
+                  is_excluded() {
+                    local ns="$1"
+                    for excluded in "${EXCLUDED[@]}"; do
+                      if [[ "$ns" == "$excluded" ]]; then
+                        return 0
+                      fi
+                    done
+                    return 1
+                  }
+
+                  delete_pod() {
+                    local ns="$1" pod="$2" reason="$3"
+                    if [[ "${DRY_RUN}" == "true" ]]; then
+                      log "DRY-RUN: would delete pod ${ns}/${pod} -- ${reason}"
+                    else
+                      log "DELETING pod ${ns}/${pod} -- ${reason}"
+                      kubectl delete pod -n "${ns}" "${pod}" --grace-period=30 2>&1 || log "WARN: failed to delete ${ns}/${pod}"
+                    fi
+                    DELETED=$((DELETED + 1))
+                  }
+
+                  log "=== Pod Cleanup Starting ==="
+                  log "Mode: $(if [[ "${DRY_RUN}" == "true" ]]; then echo 'DRY-RUN'; else echo 'LIVE'; fi)"
+                  log "Excluded namespaces: ${EXCLUDED_NAMESPACES}"
+                  log "CrashLoopBackOff restart threshold: ${RESTART_THRESHOLD}"
+                  log "CrashLoopBackOff age threshold: ${CRASHLOOP_AGE_HOURS}h"
+                  log "Completed/Failed age threshold: ${COMPLETED_AGE_HOURS}h"
+
+                  # ── 1. CrashLoopBackOff pods with excessive restarts ──────
+                  log "--- Checking CrashLoopBackOff pods (restarts > ${RESTART_THRESHOLD}) ---"
+                  kubectl get pods --all-namespaces -o json | \
+                    jq -r --argjson threshold "${RESTART_THRESHOLD}" '
+                      .items[] |
+                      select(.status.containerStatuses != null) |
+                      select(.status.containerStatuses[].state.waiting.reason == "CrashLoopBackOff") |
+                      select([.status.containerStatuses[].restartCount] | add > $threshold) |
+                      [.metadata.namespace, .metadata.name, ([.status.containerStatuses[].restartCount] | add | tostring)] |
+                      @tsv
+                    ' 2>/dev/null | while IFS=$'\t' read -r ns pod restarts; do
+                    if is_excluded "${ns}"; then
+                      log "SKIP (excluded ns): ${ns}/${pod} restarts=${restarts}"
+                      SKIPPED=$((SKIPPED + 1))
+                      continue
+                    fi
+                    delete_pod "${ns}" "${pod}" "CrashLoopBackOff with ${restarts} restarts (threshold: ${RESTART_THRESHOLD})"
+                  done
+
+                  # ── 2. CrashLoopBackOff pods older than threshold ─────────
+                  log "--- Checking CrashLoopBackOff pods (age > ${CRASHLOOP_AGE_HOURS}h) ---"
+                  kubectl get pods --all-namespaces -o json | \
+                    jq -r --argjson now "${NOW}" --argjson age "${CRASHLOOP_AGE_SECONDS}" '
+                      .items[] |
+                      select(.status.containerStatuses != null) |
+                      select(.status.containerStatuses[].state.waiting.reason == "CrashLoopBackOff") |
+                      select((.status.startTime | fromdateiso8601) < ($now - $age)) |
+                      [.metadata.namespace, .metadata.name, .status.startTime] |
+                      @tsv
+                    ' 2>/dev/null | while IFS=$'\t' read -r ns pod startTime; do
+                    if is_excluded "${ns}"; then
+                      log "SKIP (excluded ns): ${ns}/${pod} started=${startTime}"
+                      SKIPPED=$((SKIPPED + 1))
+                      continue
+                    fi
+                    delete_pod "${ns}" "${pod}" "CrashLoopBackOff running since ${startTime} (threshold: ${CRASHLOOP_AGE_HOURS}h)"
+                  done
+
+                  # ── 3. Completed and Failed pods older than threshold ─────
+                  log "--- Checking Completed/Failed pods (age > ${COMPLETED_AGE_HOURS}h) ---"
+                  for phase in Succeeded Failed; do
+                    kubectl get pods --all-namespaces --field-selector="status.phase=${phase}" -o json | \
+                      jq -r --argjson now "${NOW}" --argjson age "${COMPLETED_AGE_SECONDS}" '
+                        .items[] |
+                        select(
+                          (
+                            (.status.containerStatuses // [])[] |
+                            select(.state.terminated != null) |
+                            .state.terminated.finishedAt // empty |
+                            fromdateiso8601
+                          ) < ($now - $age)
+                          // ((.metadata.creationTimestamp | fromdateiso8601) < ($now - $age))
+                        ) |
+                        [.metadata.namespace, .metadata.name, .metadata.creationTimestamp] |
+                        @tsv
+                      ' 2>/dev/null | while IFS=$'\t' read -r ns pod created; do
+                      if is_excluded "${ns}"; then
+                        log "SKIP (excluded ns): ${ns}/${pod} phase=${phase} created=${created}"
+                        SKIPPED=$((SKIPPED + 1))
+                        continue
+                      fi
+                      delete_pod "${ns}" "${pod}" "${phase} since ${created} (threshold: ${COMPLETED_AGE_HOURS}h)"
+                    done
+                  done
+
+                  log "=== Pod Cleanup Complete ==="
+                  log "Pods processed for deletion: ${DELETED}"
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1001
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
