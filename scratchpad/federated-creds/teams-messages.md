@@ -4,6 +4,18 @@ Informal messages for different audiences. Pick the one that fits.
 
 ---
 
+## TL;DR — Three Bullet Summary
+
+Use these three bullets at the top of any message or as a standalone post:
+
+- **The problem:** Azure Resource Manager performs no validation on the OIDC issuer URL when creating a FederatedIdentityCredential. The issuer is a free-text string — you can point any managed identity at any AKS cluster in the tenant, regardless of environment. This is a Microsoft platform gap with no planned fix. AWS and GCP both have native guardrails for the equivalent scenario.
+
+- **The attack vector:** Anyone with Contributor RBAC on a production subscription can create a FIC that trusts a dev cluster's OIDC endpoint. A pod on that dev cluster could then authenticate as the prod managed identity and access prod resources — Key Vault secrets, databases, storage accounts. Dev clusters cannot self-escalate; the action must come from the prod side, but any Contributor-level principal (human or SPN) across the organisation could do this, intentionally or by mistake.
+
+- **The proposed solution:** An Azure Policy with a dynamically generated allowlist. A script queries all AKS clusters across the management group, groups OIDC endpoints by the existing `op-environment` tag (dev / pre-prod / prod), and the policy denies any FIC write where the issuer doesn't match the subscription's environment. Runs nightly with manual trigger for cluster rebuilds. Rolling out in Audit mode first, Deny mode in two weeks.
+
+---
+
 ## Option 1: Short and punchy (for the platform/infra channel)
 
 **Heads up -- Workload Identity Federation gap**
