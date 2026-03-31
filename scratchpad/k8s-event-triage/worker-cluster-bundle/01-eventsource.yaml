@@ -1,0 +1,22 @@
+# EventSource: Watch all K8s Warning events
+# Triage step in workflow will determine criticality
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: k8s-all-warnings
+  namespace: argo-events
+spec:
+  eventBusName: default
+  resource:
+    all-warnings:
+      namespace: test-autohealer
+      group: ""
+      version: v1
+      resource: events
+      eventTypes:
+        - ADD
+      filter:
+        fields:
+          - key: type
+            operation: "=="
+            value: Warning

@@ -1,0 +1,78 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: kagent-triage-kro
+  namespace: argo-events
+  labels:
+    app: kagent-triage
+    kagent-triage/namespace: kro-system
+spec:
+  eventBusName: default
+  dependencies:
+  - name: k8s-events
+    eventSourceName: k8s-warning-events
+    eventName: warning-events
+    filters:
+      data:
+      - path: body.involvedObject.namespace
+        type: string
+        value:
+        - kro-system
+      - path: body.reason
+        type: string
+        comparator: '!='
+        value:
+        - PolicyViolation
+  triggers:
+  - template:
+      name: kagent-triage-kro
+      k8s:
+        operation: create
+        source:
+          resource:
+            apiVersion: argoproj.io/v1alpha1
+            kind: Workflow
+            metadata:
+              generateName: kagent-triage-kro-
+              namespace: argo-events
+            spec:
+              workflowTemplateRef:
+                name: kagent-triage
+              arguments:
+                parameters:
+                - name: event-namespace
+                  value: kro-system
+                - name: event-name
+                - name: event-reason
+                - name: event-message
+                - name: resource-kind
+                - name: resource-name
+                - name: target-agent
+                  value: kro-agent
+        parameters:
+        - src:
+            dependencyName: k8s-events
+            dataKey: body.involvedObject.name
+          dest: spec.arguments.parameters.1.value
+        - src:
+            dependencyName: k8s-events
+            dataKey: body.reason
+          dest: spec.arguments.parameters.2.value
+        - src:
+            dependencyName: k8s-events
+            dataKey: body.message
+          dest: spec.arguments.parameters.3.value
+        - src:
+            dependencyName: k8s-events
+            dataKey: body.involvedObject.kind
+          dest: spec.arguments.parameters.4.value
+        - src:
+            dependencyName: k8s-events
+            dataKey: body.involvedObject.name
+          dest: spec.arguments.parameters.5.value
+    retryStrategy:
+      steps: 3
+      duration: 10s
+    rateLimit:
+      unit: minute
+      requestsPerUnit: 5

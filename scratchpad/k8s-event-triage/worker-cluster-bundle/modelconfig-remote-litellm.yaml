@@ -1,0 +1,81 @@
+# ModelConfig for worker clusters connecting to LiteLLM on the management cluster
+# via Istio VirtualService (HTTPS with custom CA)
+#
+# Prerequisites:
+#   1. Get the CA cert from the management cluster:
+#        kubectl get secret <tls-secret> -n istio-system \
+#          -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+#
+#   2. Create the ConfigMap with the CA cert:
+#        kubectl create configmap litellm-ca-cert \
+#          --from-file=ca.crt=ca.crt \
+#          -n kagent
+#
+#   3. Create the Secret from the ConfigMap (kagent ModelConfig requires a Secret):
+#        kubectl create secret generic litellm-ca-cert-secret \
+#          --from-file=ca.crt=ca.crt \
+#          -n kagent
+#
+#   4. Create the API key secret:
+#        kubectl create secret generic litellm-key \
+#          --from-literal=api-key="sk-your-litellm-key" \
+#          -n kagent
+#
+# Note: kagent's ModelConfig CRD only supports caCertSecretRef (not ConfigMap).
+#       We store the CA in both a ConfigMap (for visibility/sharing) and a Secret
+#       (for kagent). To keep them in sync, use the helper script or just recreate
+#       from the same ca.crt file.
+
+---
+# ConfigMap — human-readable, easy to inspect, shareable across namespaces
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-ca-cert
+  namespace: kagent
+  labels:
+    app: kagent-triage
+    purpose: tls-ca-certificate
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    REPLACE_WITH_YOUR_CA_CERTIFICATE
+    -----END CERTIFICATE-----
+
+---
+# Secret — required by kagent ModelConfig TLS, same cert content as ConfigMap
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-ca-cert-secret
+  namespace: kagent
+  labels:
+    app: kagent-triage
+    purpose: tls-ca-certificate
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    REPLACE_WITH_YOUR_CA_CERTIFICATE
+    -----END CERTIFICATE-----
+
+---
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: litellm-qwen-14b
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: qwen2.5-14b
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    # Point to LiteLLM on the management cluster via Istio VirtualService
+    # Update this URL to match your VirtualService host
+    baseUrl: https://litellm.your-domain.com/v1
+  tls:
+    caCertSecretRef: litellm-ca-cert-secret
+    caCertSecretKey: ca.crt
+    disableSystemCAs: false
+    disableVerify: false

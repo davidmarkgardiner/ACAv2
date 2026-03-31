@@ -1,0 +1,530 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: kagent-triage
+  namespace: argo-events
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 300
+  arguments:
+    parameters:
+      - name: event-namespace
+        value: ""
+      - name: event-name
+        value: ""
+      - name: event-reason
+        value: ""
+      - name: event-message
+        value: ""
+      - name: resource-kind
+        value: ""
+      - name: resource-name
+        value: ""
+      - name: telegram-chat-id
+        value: "-1002381931352"  # Default: main notifications channel
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: find-agent
+            template: find-agent
+            arguments:
+              parameters:
+                - name: event-namespace
+                  value: "{{workflow.parameters.event-namespace}}"
+
+          - name: create-conversation
+            template: create-conversation
+            dependencies: [find-agent]
+            arguments:
+              parameters:
+                - name: agent-id
+                  value: "{{tasks.find-agent.outputs.result}}"
+                - name: event-namespace
+                  value: "{{workflow.parameters.event-namespace}}"
+                - name: event-name
+                  value: "{{workflow.parameters.event-name}}"
+                - name: event-reason
+                  value: "{{workflow.parameters.event-reason}}"
+                - name: event-message
+                  value: "{{workflow.parameters.event-message}}"
+                - name: resource-kind
+                  value: "{{workflow.parameters.resource-kind}}"
+                - name: resource-name
+                  value: "{{workflow.parameters.resource-name}}"
+
+          - name: create-gitlab-issue
+            template: create-gitlab-issue
+            dependencies: [create-conversation]
+            arguments:
+              parameters:
+                - name: agent-response
+                  value: "{{tasks.create-conversation.outputs.result}}"
+                - name: event-namespace
+                  value: "{{workflow.parameters.event-namespace}}"
+                - name: event-reason
+                  value: "{{workflow.parameters.event-reason}}"
+                - name: resource-kind
+                  value: "{{workflow.parameters.resource-kind}}"
+                - name: resource-name
+                  value: "{{workflow.parameters.resource-name}}"
+
+          - name: send-telegram-notification
+            template: send-telegram
+            dependencies: [create-gitlab-issue]
+            arguments:
+              parameters:
+                - name: telegram-chat-id
+                  value: "{{workflow.parameters.telegram-chat-id}}"
+                - name: agent-response
+                  value: "{{tasks.create-conversation.outputs.result}}"
+                - name: event-namespace
+                  value: "{{workflow.parameters.event-namespace}}"
+                - name: event-reason
+                  value: "{{workflow.parameters.event-reason}}"
+                - name: resource-kind
+                  value: "{{workflow.parameters.resource-kind}}"
+                - name: resource-name
+                  value: "{{workflow.parameters.resource-name}}"
+                - name: gitlab-issue-url
+                  value: "{{tasks.create-gitlab-issue.outputs.result}}"
+
+          - name: send-logic-app-notification
+            template: send-logic-app
+            dependencies: [create-gitlab-issue]
+            arguments:
+              parameters:
+                - name: agent-response
+                  value: "{{tasks.create-conversation.outputs.result}}"
+                - name: event-namespace
+                  value: "{{workflow.parameters.event-namespace}}"
+                - name: event-reason
+                  value: "{{workflow.parameters.event-reason}}"
+                - name: resource-kind
+                  value: "{{workflow.parameters.resource-kind}}"
+                - name: resource-name
+                  value: "{{workflow.parameters.resource-name}}"
+                - name: gitlab-issue-url
+                  value: "{{tasks.create-gitlab-issue.outputs.result}}"
+
+    - name: find-agent
+      inputs:
+        parameters:
+          - name: event-namespace
+      script:
+        image: python:3.11-slim
+        command: [python]
+        source: |
+          import json
+          import sys
+          import os
+          import urllib.request
+          import urllib.error
+
+          namespace = "{{inputs.parameters.event-namespace}}"
+          
+          try:
+              # Call kagent controller API to list agents
+              req = urllib.request.Request(
+                  "http://kagent-controller.kagent:8083/api/agents",
+                  headers={"Accept": "application/json"}
+              )
+              
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  data = json.loads(response.read().decode())
+              
+              agents = data.get("agents", [])
+              
+              # First, try to find an agent matching the namespace
+              for agent in agents:
+                  agent_name = agent.get("name", "")
+                  agent_ns = agent.get("namespace", "")
+                  # Check if agent is namespace-specific
+                  if namespace in agent_name.lower():
+                      print(f"{agent_ns}/{agent_name}")
+                      sys.exit(0)
+              
+              # Check for labels/metadata that indicate namespace scope
+              for agent in agents:
+                  agent_name = agent.get("name", "")
+                  agent_ns = agent.get("namespace", "")
+                  labels = agent.get("labels", {})
+                  if labels.get("managed-namespace") == namespace:
+                      print(f"{agent_ns}/{agent_name}")
+                      sys.exit(0)
+              
+              # Fallback to k8s-agent (cluster-wide agent)
+              for agent in agents:
+                  if agent.get("name") == "k8s-agent":
+                      print(f"{agent.get('namespace')}/k8s-agent")
+                      sys.exit(0)
+              
+              # Last resort: use first available agent
+              if agents:
+                  first = agents[0]
+                  print(f"{first.get('namespace')}/{first.get('name')}")
+              else:
+                  print("kagent/k8s-agent")  # Ultimate fallback
+                  
+          except Exception as e:
+              # On any error, fallback to k8s-agent
+              print(f"kagent/k8s-agent", file=sys.stderr)
+              print("kagent/k8s-agent")
+
+    - name: create-conversation
+      inputs:
+        parameters:
+          - name: agent-id
+          - name: event-namespace
+          - name: event-name
+          - name: event-reason
+          - name: event-message
+          - name: resource-kind
+          - name: resource-name
+      script:
+        image: python:3.11-slim
+        command: [python]
+        source: |
+          import json
+          import sys
+          import urllib.request
+          import urllib.error
+
+          agent_id_full = "{{inputs.parameters.agent-id}}"
+          namespace = "{{inputs.parameters.event-namespace}}"
+          event_name = "{{inputs.parameters.event-name}}"
+          reason = "{{inputs.parameters.event-reason}}"
+          message_event = "{{inputs.parameters.event-message}}"
+          kind = "{{inputs.parameters.resource-kind}}"
+          name = "{{inputs.parameters.resource-name}}"
+
+          # Extract agent name (input is "kagent/agent-name" or just "agent-name")
+          if "/" in agent_id_full:
+              agent_namespace, agent_name = agent_id_full.split("/", 1)
+          else:
+              agent_namespace = "kagent"
+              agent_name = agent_id_full
+
+          diagnostic_message = (
+              f"K8s event in namespace {namespace}: {reason} on {kind}/{name}.\n\n"
+              f"Message: {message_event}\n\n"
+              f"Please diagnose and suggest remediation."
+          )
+
+          # Use A2A protocol — proven reliable with kagent v0.8.0-beta4
+          kagent_url = "http://kagent-controller.kagent:8083"
+          a2a_url = f"{kagent_url}/api/a2a/{agent_namespace}/{agent_name}/"
+
+          payload = json.dumps({
+              "jsonrpc": "2.0",
+              "id": f"triage-{namespace}-{name}",
+              "method": "message/send",
+              "params": {
+                  "message": {
+                      "role": "user",
+                      "parts": [{"kind": "text", "text": diagnostic_message}]
+                  }
+              }
+          }).encode()
+
+          try:
+              req = urllib.request.Request(
+                  a2a_url,
+                  data=payload,
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=300) as response:
+                  result = json.loads(response.read().decode())
+
+              # Extract agent response from A2A result
+              artifacts = result.get("result", {}).get("artifacts", [])
+              agent_response = ""
+              for artifact in artifacts:
+                  for part in artifact.get("parts", []):
+                      if part.get("text"):
+                          agent_response += part["text"]
+
+              status = result.get("result", {}).get("status", {}).get("state", "unknown")
+              print(f"A2A status: {status}, response length: {len(agent_response)}", file=sys.stderr)
+
+              if agent_response:
+                  print(agent_response)
+              else:
+                  print(f"No text response from agent. Raw: {json.dumps(result)[:500]}", file=sys.stderr)
+                  print("Agent returned no diagnosis text.")
+                  sys.exit(1)
+
+          except urllib.error.HTTPError as e:
+              error_body = e.read().decode()
+              print(f"HTTP Error {e.code}: {error_body}", file=sys.stderr)
+              print(f"Failed to communicate with kagent. HTTP Error {e.code}: {error_body}")
+              sys.exit(1)
+
+          except Exception as e:
+              print(f"Error: {str(e)}", file=sys.stderr)
+              print(f"Failed to communicate with kagent. Error: {str(e)}")
+              sys.exit(1)
+
+    - name: create-gitlab-issue
+      inputs:
+        parameters:
+          - name: agent-response
+          - name: event-namespace
+          - name: event-reason
+          - name: resource-kind
+          - name: resource-name
+      script:
+        image: python:3.11-slim
+        command: [python]
+        source: |
+          import json
+          import sys
+          import os
+          import urllib.request
+          import urllib.error
+
+          agent_response = """{{inputs.parameters.agent-response}}"""
+          namespace = "{{inputs.parameters.event-namespace}}"
+          reason = "{{inputs.parameters.event-reason}}"
+          kind = "{{inputs.parameters.resource-kind}}"
+          name = "{{inputs.parameters.resource-name}}"
+
+          gitlab_url = os.environ.get("GITLAB_URL", "")
+          gitlab_token = os.environ.get("GITLAB_TOKEN", "")
+          gitlab_project_id = os.environ.get("GITLAB_PROJECT_ID", "")
+
+          if not all([gitlab_url, gitlab_token, gitlab_project_id]):
+              print("Warning: GitLab config incomplete, skipping issue creation", file=sys.stderr)
+              print("N/A")
+              sys.exit(0)
+
+          title = f"[{reason}] {kind}/{name} in {namespace}"
+
+          description = (
+              f"## Kubernetes Event\n\n"
+              f"| Field | Value |\n"
+              f"|-------|-------|\n"
+              f"| **Event** | {reason} |\n"
+              f"| **Namespace** | {namespace} |\n"
+              f"| **Resource** | {kind}/{name} |\n"
+              f"| **Source** | kagent-triage-workflow |\n\n"
+              f"## AI Diagnosis\n\n"
+              f"```\n{agent_response}\n```\n"
+          )
+
+          payload = json.dumps({
+              "title": title,
+              "description": description,
+              "labels": "triage,automated,k8s-event"
+          }).encode()
+
+          try:
+              req = urllib.request.Request(
+                  f"{gitlab_url}/api/v4/projects/{gitlab_project_id}/issues",
+                  data=payload,
+                  headers={
+                      "Content-Type": "application/json",
+                      "PRIVATE-TOKEN": gitlab_token
+                  },
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  result = json.loads(response.read().decode())
+
+              issue_url = result.get("web_url", "N/A")
+              print(f"GitLab issue created: {issue_url}", file=sys.stderr)
+              print(issue_url)
+
+          except urllib.error.HTTPError as e:
+              error_body = e.read().decode()
+              print(f"GitLab HTTP Error {e.code}: {error_body}", file=sys.stderr)
+              print("N/A")
+
+          except Exception as e:
+              print(f"Failed to create GitLab issue: {str(e)}", file=sys.stderr)
+              print("N/A")
+        env:
+          - name: GITLAB_URL
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-token
+                key: url
+                optional: true
+          - name: GITLAB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-token
+                key: token
+                optional: true
+          - name: GITLAB_PROJECT_ID
+            valueFrom:
+              secretKeyRef:
+                name: gitlab-token
+                key: project-id
+                optional: true
+
+    - name: send-telegram
+      inputs:
+        parameters:
+          - name: telegram-chat-id
+          - name: agent-response
+          - name: event-namespace
+          - name: event-reason
+          - name: resource-kind
+          - name: resource-name
+          - name: gitlab-issue-url
+      script:
+        image: python:3.11-slim
+        command: [python]
+        source: |
+          import json
+          import sys
+          import os
+          import urllib.request
+          import urllib.error
+
+          chat_id = "{{inputs.parameters.telegram-chat-id}}"
+          agent_response = """{{inputs.parameters.agent-response}}"""
+          namespace = "{{inputs.parameters.event-namespace}}"
+          reason = "{{inputs.parameters.event-reason}}"
+          kind = "{{inputs.parameters.resource-kind}}"
+          name = "{{inputs.parameters.resource-name}}"
+
+          # Get bot token from environment (mounted from secret)
+          bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          if not bot_token:
+              print("TELEGRAM_BOT_TOKEN not set", file=sys.stderr)
+              # Don't fail the workflow, just log and continue
+              print("Warning: Telegram notification skipped - no bot token available")
+              sys.exit(0)
+
+          gitlab_url = "{{inputs.parameters.gitlab-issue-url}}"
+
+          # Format the message
+          truncated = agent_response[:3000] + ("..." if len(agent_response) > 3000 else "")
+          gitlab_line = f'\U0001f3ab <b>GitLab:</b> <a href="{gitlab_url}">{gitlab_url}</a>\n' if gitlab_url and gitlab_url != "N/A" else ""
+          message = (
+              f"\U0001f527 <b>Kagent Triage: {namespace}</b>\n\n"
+              f"\U0001f4ca <b>Event:</b> {reason}\n"
+              f"\U0001f3af <b>Resource:</b> {kind}/{name}\n"
+              f"{gitlab_line}\n"
+              f"<b>Diagnosis:</b>\n{truncated}\n\n"
+              f"<i>via kagent triage workflow</i>"
+          )
+
+          try:
+              payload = json.dumps({
+                  "chat_id": chat_id,
+                  "text": message,
+                  "parse_mode": "HTML",
+                  "disable_web_page_preview": True
+              }).encode()
+
+              req = urllib.request.Request(
+                  f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                  data=payload,
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  result = json.loads(response.read().decode())
+              
+              if result.get("ok"):
+                  print(f"Telegram message sent successfully to chat {chat_id}")
+              else:
+                  print(f"Telegram API error: {result.get('description')}", file=sys.stderr)
+                  sys.exit(1)
+
+          except Exception as e:
+              print(f"Failed to send Telegram message: {str(e)}", file=sys.stderr)
+              # Don't fail the workflow on notification error
+              print(f"Warning: Telegram notification failed - {str(e)}")
+        env:
+          - name: TELEGRAM_BOT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: telegram-bot-secret
+                key: token
+
+    - name: send-logic-app
+      inputs:
+        parameters:
+          - name: agent-response
+          - name: event-namespace
+          - name: event-reason
+          - name: resource-kind
+          - name: resource-name
+          - name: gitlab-issue-url
+      script:
+        image: python:3.11-slim
+        command: [python]
+        source: |
+          import json
+          import sys
+          import os
+          import urllib.request
+          import urllib.error
+          from datetime import datetime, timezone
+
+          agent_response = """{{inputs.parameters.agent-response}}"""
+          namespace = "{{inputs.parameters.event-namespace}}"
+          reason = "{{inputs.parameters.event-reason}}"
+          kind = "{{inputs.parameters.resource-kind}}"
+          name = "{{inputs.parameters.resource-name}}"
+
+          webhook_url = os.environ.get("LOGIC_APP_WEBHOOK_URL", "")
+          if not webhook_url:
+              print("LOGIC_APP_WEBHOOK_URL not set", file=sys.stderr)
+              print("Warning: Logic App notification skipped - no webhook URL")
+              sys.exit(0)
+
+          gitlab_issue_url = "{{inputs.parameters.gitlab-issue-url}}"
+
+          # Build structured payload for Logic App
+          payload = json.dumps({
+              "event_namespace": namespace,
+              "event_reason": reason,
+              "resource_kind": kind,
+              "resource_name": name,
+              "agent_diagnosis": agent_response[:4000],
+              "gitlab_issue_url": gitlab_issue_url,
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+              "source": "kagent-triage-workflow",
+              "cluster": os.environ.get("CLUSTER_NAME", "unknown")
+          }).encode()
+
+          try:
+              req = urllib.request.Request(
+                  webhook_url,
+                  data=payload,
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  result = response.read().decode()
+                  print(f"Logic App response: {result}", file=sys.stderr)
+                  print(f"Notification sent to Logic App for {namespace}/{kind}/{name}")
+
+          except urllib.error.HTTPError as e:
+              error_body = e.read().decode()
+              print(f"Logic App HTTP Error {e.code}: {error_body}", file=sys.stderr)
+              print(f"Warning: Logic App notification failed - HTTP {e.code}")
+
+          except Exception as e:
+              print(f"Failed to send to Logic App: {str(e)}", file=sys.stderr)
+              print(f"Warning: Logic App notification failed - {str(e)}")
+        env:
+          - name: LOGIC_APP_WEBHOOK_URL
+            valueFrom:
+              secretKeyRef:
+                name: logic-app-webhook-secret
+                key: url
+          - name: CLUSTER_NAME
+            value: "kind-homelab"
