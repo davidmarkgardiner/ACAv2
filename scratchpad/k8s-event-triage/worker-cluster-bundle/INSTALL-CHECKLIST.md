@@ -120,9 +120,9 @@ kubectl get pods -n argo-events | grep eventbus
 
 ---
 
-## Step 5: Install kagent (3 charts)
+## Step 5: Install kagent (2 charts)
 
-kagent requires three Helm charts installed in order:
+kagent requires two Helm charts. CRDs first, then the main chart (which includes controller, tools, UI, PostgreSQL, and built-in agents).
 
 ### 5a: CRDs (must be first)
 
@@ -137,14 +137,16 @@ helm install kagent-crds kagent/kagent-crds \
 
 **Verify:**
 ```bash
-kubectl get crd agents.kagent.dev modelconfigs.kagent.dev
-# agents.kagent.dev        YYYY-MM-DD
-# modelconfigs.kagent.dev  YYYY-MM-DD
+kubectl get crd agents.kagent.dev modelconfigs.kagent.dev remotemcpservers.kagent.dev
+# agents.kagent.dev             YYYY-MM-DD
+# modelconfigs.kagent.dev       YYYY-MM-DD
+# remotemcpservers.kagent.dev   YYYY-MM-DD
 ```
 - [ ] Agent CRD exists
 - [ ] ModelConfig CRD exists
+- [ ] RemoteMCPServer CRD exists
 
-### 5b: kagent controller + tools + UI
+### 5b: kagent (controller + tools + UI + agents — all in one chart)
 
 ```bash
 # Option A: Azure OpenAI
@@ -152,6 +154,8 @@ helm install kagent kagent/kagent \
   --namespace kagent \
   --set providers.default=azureOpenAI \
   --set providers.azureOpenAI.apiKey="YOUR_KEY" \
+  --set providers.azureOpenAI.config.azureEndpoint="https://YOUR-INSTANCE.openai.azure.com" \
+  --set providers.azureOpenAI.config.azureDeployment="gpt-4o" \
   --wait
 
 # Option B: OpenAI
@@ -167,36 +171,52 @@ helm install kagent kagent/kagent \
   --wait
 ```
 
-This deploys: controller, tool server (kagent-tools), UI, PostgreSQL, RBAC.
+This single chart deploys everything:
+- **kagent-controller** — reconciles Agent CRDs, runs the A2A HTTP server
+- **kagent-tools** — MCP tool server (k8s_get_resources, k8s_get_pod_logs, k8s_describe_resource, etc.)
+- **kagent-kmcp-controller** — manages RemoteMCPServer connections
+- **kagent-ui** — web dashboard for chatting with agents
+- **PostgreSQL** — bundled database (for sessions, future memory)
+- **Built-in agents** — k8s-agent, helm-agent, observability-agent, etc. (all enabled by default)
+- **RemoteMCPServer** — `kagent-tool-server` pointing at the tools pod
 
 **Verify:**
 ```bash
 kubectl get pods -n kagent
-# kagent-controller-xxx   Running
-# kagent-tools-xxx        Running    ← MCP tool server (k8s tools)
-# kagent-ui-xxx           Running
-# kagent-postgresql-xxx   Running    ← (if enabled)
+# kagent-controller-xxx               Running
+# kagent-tools-xxx                    Running  ← MCP tool server
+# kagent-kmcp-controller-xxx          Running
+# kagent-ui-xxx                       Running
+# kagent-postgresql-xxx               Running  ← (bundled, enabled by default)
+# k8s-agent-xxx                       Running  ← built-in agent
+# helm-agent-xxx                      Running  ← built-in agent
 ```
 - [ ] kagent-controller running
-- [ ] kagent-tools running (this is the MCP tool server — provides k8s_get_resources, k8s_get_pod_logs, etc.)
+- [ ] **kagent-tools running** (this is the MCP tool server — without it, agents have no k8s tools)
 - [ ] kagent-ui running
 
-### 5c: Pre-built agents (optional)
-
+**If kagent-tools is missing:**
 ```bash
-# Installs k8s-agent, helm-agent, observability-agent, etc.
-helm install kagent-agents kagent/agents \
-  --namespace kagent
-```
+# Check if it's disabled
+helm get values kagent -n kagent -a | grep -A3 "kagent-tools"
 
-**Verify:**
+# Enable it
+helm upgrade kagent kagent/kagent --namespace kagent --set kagent-tools.enabled=true --wait
+
+# Verify the RemoteMCPServer was created (this is how agents find the tools)
+kubectl get remotemcpservers -n kagent
+# kagent-tool-server   http://kagent-tools.kagent:8084/mcp
+```
+- [ ] RemoteMCPServer `kagent-tool-server` exists
+
+**Verify agents can see the tools:**
 ```bash
 kubectl get agents -n kagent
 # k8s-agent             Ready   Accepted
 # helm-agent            Ready   Accepted
 # observability-agent   Ready   Accepted
 ```
-- [ ] Pre-built agents deployed (optional — we deploy our own triage agents in Step 10)
+- [ ] Built-in agents deployed and Ready
 
 ---
 
