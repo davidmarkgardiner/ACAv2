@@ -247,16 +247,98 @@ spec:
 EOF
 ```
 
-### Option B: LiteLLM Proxy (if running separately)
+### Option B: Remote LiteLLM Proxy over HTTPS (cross-cluster via VirtualService)
+
+This is the setup when LiteLLM runs on a different cluster and is exposed via Istio VirtualService over HTTPS.
 
 ```bash
-kubectl create secret generic litellm-key \
-  --from-literal=api-key="YOUR_LITELLM_KEY" \
+# 1. Get the CA certificate
+#    Option i: From the Istio cluster's TLS secret
+kubectl --context=LITELLM_CLUSTER get secret <istio-tls-secret> -n istio-system \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+
+#    Option ii: From the live endpoint (if you don't have cluster access)
+openssl s_client -connect litellm.your-domain.com:443 -showcerts < /dev/null 2>/dev/null \
+  | openssl x509 -outform PEM > ca.crt
+
+#    Option iii: If using a corporate CA, get it from your PKI team
+
+# 2. Create the CA cert Secret on the KAGENT cluster
+kubectl create secret generic litellm-ca-cert-secret \
+  --from-file=ca.crt=ca.crt \
   -n kagent
 
+# 3. Create the API key Secret
+kubectl create secret generic litellm-key \
+  --from-literal=api-key="YOUR_LITELLM_MASTER_KEY" \
+  -n kagent
+
+# 4. Apply the ModelConfig (edit baseUrl first!)
+#    See modelconfig-remote-litellm.yaml in this bundle
 kubectl apply -f modelconfig-remote-litellm.yaml
-# Edit the baseUrl and CA cert first!
 ```
+
+The ModelConfig for remote HTTPS LiteLLM:
+```yaml
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: default-model-config
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: gpt-4o
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    baseUrl: https://litellm.your-domain.com/v1    # ← your VirtualService host
+  tls:
+    caCertSecretRef: litellm-ca-cert-secret         # ← Secret with CA cert
+    caCertSecretKey: ca.crt
+    disableSystemCAs: false
+    disableVerify: false
+```
+
+**Quick test — skip TLS verification temporarily** (to isolate cert issues from other problems):
+```yaml
+  tls:
+    disableVerify: true    # NOT for production — just to confirm connectivity works
+```
+
+**Troubleshooting if agents can't connect:**
+```bash
+# Can you reach LiteLLM from inside the kagent namespace?
+kubectl run curl-test --rm -it --image=curlimages/curl -n kagent -- \
+  curl -sv https://litellm.your-domain.com/health/liveliness
+
+# With the CA cert:
+kubectl run curl-test --rm -it --image=curlimages/curl -n kagent -- sh -c \
+  "echo 'PASTE_CA_CERT_HERE' > /tmp/ca.crt && \
+   curl -s --cacert /tmp/ca.crt https://litellm.your-domain.com/health/liveliness"
+
+# Check if it's a DNS issue
+kubectl run dns-test --rm -it --image=busybox -n kagent -- nslookup litellm.your-domain.com
+
+# Check ModelConfig status
+kubectl describe modelconfig default-model-config -n kagent
+
+# Check kagent controller logs for TLS/connection errors
+kubectl logs -n kagent -l app.kubernetes.io/name=kagent --tail=30 | grep -i "error\|tls\|cert\|refused\|timeout"
+
+# Check if NetworkPolicy is blocking egress
+kubectl get networkpolicy -n kagent
+```
+
+**Common issues:**
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `x509: certificate signed by unknown authority` | Missing or wrong CA cert in Secret | Get correct CA cert, recreate Secret |
+| `connection refused` | Wrong URL or port | Check VirtualService host + port |
+| `no such host` | DNS can't resolve the VirtualService hostname | Check CoreDNS, try IP instead of hostname |
+| `context deadline exceeded` | NetworkPolicy blocking egress from kagent namespace | Add egress rule allowing HTTPS to LiteLLM |
+| ModelConfig shows `Accepted` but agent still fails | API key wrong or model name mismatch | Verify key works with curl from inside the pod |
+| curl works but agent doesn't | Secret name/key mismatch in ModelConfig | Check `apiKeySecret` and `apiKeySecretKey` match exactly |
 
 ### Option C: agentgateway with UAMI (production — see AGENTGATEWAY-TRANSITION.md)
 
