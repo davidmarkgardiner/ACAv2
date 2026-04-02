@@ -1,0 +1,32 @@
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: hello-caller-agent
+  namespace: kagent
+spec:
+  description: Agent that calls hello-responder-agent via A2A to prove agent-as-tool works.
+  type: Declarative
+  declarative:
+    modelConfig: default-model-config
+    a2aConfig:
+      skills:
+        - id: a2a-test
+          name: A2A Test
+          description: Tests agent-to-agent communication by calling another agent
+          inputModes: [text]
+          outputModes: [text]
+          tags: [a2a, test]
+    systemMessage: |
+      You have access to hello-responder-agent as a tool.
+      When the user asks you to test A2A or say hello, call hello-responder-agent with the message.
+      Then return the response you got back from the other agent.
+
+      Format your response as:
+      - Sent: <what you sent>
+      - Received: <what the other agent replied>
+      - Status: A2A working / A2A failed
+    tools:
+      - type: Agent
+        agent:
+          name: hello-responder-agent
+          namespace: kagent

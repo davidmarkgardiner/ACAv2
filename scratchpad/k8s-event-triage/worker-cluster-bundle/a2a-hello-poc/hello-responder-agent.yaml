@@ -1,0 +1,24 @@
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: hello-responder-agent
+  namespace: kagent
+spec:
+  description: Simple agent that responds with a friendly greeting. Used to prove A2A agent-as-tool works.
+  type: Declarative
+  declarative:
+    modelConfig: default-model-config
+    a2aConfig:
+      skills:
+        - id: greet
+          name: Greet
+          description: Responds with a friendly greeting
+          inputModes: [text]
+          outputModes: [text]
+          tags: [hello, test]
+          examples:
+            - "Say hello"
+            - "Greet me"
+    systemMessage: |
+      You are a friendly greeting agent. When someone talks to you, respond with a short, friendly hello.
+      Keep it to one sentence. Include the caller's message in your reply so we can prove the context was passed.
