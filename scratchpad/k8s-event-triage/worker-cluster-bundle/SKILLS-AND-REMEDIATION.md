@@ -70,6 +70,25 @@ spec:
 
 ### Git Auth Secret (for private repos)
 
+#### GitHub PAT Permissions Required
+
+The skills-init container only needs to `git clone` repos. Minimum scopes:
+
+| PAT Type | Scope | Notes |
+|----------|-------|-------|
+| **Fine-Grained** (recommended) | `Contents: Read-only` | Scope to specific repo(s) only |
+| **Classic** | `repo` | Required for private repos; no scopes needed for public repos |
+
+#### Create the Secret
+
+```bash
+kubectl create secret generic git-credentials \
+  --namespace kagent \
+  --from-literal=token="ghp_your_github_pat"
+```
+
+#### Or via manifest
+
 ```yaml
 apiVersion: v1
 kind: Secret
