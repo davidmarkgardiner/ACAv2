@@ -1,0 +1,60 @@
+---
+# OPTIONAL: Use this instead of 02-oms-server.yaml when connecting
+# to an OMS running in a DIFFERENT cluster (e.g. AKS production).
+#
+# Option A: ExternalName (DNS-based, requires cross-cluster DNS or public endpoint)
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: oms-server
+#   namespace: stonebranch
+# spec:
+#   type: ExternalName
+#   externalName: oms.your-aks-cluster.example.com
+
+---
+# Option B: Headless service + Endpoints (IP-based, works with VNet peering)
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: oms-server
+#   namespace: stonebranch
+# spec:
+#   clusterIP: None
+#   ports:
+#   - name: oms
+#     port: 7878
+#     targetPort: 7878
+# ---
+# apiVersion: v1
+# kind: Endpoints
+# metadata:
+#   name: oms-server
+#   namespace: stonebranch
+# subsets:
+# - addresses:
+#   - ip: 10.0.1.100  # Internal IP of OMS in remote cluster
+#   ports:
+#   - name: oms
+#     port: 7878
+
+---
+# Option C: NodePort for exposing local OMS externally (for testing)
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: oms-server-external
+#   namespace: stonebranch
+# spec:
+#   type: NodePort
+#   ports:
+#   - name: oms
+#     port: 7878
+#     targetPort: 7878
+#     nodePort: 30878
+#   - name: broker
+#     port: 7887
+#     targetPort: 7887
+#     nodePort: 30887
+#   selector:
+#     app: oms-server

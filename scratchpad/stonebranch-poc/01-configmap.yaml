@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uag-config
+  namespace: stonebranch
+data:
+  # -----------------------------------------------------------------
+  # NOTE: These env vars are NOT automatically applied by the
+  # Stonebranch container entrypoint. They exist here as a reference
+  # for what the init containers patch into the actual config files.
+  #
+  # Actual config patching happens in init containers in:
+  #   02-oms-server.yaml  → patches /etc/universal/comp/oms
+  #   03-uag-agent.yaml   → patches /etc/universal/uags.conf
+  # -----------------------------------------------------------------
+
+  # Agent registration name in Universal Controller
+  UAG_NETNAME: "UAG-PROXMOX-001"
+  # OMS server connection - format: port@hostname
+  UAG_OMS_SERVERS: "7878@oms-server.stonebranch.svc.cluster.local"
+  # Agent clusters to auto-join in Universal Controller
+  UAG_AGENT_CLUSTERS: "Kubernetes Agents"
+  # Enable SSL (set to "yes" for production)
+  UAG_ENABLE_SSL: "no"

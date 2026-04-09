@@ -1,0 +1,104 @@
+---
+# Istio Gateway for OMS (AKS Istio Add-on)
+#
+# Exposes OMS port 7878 via Istio ingress gateway with TLS passthrough.
+# OMS handles its own TLS 1.2 — Istio just routes the TCP connection.
+#
+# Prerequisites:
+#   - AKS Istio add-on enabled
+#   - Istio ingress gateway deployed (external or internal)
+#   - DNS record pointing to the gateway's external IP
+#
+# Usage:
+#   1. Update the host (oms.your-domain.com) below
+#   2. Choose external vs internal gateway selector
+#   3. kubectl apply -f 06-istio-gateway.yaml
+#
+# NOTE: The AKS Istio add-on ingress gateway may only expose ports
+# 80/443 by default. If port 7878 isn't reachable, either:
+#   a) Patch the gateway Service to add port 7878, or
+#   b) Use port 443 with SNI routing (change port number below)
+#
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: oms-gateway
+  namespace: stonebranch
+spec:
+  selector:
+    # External gateway (internet-facing)
+    istio: aks-istio-ingressgateway-external
+    # Internal gateway (VNet only) — uncomment below, comment above
+    # istio: aks-istio-ingressgateway-internal
+  servers:
+  - port:
+      number: 7878
+      name: tcp-oms
+      protocol: TLS
+    tls:
+      mode: PASSTHROUGH
+    hosts:
+    - "oms.your-domain.com"           # ← CHANGE THIS
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: oms-virtualservice
+  namespace: stonebranch
+spec:
+  hosts:
+  - "oms.your-domain.com"             # ← CHANGE THIS (must match Gateway)
+  gateways:
+  - oms-gateway
+  tls:
+  - match:
+    - port: 7878
+      sniHosts:
+      - "oms.your-domain.com"         # ← CHANGE THIS (must match Gateway)
+    route:
+    - destination:
+        host: oms-server.stonebranch.svc.cluster.local
+        port:
+          number: 7878
+---
+# Alternative: Use port 443 if gateway doesn't allow custom ports
+# Uncomment this section and comment out the Gateway/VirtualService above.
+#
+# apiVersion: networking.istio.io/v1beta1
+# kind: Gateway
+# metadata:
+#   name: oms-gateway-443
+#   namespace: stonebranch
+# spec:
+#   selector:
+#     istio: aks-istio-ingressgateway-internal
+#   servers:
+#   - port:
+#       number: 443
+#       name: tls-oms
+#       protocol: TLS
+#     tls:
+#       mode: PASSTHROUGH
+#     hosts:
+#     - "oms.your-domain.com"
+# ---
+# apiVersion: networking.istio.io/v1beta1
+# kind: VirtualService
+# metadata:
+#   name: oms-virtualservice-443
+#   namespace: stonebranch
+# spec:
+#   hosts:
+#   - "oms.your-domain.com"
+#   gateways:
+#   - oms-gateway-443
+#   tls:
+#   - match:
+#     - port: 443
+#       sniHosts:
+#       - "oms.your-domain.com"
+#     route:
+#     - destination:
+#         host: oms-server.stonebranch.svc.cluster.local
+#         port:
+#           number: 7878

@@ -1,0 +1,87 @@
+---
+# UAG Agent Deployment
+# Standalone agent pods that connect to OMS
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uag-agent
+  namespace: stonebranch
+  labels:
+    app: uag-agent
+    component: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: uag-agent
+  template:
+    metadata:
+      labels:
+        app: uag-agent
+        component: agent
+    spec:
+      initContainers:
+      - name: patch-agent-config
+        image: stonebranch/universal-agent:8.0.0.0-debian
+        command: ["sh", "-c"]
+        args:
+        - |
+          # Copy default configs to writable volume
+          cp -a /etc/universal/* /config/
+          # Patch OMS server address to point to OMS service (not localhost)
+          sed -i 's|^oms_servers.*|oms_servers 7878@oms-server.stonebranch.svc.cluster.local|' /config/uags.conf
+          # Set agent name using pod hostname for uniqueness
+          sed -i "s|^netname.*|netname UAG-PROXMOX-$(hostname | tail -c 6)|" /config/uags.conf
+          echo "=== Patched uags.conf ==="
+          grep -E "^oms_servers|^netname" /config/uags.conf
+        volumeMounts:
+        - name: universal-config
+          mountPath: /config
+      containers:
+      - name: uag
+        image: stonebranch/universal-agent:8.0.0.0-debian
+        volumeMounts:
+        - name: universal-config
+          mountPath: /etc/universal
+        ports:
+        - name: broker
+          containerPort: 7887
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          tcpSocket:
+            port: 7887
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 7887
+          initialDelaySeconds: 15
+          periodSeconds: 5
+      volumes:
+      - name: universal-config
+        emptyDir: {}
+---
+# UAG Agent Service (for broker communication)
+apiVersion: v1
+kind: Service
+metadata:
+  name: uag-agent
+  namespace: stonebranch
+  labels:
+    app: uag-agent
+spec:
+  type: ClusterIP
+  ports:
+  - name: broker
+    port: 7887
+    targetPort: 7887
+    protocol: TCP
+  selector:
+    app: uag-agent

@@ -1,0 +1,58 @@
+---
+# Allow UAG agents to reach OMS (same namespace + cross-namespace workers)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-uag-to-oms
+  namespace: stonebranch
+spec:
+  podSelector:
+    matchLabels:
+      app: oms-server
+  policyTypes:
+  - Ingress
+  ingress:
+  # Same-namespace agents (app: uag-agent in stonebranch namespace)
+  - from:
+    - podSelector:
+        matchLabels:
+          app: uag-agent
+    ports:
+    - port: 7878
+      protocol: TCP
+    - port: 7887
+      protocol: TCP
+  # Cross-namespace worker agents (any namespace labelled role: worker)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          role: worker
+      podSelector:
+        matchLabels:
+          app: uag-worker
+    ports:
+    - port: 7878
+      protocol: TCP
+    - port: 7887
+      protocol: TCP
+---
+# Allow OMS to reach UAG agents (broker)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-oms-to-uag
+  namespace: stonebranch
+spec:
+  podSelector:
+    matchLabels:
+      app: uag-agent
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: oms-server
+    ports:
+    - port: 7887
+      protocol: TCP

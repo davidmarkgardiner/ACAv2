@@ -1,0 +1,95 @@
+---
+# OMS Server Deployment
+# Runs the Universal Agent in OMS mode (broker + message service)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oms-server
+  namespace: stonebranch
+  labels:
+    app: oms-server
+    component: oms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oms-server
+  template:
+    metadata:
+      labels:
+        app: oms-server
+        component: oms
+    spec:
+      initContainers:
+      - name: enable-oms-autostart
+        image: stonebranch/universal-agent:8.0.0.0-debian
+        command: ["sh", "-c"]
+        args:
+        - |
+          # Copy default configs to writable volume
+          cp -a /etc/universal/* /config/
+          # Enable OMS auto_start in component definition
+          sed -i 's/^auto_start.*no/auto_start            yes/' /config/comp/oms
+          echo "OMS auto_start patched:"
+          grep auto_start /config/comp/oms
+        volumeMounts:
+        - name: universal-config
+          mountPath: /config
+      containers:
+      - name: oms
+        image: stonebranch/universal-agent:8.0.0.0-debian
+        env:
+        - name: UAG_NETNAME
+          value: "OMS-PROXMOX-001"
+        volumeMounts:
+        - name: universal-config
+          mountPath: /etc/universal
+        ports:
+        - name: oms
+          containerPort: 7878
+          protocol: TCP
+        - name: broker
+          containerPort: 7887
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        livenessProbe:
+          tcpSocket:
+            port: 7878
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 7878
+          initialDelaySeconds: 15
+          periodSeconds: 5
+      volumes:
+      - name: universal-config
+        emptyDir: {}
+---
+# OMS Service - exposes OMS to UAG agents
+apiVersion: v1
+kind: Service
+metadata:
+  name: oms-server
+  namespace: stonebranch
+  labels:
+    app: oms-server
+spec:
+  type: ClusterIP
+  ports:
+  - name: oms
+    port: 7878
+    targetPort: 7878
+    protocol: TCP
+  - name: broker
+    port: 7887
+    targetPort: 7887
+    protocol: TCP
+  selector:
+    app: oms-server
