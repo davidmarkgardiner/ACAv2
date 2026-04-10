@@ -1,0 +1,19 @@
+---
+# KRO Instance: UAG Agent on proxmox-k8s (POC)
+# Deploys 2 agents connecting to the local OMS server
+apiVersion: v1alpha1
+kind: UK8SUagAgent
+metadata:
+  name: uag-proxmox-poc
+  namespace: stonebranch
+spec:
+  omsAddress: "oms-server.stonebranch.svc.cluster.local"
+  omsPort: 7878
+  agentPrefix: "UAG-PROXMOX"
+  replicas: 2
+  targetNamespace: "stonebranch"
+  imageTag: "8.0.0.0-debian"
+  cpuRequest: "50m"
+  memoryRequest: "128Mi"
+  cpuLimit: "250m"
+  memoryLimit: "256Mi"

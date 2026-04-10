@@ -1,0 +1,26 @@
+---
+# KRO Instance: UAG Agent on AKS worker cluster
+# Replace omsAddress with the value from the Stonebranch team
+apiVersion: v1alpha1
+kind: UK8SUagAgent
+metadata:
+  name: uag-aks-worker1
+  namespace: stonebranch
+spec:
+  # Get these from the Stonebranch team
+  omsAddress: "oms.stonebranch.internal"    # ← CHANGE THIS
+  omsPort: 7878
+
+  # Agent configuration
+  agentPrefix: "AKS-WORKER1"
+  replicas: 3
+  targetNamespace: "stonebranch"
+
+  # Image (pin to specific version)
+  imageTag: "8.0.0.0-debian"
+
+  # Resources (adjust based on job workload)
+  cpuRequest: "100m"
+  memoryRequest: "256Mi"
+  cpuLimit: "500m"
+  memoryLimit: "512Mi"
