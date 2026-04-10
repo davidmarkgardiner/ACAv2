@@ -20,28 +20,28 @@ spec:
       # ========================================
       # OMS Connection (required — get from Stonebranch team)
       # ========================================
-      omsAddress: string | required=true description="OMS server hostname or IP (e.g. oms.stonebranch.internal)"
-      omsPort: integer | default=7878 description="OMS server port"
+      omsAddress: 'string | required=true description="OMS server hostname or IP"'
+      omsPort: 'string | default="7878" description="OMS server port"'
 
       # ========================================
       # Agent Configuration
       # ========================================
-      agentPrefix: string | required=true description="Agent name prefix (e.g. AKS-WORKER1). Pods get prefix + hostname suffix" pattern="^[A-Za-z0-9][A-Za-z0-9-]{0,30}$"
-      replicas: integer | default=2 description="Number of agent replicas"
-      targetNamespace: string | default="stonebranch" description="Namespace to deploy agents into"
+      agentPrefix: 'string | required=true pattern="^[A-Za-z0-9][A-Za-z0-9-]{0,30}$" description="Agent name prefix, e.g. AKS-WORKER1"'
+      replicas: 'integer | default=2 description="Number of agent replicas"'
+      targetNamespace: 'string | default="stonebranch" description="Namespace to deploy agents into"'
 
       # ========================================
       # Image Configuration
       # ========================================
-      imageTag: string | default="8.0.0.0-debian" description="Stonebranch Universal Agent image tag"
+      imageTag: 'string | default="8.0.0.0-debian" description="Stonebranch Universal Agent image tag"'
 
       # ========================================
       # Resource Limits
       # ========================================
-      cpuRequest: string | default="50m" description="CPU request per agent pod"
-      memoryRequest: string | default="128Mi" description="Memory request per agent pod"
-      cpuLimit: string | default="250m" description="CPU limit per agent pod"
-      memoryLimit: string | default="256Mi" description="Memory limit per agent pod"
+      cpuRequest: 'string | default="50m" description="CPU request per agent pod"'
+      memoryRequest: 'string | default="128Mi" description="Memory request per agent pod"'
+      cpuLimit: 'string | default="250m" description="CPU limit per agent pod"'
+      memoryLimit: 'string | default="256Mi" description="Memory limit per agent pod"'
 
   # ========================================
   # Resources
@@ -50,7 +50,7 @@ spec:
     # ----------------------------------------
     # Namespace
     # ----------------------------------------
-    - id: namespace
+    - id: agentNamespace
       template:
         apiVersion: v1
         kind: Namespace
@@ -72,7 +72,6 @@ spec:
           namespace: ${schema.spec.targetNamespace}
           labels:
             app: uag-agent
-            kro.run/instance: ${schema.metadata.name}
 
     # ----------------------------------------
     # RBAC: Role (namespace-scoped, read-only)
@@ -143,7 +142,7 @@ spec:
               protocol: TCP
           # Allow OMS connection
           - ports:
-            - port: ${schema.spec.omsPort}
+            - port: ${int(schema.spec.omsPort)}
               protocol: TCP
           ingress: []
 
@@ -160,7 +159,6 @@ spec:
           labels:
             app: uag-agent
             component: agent
-            kro.run/instance: ${schema.metadata.name}
         spec:
           replicas: ${schema.spec.replicas}
           selector:
