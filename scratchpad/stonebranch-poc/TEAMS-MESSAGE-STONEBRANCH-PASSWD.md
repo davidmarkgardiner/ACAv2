@@ -24,3 +24,19 @@ GitLab ticket: [link to issue]
 Happy to jump on a call if anyone wants a walkthrough.
 
 ---
+
+⏺ Not a password — /etc/passwd is a Unix system file, not a credential store.                
+                                                                                        
+  It maps user accounts to their UID/GID and home directory. Example line:                   
+   
+  nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin                                 
+                                                                                             
+  Why Stonebranch needs to write to it:                                                      
+  The UAG agent likely needs to register its own runtime user (e.g. uaguser with a specific  
+  UID) so the process can run with the correct identity inside the container. On a normal    
+  writable filesystem this is straightforward — on our readOnlyRootFilesystem: true pod it
+  can't, hence the emptyDir workaround.                                                      
+                                                                  
+  No credentials are involved. The security alert is purely because any process modifying    
+  /etc/passwd at runtime looks like an attacker trying to create a backdoor account —
+  regardless of intent.         
