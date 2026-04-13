@@ -40,3 +40,21 @@ Happy to jump on a call if anyone wants a walkthrough.
   No credentials are involved. The security alert is purely because any process modifying    
   /etc/passwd at runtime looks like an attacker trying to create a backdoor account —
   regardless of intent.         
+
+---
+
+  Yes, I agree — Option B is the right call here.
+                                                 
+  The security tool is doing exactly what it should. You've investigated, understood the root
+   cause, confirmed it's vendor behaviour, and all your other hardening controls are solid   
+  (runAsNonRoot, capabilities dropped, allowPrivilegeEscalation: false, network policy,      
+  pinned tag). That's a well-defended pod.                                                   
+                                                                                             
+  Option A would be ongoing maintenance burden — every time Stonebranch releases a new
+  version you'd need to rebuild. The exception is tightly scoped (specific image + specific  
+  process + specific file) so it won't mask anything real, and you've got a 6-month review
+  baked in.                                                                                  
+   
+  The document gives your security team everything they need: the risk table, mitigating     
+  controls, the exact suppression config for Falco or Defender, and sign-off boxes. They
+  should be comfortable approving it.
