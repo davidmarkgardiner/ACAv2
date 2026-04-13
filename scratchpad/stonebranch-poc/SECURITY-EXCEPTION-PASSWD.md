@@ -64,22 +64,35 @@ This is a known, deterministic behaviour of the vendor-supplied image. It is not
 
 ## Exception Configuration
 
-### Falco
-```yaml
-- rule: Write below etc
-  exceptions:
-    - name: stonebranch_uag_passwd
-      fields: [container.image.repository, proc.name, fd.name]
-      values:
-        - [stonebranch/universal-agent, ua_entrypoint, /etc/passwd]
-```
+### Wiz (Runtime Sensor / Wiz Defend)
 
-### Microsoft Defender for Containers / Prisma Cloud
-Raise a suppress rule for:
-- **Container image:** `stonebranch/universal-agent:8.0.0.0-debian`
-- **Process name:** `ua_entrypoint`
-- **File path:** `/etc/passwd`
-- **Justification:** Vendor startup script registers runtime user at init. Behaviour is deterministic and isolated. All other security controls intact.
+**Via the Wiz Portal (recommended):**
+
+1. Go to **Wiz > Issues** and find the alert:  
+   `Suspicious modification to /etc/passwd` (or similar runtime threat title)
+2. Open the issue and click **"Create Exception"**
+3. Set the following scope:
+   - **Resource:** Kubernetes Workload — `uag-agent` in namespace `stonebranch`
+   - **Container image:** `stonebranch/universal-agent:8.0.0.0-debian`
+4. Fill in the exception fields:
+   - **Reason:** `Accepted Risk — Vendor Behaviour`
+   - **Expiry:** 2026-10-13
+   - **Notes:** Stonebranch Universal Agent startup script (`ua_entrypoint`) writes the runtime user entry to `/etc/passwd` at init. This is deterministic vendor behaviour, not a compromise. Root cause investigated by Platform Engineering. All other hardening controls intact (non-root, no capabilities, allowPrivilegeEscalation=false). Reviewed and accepted per SEC-EXC-UAG-001.
+5. Submit for security team approval
+
+**Via Wiz Rule Exclusion (if your org uses custom Wiz policies):**
+
+In the Wiz policy that fired, add an exclusion condition:
+- **Property:** Container Image Name
+- **Operator:** Equals
+- **Value:** `stonebranch/universal-agent:8.0.0.0-debian`
+
+Pair with a second condition:
+- **Property:** Process Name
+- **Operator:** Equals
+- **Value:** `ua_entrypoint`
+
+This ensures the suppression is as narrow as possible and does not affect other images or processes.
 
 ---
 
