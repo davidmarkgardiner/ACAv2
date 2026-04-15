@@ -4,6 +4,7 @@ import {
   validatePayload,
   ApiResponse,
 } from '@/lib/schemas/containerAppPayload';
+import { verifyAuthToken } from '@/lib/auth';
 
 function log(level: 'info' | 'error' | 'warn', message: string, metadata?: Record<string, any>) {
   const timestamp = new Date().toISOString();
@@ -21,6 +22,23 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   let requestId: string | undefined;
 
   try {
+    // Verify authentication
+    const authResult = await verifyAuthToken(request);
+    if (!authResult.authenticated) {
+      log('warn', 'Authentication failed', {
+        reason: authResult.error,
+      });
+      return NextResponse.json(
+        {
+          requestId: uuidv4(),
+          status: 'rejected',
+          message: 'Authentication required',
+          errors: [{ field: 'authorization', message: 'Missing or invalid authentication token' }],
+        } as ApiResponse,
+        { status: 401 }
+      );
+    }
+
     // Parse request body
     const body = await request.json();
 
@@ -158,7 +176,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         errors: [
           {
             field: 'server',
-            message: errorMessage,
+            message: 'An unexpected error occurred. Please try again later.',
           },
         ],
       } as ApiResponse,

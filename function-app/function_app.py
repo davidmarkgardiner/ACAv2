@@ -3,7 +3,7 @@ import logging
 import json
 from datetime import datetime
 
-app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 @app.route(route="health")
 def health_check(req: func.HttpRequest) -> func.HttpResponse:
