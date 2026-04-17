@@ -1,0 +1,290 @@
+# Grafana Alloy — Pod Log Pipeline: kagent + kgateway → Loki
+#
+# Separate from the existing alloy-events-config (which ships K8s Warning events
+# to EventHub). This pipeline scrapes stdout/stderr from:
+#   - kagent controller pods    (namespace: kagent)
+#   - kgateway proxy pods       (namespace: kgateway-system)
+# and ships structured logs to Loki.
+#
+# Prerequisites:
+#   1. Loki installed in monitoring namespace:
+#      helm upgrade --install loki grafana/loki-stack \
+#        --namespace monitoring --create-namespace \
+#        --set promtail.enabled=false \
+#        --set loki.persistence.enabled=true \
+#        --set loki.persistence.size=10Gi
+#
+#   2. Verify Loki service: kubectl get svc loki -n monitoring
+#      Expected: loki.monitoring.svc.cluster.local:3100
+#
+#   3. Alloy already deployed? Check: kubectl get pods -n monitoring -l app.kubernetes.io/name=alloy
+#      If not, install: helm upgrade --install alloy grafana/alloy \
+#        --namespace monitoring \
+#        --set alloy.configMap.name=alloy-log-config
+#
+# Deploy:
+#   kubectl apply -f alloy-log-pipeline.yaml
+#
+# If Alloy is already running, reload config:
+#   kubectl rollout restart daemonset/alloy -n monitoring
+#   kubectl rollout restart deployment/alloy -n monitoring
+# ---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-log-config
+  namespace: monitoring
+  labels:
+    app: alloy
+    pipeline: pod-logs
+data:
+  config.alloy: |
+    // =============================================================================
+    // Grafana Alloy — Pod Log Pipeline
+    // kagent controller + kgateway Envoy proxy → Loki
+    // =============================================================================
+
+    // -----------------------------------------------------------------------------
+    // Stage 1: Discover kagent controller pods
+    // Scrapes stdout/stderr from all pods in the kagent namespace.
+    // Filters to controller only via label selector.
+    // -----------------------------------------------------------------------------
+    discovery.kubernetes "kagent_pods" {
+      role = "pod"
+
+      namespaces {
+        names = ["kagent"]
+      }
+
+      selectors {
+        role  = "pod"
+        label = "app.kubernetes.io/component=controller"
+      }
+    }
+
+    // Relabeling: map k8s metadata to Loki labels
+    discovery.relabel "kagent_pods" {
+      targets = discovery.kubernetes.kagent_pods.targets
+
+      // Keep only Running pods
+      rule {
+        source_labels = ["__meta_kubernetes_pod_phase"]
+        regex         = "Pending|Succeeded|Failed|Unknown"
+        action        = "drop"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_component"]
+        target_label  = "component"
+      }
+
+      // Service label for Grafana Explore filtering
+      rule {
+        replacement  = "kagent"
+        target_label = "service"
+      }
+    }
+
+    // Scrape kagent pod logs
+    loki.source.kubernetes "kagent_logs" {
+      targets    = discovery.relabel.kagent_pods.output
+      forward_to = [loki.process.kagent_logs.receiver]
+    }
+
+    // Parse kagent controller logs (JSON structured)
+    loki.process "kagent_logs" {
+      // Attempt to parse JSON — kagent controller emits structured logs
+      stage.json {
+        expressions = {
+          level  = "level",
+          msg    = "msg",
+          ts     = "ts",
+          caller = "caller",
+          agent  = "agent",
+          model  = "model",
+        }
+      }
+
+      // Promote level to a label so Grafana can filter by severity
+      stage.labels {
+        values = {
+          level = "level",
+        }
+      }
+
+      // Normalise level values (DEBUG/INFO/WARN/ERROR)
+      stage.label_keep {
+        values = ["namespace", "pod", "container", "component", "service", "level"]
+      }
+
+      forward_to = [loki.write.lgtm.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Stage 2: Discover kgateway proxy pods
+    // kgateway (Envoy) logs to stdout in a different format — plain text or JSON
+    // depending on the Envoy access log config.
+    // -----------------------------------------------------------------------------
+    discovery.kubernetes "kgateway_pods" {
+      role = "pod"
+
+      namespaces {
+        names = ["kgateway-system"]
+      }
+    }
+
+    discovery.relabel "kgateway_pods" {
+      targets = discovery.kubernetes.kgateway_pods.targets
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_phase"]
+        regex         = "Pending|Succeeded|Failed|Unknown"
+        action        = "drop"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+
+      // Label the service for easy filtering
+      rule {
+        replacement  = "kgateway"
+        target_label = "service"
+      }
+    }
+
+    loki.source.kubernetes "kgateway_logs" {
+      targets    = discovery.relabel.kgateway_pods.output
+      forward_to = [loki.process.kgateway_logs.receiver]
+    }
+
+    // Parse kgateway (Envoy) access logs
+    // Envoy default access log format is text — we enrich with request metadata
+    loki.process "kgateway_logs" {
+      // Try to parse as JSON (if Envoy JSON access log is configured)
+      stage.json {
+        expressions = {
+          method        = "method",
+          path          = "path",
+          response_code = "response_code",
+          duration      = "duration",
+          upstream      = "upstream_cluster",
+        }
+      }
+
+      // Promote response code to label for alert-ability
+      stage.labels {
+        values = {
+          response_code = "response_code",
+        }
+      }
+
+      stage.label_keep {
+        values = ["namespace", "pod", "container", "service", "response_code"]
+      }
+
+      forward_to = [loki.write.lgtm.receiver]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Stage 3: Write to Loki
+    // Verify endpoint: kubectl get svc loki -n monitoring
+    // -----------------------------------------------------------------------------
+    loki.write "lgtm" {
+      endpoint {
+        url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+      }
+
+      // Uncomment if Loki requires auth (e.g., Grafana Cloud):
+      // endpoint {
+      //   url = "https://logs-prod-xxx.grafana.net/loki/api/v1/push"
+      //   basic_auth {
+      //     username = env("LOKI_USER")
+      //     password = env("LOKI_PASSWORD")
+      //   }
+      // }
+
+      external_labels = {
+        cluster = "proxmox-k8s",
+        env     = "homelab",
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Stage 4 (optional): OTLP receiver for kagent controller structured logs
+    //
+    // When kagent-values-otel.yaml is applied, the controller pushes OTLP logs
+    // directly to Alloy on port 4317 (gRPC). These are richer than pod log
+    // scraping — agent name, model, token counts, session ID as structured fields.
+    //
+    // If you enable this, the Alloy Service must expose port 4317.
+    // Apply the service patch below, then upgrade kagent with kagent-values-otel.yaml.
+    //
+    // Patch Alloy service to expose OTLP port:
+    //   kubectl patch svc alloy -n monitoring --type='json' \
+    //     -p='[{"op":"add","path":"/spec/ports/-","value":{"name":"otlp-grpc","port":4317,"protocol":"TCP","targetPort":4317}}]'
+    // -----------------------------------------------------------------------------
+    otelcol.receiver.otlp "kagent_otlp" {
+      grpc {
+        endpoint = "0.0.0.0:4317"
+      }
+      http {
+        endpoint = "0.0.0.0:4318"
+      }
+
+      output {
+        logs   = [otelcol.exporter.loki.kagent_otlp.input]
+        traces = [otelcol.exporter.otlp.tempo.input]   // route traces to Tempo if available
+      }
+    }
+
+    // Convert OTLP logs to Loki format
+    otelcol.exporter.loki "kagent_otlp" {
+      forward_to = [loki.write.lgtm.receiver]
+    }
+
+    // Forward traces to Tempo (if installed)
+    // Tempo service: kubectl get svc -n monitoring | grep tempo
+    otelcol.exporter.otlp "tempo" {
+      client {
+        endpoint = "tempo.monitoring.svc.cluster.local:4317"
+        tls {
+          insecure = true
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Health endpoint
+    // -----------------------------------------------------------------------------
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }

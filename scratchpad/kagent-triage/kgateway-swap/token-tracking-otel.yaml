@@ -1,0 +1,242 @@
+# Token Counting & OTEL Tracing — kgateway AI extension
+#
+# kgateway surfaces LLM token counts via OpenTelemetry traces using the
+# gen_ai.* semantic conventions (OpenTelemetry GenAI spec):
+#
+#   gen_ai.request.model        — model name requested
+#   gen_ai.request.max_tokens   — max tokens requested
+#   gen_ai.request.temperature  — temperature setting
+#   ai.tokens.prompt            — prompt token count (set by kgateway AI extension)
+#   gen_ai.usage.input_tokens   — input tokens (from model response)
+#   gen_ai.usage.output_tokens  — output tokens (from model response)
+#
+# These appear as span attributes in Tempo (traces) and can be extracted
+# to Prometheus metrics via the Alloy OTEL pipeline.
+#
+# Flow:
+#   kgateway AI extension (Python sidecar)
+#     → OTLP traces (gRPC :4317)
+#     → Alloy otelcol.receiver.otlp
+#     → [a] Tempo (trace storage + Grafana trace viewer)
+#     → [b] otelcol.connector.spanmetrics → Prometheus (token count metrics)
+#
+# Verify kgateway AI extension is enabled:
+#   kubectl get pods -n kgateway-system
+#   # Look for a sidecar or separate pod named kgateway-ai-extension
+#
+# Apply:
+#   kubectl apply -f token-tracking-otel.yaml
+# ---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alloy ConfigMap — OTEL pipeline extension for token metrics
+# Add this to the existing alloy-log-config ConfigMap, or deploy as a
+# separate Alloy instance dedicated to traces/metrics.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-otel-config
+  namespace: monitoring
+  labels:
+    app: alloy
+    pipeline: otel-traces
+data:
+  config.alloy: |
+    // =============================================================================
+    // Alloy OTEL Pipeline — kgateway AI token tracking
+    //
+    // Receives OTLP traces from kgateway AI extension.
+    // Extracts gen_ai.* span attributes as Prometheus metrics.
+    // Forwards full traces to Tempo for Grafana trace viewer.
+    // =============================================================================
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Stage 1: Receive OTLP from kgateway AI extension (and kagent controller)
+    // ──────────────────────────────────────────────────────────────────────────
+    otelcol.receiver.otlp "ai_traces" {
+      grpc {
+        endpoint = "0.0.0.0:4317"
+      }
+      http {
+        endpoint = "0.0.0.0:4318"
+      }
+
+      output {
+        traces = [
+          otelcol.processor.batch.ai_traces.input,
+        ]
+        logs = [
+          otelcol.exporter.loki.ai_logs.input,
+        ]
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Stage 2: Batch traces for efficient forwarding
+    // ──────────────────────────────────────────────────────────────────────────
+    otelcol.processor.batch "ai_traces" {
+      timeout             = "5s"
+      send_batch_size     = 100
+      send_batch_max_size = 500
+
+      output {
+        traces = [
+          otelcol.connector.spanmetrics.token_metrics.input,
+          otelcol.exporter.otlp.tempo.input,
+        ]
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Stage 3a: Extract span attributes → Prometheus metrics
+    //
+    // spanmetrics connector converts OTEL span data to Prometheus metrics.
+    // We capture gen_ai.* attributes as label dimensions so you can filter
+    // by model, agent, operation in Grafana.
+    //
+    // Metrics produced:
+    //   traces_spanmetrics_calls_total{...}          — request count by model/status
+    //   traces_spanmetrics_duration_milliseconds{...} — latency histogram
+    //
+    // Token counts (from span attributes) are exposed via the token_count histogram.
+    // ──────────────────────────────────────────────────────────────────────────
+    otelcol.connector.spanmetrics "token_metrics" {
+      histogram {
+        explicit {
+          buckets = ["100ms", "500ms", "1s", "5s", "10s", "30s", "60s"]
+        }
+      }
+
+      // Promote gen_ai span attributes to Prometheus label dimensions
+      dimensions = [
+        { name = "gen_ai.request.model" },
+        { name = "gen_ai.system" },
+        { name = "gen_ai.operation.name" },
+        { name = "gen_ai.usage.input_tokens" },
+        { name = "gen_ai.usage.output_tokens" },
+        { name = "ai.tokens.prompt" },
+        { name = "service.name" },
+        // kagent-specific
+        { name = "agent.name", default = "unknown" },
+        { name = "session.id", default = "unknown" },
+      ]
+
+      namespace = "ai_gateway"
+
+      output {
+        metrics = [otelcol.exporter.prometheus.token_metrics.input]
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Stage 3b: Export span metrics → Prometheus
+    // Prometheus scrapes Alloy at :12345/metrics
+    // ──────────────────────────────────────────────────────────────────────────
+    otelcol.exporter.prometheus "token_metrics" {
+      forward_to = [prometheus.remote_write.kube_prom.receiver]
+    }
+
+    // Remote write to kube-prom Prometheus
+    // Verify endpoint: kubectl get svc -n monitoring kube-prom-prometheus -o jsonpath='{.spec.clusterIP}'
+    prometheus.remote_write "kube_prom" {
+      endpoint {
+        url = "http://kube-prom-prometheus.monitoring.svc.cluster.local:9090/api/v1/write"
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Stage 4: Forward full traces → Tempo
+    // Tempo stores the complete spans for Grafana trace viewer (trace → log correlation)
+    //
+    // Install Tempo if not present:
+    //   helm upgrade --install tempo grafana/tempo-distributed \
+    //     --namespace monitoring \
+    //     --set storage.trace.backend=local
+    //
+    // Verify: kubectl get svc tempo -n monitoring
+    // ──────────────────────────────────────────────────────────────────────────
+    otelcol.exporter.otlp "tempo" {
+      client {
+        endpoint = "tempo.monitoring.svc.cluster.local:4317"
+        tls {
+          insecure = true
+        }
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Stage 5: Forward OTEL logs → Loki
+    // (kagent controller structured logs pushed via OTEL)
+    // ──────────────────────────────────────────────────────────────────────────
+    otelcol.exporter.loki "ai_logs" {
+      forward_to = [loki.write.lgtm.receiver]
+    }
+
+    loki.write "lgtm" {
+      endpoint {
+        url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+      }
+      external_labels = {
+        cluster = "proxmox-k8s",
+        pipeline = "otel",
+      }
+    }
+
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Alloy Service — expose OTLP + Prometheus scrape ports
+# Patch or replace the existing Alloy service to add these ports.
+#
+# Apply:
+#   kubectl apply -f token-tracking-otel.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy-otel
+  namespace: monitoring
+  labels:
+    app: alloy
+    pipeline: otel-traces
+spec:
+  selector:
+    app.kubernetes.io/name: alloy   # verify: kubectl get pods -n monitoring --show-labels
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+    - name: metrics
+      port: 12345
+      targetPort: 12345
+      protocol: TCP
+---
+# ServiceMonitor — scrape the span metrics Alloy exposes on :12345
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: alloy-otel-spanmetrics
+  namespace: monitoring
+  labels:
+    release: kube-prom
+spec:
+  namespaceSelector:
+    matchNames:
+      - monitoring
+  selector:
+    matchLabels:
+      app: alloy
+      pipeline: otel-traces
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

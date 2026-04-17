@@ -1,0 +1,146 @@
+# kgateway TrafficPolicy — AI security, rate limiting, access logging, token tracking
+#
+# Attaches to the kubeai-ai-route HTTPRoute to add:
+#   1. Prompt guard     — block sensitive data in/out (PII, keywords)
+#   2. Prompt enrichment — inject system context on every request
+#   3. Rate limiting    — token bucket (requests/sec), not LLM tokens
+#   4. Access logging   — structured JSON to stdout → Alloy → Loki
+#
+# Note on LLM token counting:
+#   Token counts are surfaced via OTEL traces (gen_ai.* semantic conventions),
+#   not via TrafficPolicy. See token-tracking-otel.yaml for trace → Tempo/Prometheus.
+#
+# Apply:
+#   kubectl apply -f ai-traffic-policy.yaml
+#
+# Verify:
+#   kubectl get trafficpolicy -n kgateway-system
+#   kubectl describe trafficpolicy ai-security-policy -n kgateway-system
+# ---
+
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: ai-security-policy
+  namespace: kgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: kubeai-ai-route-multipool
+
+  ai:
+    # -------------------------------------------------------------------------
+    # 1. Prompt Guard — security filtering
+    # Blocks requests/responses containing sensitive content.
+    # Uses kgateway built-in regex patterns + custom keyword matching.
+    # -------------------------------------------------------------------------
+    promptGuard:
+      request:
+        # Block requests containing any of these patterns BEFORE they reach the model
+        customResponseMessage: "Request blocked: contains restricted content."
+        regex:
+          # Built-in PII detectors
+          builtins:
+            - CREDIT_CARD
+            - SSN
+            - EMAIL
+            - PHONE_NUMBER
+          # Custom patterns — add cluster/infra secrets keywords
+          patterns:
+            - "(?i)(password|secret|api.?key|bearer.?token|kubeconfig)"
+            - "(?i)(kubectl.*delete|kubectl.*drain|rm -rf)"
+        # Keyword blocklist — exact match
+        matches:
+          - "ignore previous instructions"
+          - "jailbreak"
+          - "DAN mode"
+
+      response:
+        # Mask sensitive data that the model might accidentally include in responses
+        regex:
+          builtins:
+            - CREDIT_CARD
+            - SSN
+            - EMAIL
+          patterns:
+            # Mask anything that looks like a K8s secret value (base64-ish long strings)
+            - "(?:[A-Za-z0-9+/]{40,}={0,2})"
+
+    # -------------------------------------------------------------------------
+    # 2. Prompt Enrichment — inject platform context into every request
+    # Prepends a system message so agents always have cluster context.
+    # Append adds a guardrail after the user message.
+    # -------------------------------------------------------------------------
+    promptEnrichment:
+      prepend:
+        - role: SYSTEM
+          content: |
+            You are an SRE agent running on a Kubernetes cluster (proxmox-k8s).
+            Always use exact namespace names as provided. Never guess resource names.
+            When running kubectl commands, always specify -n <namespace>.
+      append:
+        - role: SYSTEM
+          content: |
+            Never suggest deleting resources without explicit user confirmation.
+            Never output raw secrets, tokens, or credentials.
+
+  # -------------------------------------------------------------------------
+  # 3. Rate Limiting — protect the GPU from runaway requests
+  # Token bucket: max 20 req burst, refills at 5 req/sec
+  # Adjust based on RTX 3060 throughput for qwen2.5-14b (~2-3 req/sec sustained)
+  # -------------------------------------------------------------------------
+  rateLimit:
+    local:
+      tokenBucket:
+        maxTokens: 20          # burst capacity
+        tokensPerFill: 5       # requests added per interval
+        fillInterval: 1s       # refill every second
+      percentEnabled: 100
+      percentEnforced: 100
+---
+# ListenerPolicy — structured JSON access logging for the AI gateway listener
+# All AI requests logged to stdout → scraped by Alloy → shipped to Loki
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: ListenerPolicy
+metadata:
+  name: ai-gateway-access-logs
+  namespace: kgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gateway
+  default:
+    httpSettings:
+      accessLog:
+        - fileSink:
+            path: /dev/stdout
+            jsonFormat:
+              # Standard request/response fields
+              timestamp: "%START_TIME%"
+              method: "%REQ(:METHOD)%"
+              path: "%REQ(:PATH)%"
+              protocol: "%PROTOCOL%"
+              status: "%RESPONSE_CODE%"
+              response_flags: "%RESPONSE_FLAGS%"
+              duration_ms: "%DURATION%"
+              # Bytes — proxy for token volume (exact tokens via OTEL traces)
+              bytes_received: "%BYTES_RECEIVED%"
+              bytes_sent: "%BYTES_SENT%"
+              # Upstream (which KubeAI model pod handled the request)
+              upstream_host: "%UPSTREAM_HOST%"
+              upstream_cluster: "%UPSTREAM_CLUSTER%"
+              upstream_response_time: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+              # Request tracing
+              request_id: "%REQ(X-REQUEST-ID)%"
+              trace_id: "%REQ(X-B3-TRACEID)%"
+              # AI-specific headers (KubeAI echoes model name)
+              model: "%REQ(X-MODEL-NAME)%"
+              user_agent: "%REQ(USER-AGENT)%"
+          # Log ALL requests to the AI endpoint (not just errors)
+          # To log only errors: uncomment the filter below
+          # filter:
+          #   statusCodeFilter:
+          #     op: GE
+          #     value: 400

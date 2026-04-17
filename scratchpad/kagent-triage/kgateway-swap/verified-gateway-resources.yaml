@@ -1,0 +1,98 @@
+# Verified kgateway resources — tested on red cluster 2026-04-17
+# Apply order: this file first, then verified-modelconfig.yaml
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: kgateway
+spec:
+  controllerName: kgateway.dev/kgateway
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-gateway
+  namespace: kgateway-system
+spec:
+  gatewayClassName: kgateway
+  listeners:
+    - name: ai-proxy
+      protocol: HTTP
+      port: 8080
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# Allow kgateway-system to route to kubeai service cross-namespace
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-kgateway-to-kubeai
+  namespace: kubeai
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: kgateway-system
+  to:
+    - group: ""
+      kind: Service
+---
+# Route /openai/v1/* → KubeAI (gemma2-2b-cpu, llama3-tools)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kubeai-ai-route
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: ai-gateway
+      namespace: kgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /openai/v1
+      backendRefs:
+        - name: kubeai
+          namespace: kubeai
+          port: 80
+---
+# TrafficPolicy — 120s timeout to handle KubeAI model cold-start (scale from 0)
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: ai-timeout-policy
+  namespace: kgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: kubeai-ai-route
+  timeouts:
+    request: "120s"
+    streamIdle: "120s"
+---
+# PodMonitor — Envoy metrics at :19000/stats/prometheus
+# Prometheus Operator CRDs are installed; add release: kube-prom if kube-prometheus-stack is running
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kgateway-envoy-metrics
+  namespace: kgateway-system
+  labels:
+    release: kube-prom
+spec:
+  namespaceSelector:
+    matchNames:
+      - kgateway-system
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: ai-gateway
+  podMetricsEndpoints:
+    - targetPort: 19000
+      path: /stats/prometheus
+      interval: 30s
+      relabelings:
+        - replacement: kgateway
+          targetLabel: service

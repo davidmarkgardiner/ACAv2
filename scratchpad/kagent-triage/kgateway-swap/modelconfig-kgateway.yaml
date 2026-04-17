@@ -1,0 +1,47 @@
+# ModelConfig — kagent via kgateway (replaces litellm-qwen / litellm-qwen-14b)
+#
+# After applying ai-proxy-route.yaml, kagent talks to kgateway instead of LiteLLM.
+# kgateway proxies /openai/v1 directly to KubeAI.
+#
+# The API key secret is still required by the CRD but KubeAI does not enforce
+# auth for in-cluster requests — the dummy value is fine.
+#
+# Apply:
+#   kubectl apply -f modelconfig-kgateway.yaml
+#   kubectl apply -f modelconfig-kgateway-14b.yaml
+#
+# Switch default model:
+#   kubectl patch agent sre-triage-agent -n kagent \
+#     --type merge -p '{"spec":{"declarative":{"modelConfig":"kgateway-qwen"}}}'
+#
+# Verify: kubectl get modelconfig -n kagent
+# ---
+
+# Qwen 3B (faster, lower resource)
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: kgateway-qwen
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: qwen2.5-3b
+  apiKeySecret: litellm-key       # reuse existing secret — value is ignored by KubeAI
+  apiKeySecretKey: api-key
+  openAI:
+    # kgateway service: verify with: kubectl get svc -n kgateway-system
+    baseUrl: http://kgateway.kgateway-system.svc.cluster.local:8080/openai/v1
+---
+# Qwen 14B (higher quality, needs RTX 3060 headroom)
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: kgateway-qwen-14b
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: qwen2.5-14b
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    baseUrl: http://kgateway.kgateway-system.svc.cluster.local:8080/openai/v1

@@ -1,0 +1,101 @@
+# kgateway AI Proxy Route — KubeAI backend
+#
+# Purpose: Route kagent → kgateway → KubeAI directly, removing LiteLLM from
+#          the in-cluster request path.
+#
+# Request flow (after this change):
+#   kagent controller
+#     → http://kgateway.kgateway-system.svc.cluster.local:8080/openai/v1
+#     → kgateway Envoy proxy
+#     → http://kubeai.kubeai.svc.cluster.local/openai/v1
+#
+# Pre-req: ReferenceGrant allow-gw-to-kubeai already exists in kubeai namespace.
+#
+# Verify service name before applying:
+#   kubectl get svc -n kgateway-system
+# ---
+
+# Add a dedicated listener to the existing gateway for in-cluster AI traffic.
+# Using a fixed internal hostname so it doesn't conflict with the external routes.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-platform-gw
+  namespace: kgateway-system
+  annotations:
+    # Patch annotation — apply this file with kubectl apply, not replace
+    kubectl.kubernetes.io/last-applied-configuration: ""
+spec:
+  gatewayClassName: kgateway
+  listeners:
+    - name: kagent
+      protocol: HTTP
+      port: 8080
+      hostname: ai.lab.danatlab.com
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: chat
+      protocol: HTTP
+      port: 8080
+      hostname: chat.lab.danatlab.com
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: litellm
+      protocol: HTTP
+      port: 8080
+      hostname: litellm.lab.danatlab.com
+      allowedRoutes:
+        namespaces:
+          from: All
+    # New: internal AI proxy listener (no hostname = matches any Host header on this port)
+    # kagent calls http://kgateway.kgateway-system.svc.cluster.local:8080/openai/v1
+    # The Host header will be the service FQDN — no SNI needed for HTTP.
+    - name: ai-proxy-internal
+      protocol: HTTP
+      port: 8080
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# HTTPRoute: /openai/v1 → KubeAI
+# Attached to the ai-proxy-internal listener (no sectionName = matches all listeners,
+# but the path prefix ensures it only handles AI API calls).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kubeai-ai-route
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: ai-platform-gw
+      namespace: kgateway-system
+      sectionName: ai-proxy-internal
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /openai/v1
+      backendRefs:
+        - name: kubeai
+          namespace: kubeai
+          port: 80
+---
+# ReferenceGrant: allow kgateway-system to reach kubeai service
+# (already exists as allow-gw-to-kubeai — kept here as reference, skip if present)
+# Verify: kubectl get referencegrant -n kubeai
+#
+# apiVersion: gateway.networking.k8s.io/v1beta1
+# kind: ReferenceGrant
+# metadata:
+#   name: allow-gw-to-kubeai
+#   namespace: kubeai
+# spec:
+#   from:
+#     - group: gateway.networking.k8s.io
+#       kind: HTTPRoute
+#       namespace: kgateway-system
+#   to:
+#     - group: ""
+#       kind: Service

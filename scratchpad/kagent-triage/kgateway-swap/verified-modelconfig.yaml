@@ -1,0 +1,34 @@
+# Verified ModelConfig — tested on red cluster 2026-04-17
+# Points kagent at kgateway → KubeAI (replaces LiteLLM)
+#
+# Pre-req: create the dummy secret first:
+#   kubectl create secret generic litellm-key -n kagent --from-literal=api-key="not-required"
+---
+# gemma2-2b-cpu — fast CPU model, available on this cluster
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: kgateway-kubeai
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: gemma2-2b-cpu
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    # Verified service: kubectl get svc ai-gateway -n kgateway-system
+    baseUrl: http://ai-gateway.kgateway-system.svc.cluster.local:8080/openai/v1
+---
+# llama3-tools — better tool-use capability for SRE agents
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: kgateway-kubeai-llama
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: llama3-tools
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    baseUrl: http://ai-gateway.kgateway-system.svc.cluster.local:8080/openai/v1

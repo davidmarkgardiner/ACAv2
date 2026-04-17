@@ -1,0 +1,88 @@
+# kgateway AI Backend — Multi-Pool with Failover
+#
+# Uses kgateway's Backend CRD to define KubeAI as an OpenAI-compatible AI backend.
+# Multi-pool priorities: 14B model primary, 3B model as automatic fallback.
+#
+# How failover works:
+#   - kgateway tries pool[0] (qwen2.5-14b) first
+#   - If it returns 5xx / times out → automatically retries against pool[1] (qwen2.5-3b)
+#   - No change needed in kagent — ModelConfig still points to kgateway endpoint
+#
+# Verify Backend CRD is installed:
+#   kubectl api-resources | grep -i backend | grep kgateway
+#
+# Apply:
+#   kubectl apply -f ai-backend-multipool.yaml
+#
+# Verify:
+#   kubectl get backend -n kgateway-system
+# ---
+
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: Backend
+metadata:
+  name: kubeai-multipool
+  namespace: kgateway-system
+spec:
+  ai:
+    multi:
+      priorities:
+        # Pool 0 — primary: Qwen 14B (best quality, needs GPU headroom)
+        - pool:
+            - openai:
+                model: qwen2.5-14b
+                authToken:
+                  # KubeAI doesn't enforce auth in-cluster — dummy secret is fine
+                  secretRef:
+                    name: kubeai-api-key
+                    namespace: kgateway-system
+                customHost:
+                  host: kubeai.kubeai.svc.cluster.local
+                  port: 80
+
+        # Pool 1 — fallback: Qwen 3B (fast, lower resource)
+        # Triggered automatically if pool 0 returns 5xx or times out
+        - pool:
+            - openai:
+                model: qwen2.5-3b
+                authToken:
+                  secretRef:
+                    name: kubeai-api-key
+                    namespace: kgateway-system
+                customHost:
+                  host: kubeai.kubeai.svc.cluster.local
+                  port: 80
+---
+# Dummy API key secret — KubeAI doesn't require auth for in-cluster requests
+# but the Backend spec requires a secretRef.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubeai-api-key
+  namespace: kgateway-system
+type: Opaque
+stringData:
+  api-key: "not-required"
+---
+# Update the HTTPRoute to use the Backend CRD instead of a plain service backendRef
+# This replaces the kubeai-ai-route from verified-gateway-resources.yaml when using multi-pool
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kubeai-ai-route-multipool
+  namespace: kgateway-system
+spec:
+  parentRefs:
+    - name: ai-gateway
+      namespace: kgateway-system
+      sectionName: ai-proxy
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /openai/v1
+      backendRefs:
+        - name: kubeai-multipool
+          namespace: kgateway-system
+          group: gateway.kgateway.dev
+          kind: Backend

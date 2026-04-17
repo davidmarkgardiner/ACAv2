@@ -1,0 +1,265 @@
+# Prometheus Monitoring — kgateway + kagent
+#
+# Components:
+#   1. ServiceMonitor for kgateway Envoy proxy metrics
+#   2. ServiceMonitor for kagent controller metrics
+#   3. PrometheusRule — alerting rules for AI workloads
+#
+# Prerequisites:
+#   - kube-prometheus-stack (release: kube-prom) already installed
+#   - kube-prom label selector: release=kube-prom
+#
+# Verify Prometheus is scraping:
+#   kubectl port-forward svc/kube-prom-prometheus -n monitoring 9090:9090
+#   # Open http://localhost:9090/targets — look for kgateway and kagent
+#
+# Apply:
+#   kubectl apply -f prometheus-monitoring.yaml
+# ---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. kgateway Envoy Proxy — metrics scraping
+#
+# Envoy exposes Prometheus metrics at :9091/stats/prometheus (or :15090 on some builds).
+# Verify the port: kubectl get svc -n kgateway-system -o wide
+# Check: kubectl exec -n kgateway-system <kgateway-pod> -- curl -s localhost:9091/stats/prometheus | head -20
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kgateway-metrics
+  namespace: kgateway-system
+  labels:
+    release: kube-prom          # must match kube-prom label selector
+spec:
+  namespaceSelector:
+    matchNames:
+      - kgateway-system
+  selector:
+    matchLabels:
+      # Verify: kubectl get svc -n kgateway-system --show-labels
+      # Common labels: app.kubernetes.io/name=kgateway or app=kgateway
+      app.kubernetes.io/name: kgateway
+  endpoints:
+    - port: metrics             # verify port name: kubectl get svc -n kgateway-system -o yaml | grep -A5 ports
+      path: /stats/prometheus
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - replacement: kgateway
+          targetLabel: service
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. kagent controller — metrics scraping
+#
+# kagent controller exposes Prometheus metrics (Go runtime + custom agent metrics).
+# Default port: 8083 (same as A2A), metrics path: /metrics
+# Verify: kubectl exec -n kagent deployment/kagent-controller -- curl -s localhost:8083/metrics | head -20
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kagent-controller-metrics
+  namespace: kagent
+  labels:
+    release: kube-prom
+spec:
+  namespaceSelector:
+    matchNames:
+      - kagent
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  endpoints:
+    - port: http               # verify: kubectl get svc -n kagent -o yaml | grep -A5 ports
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - replacement: kagent
+          targetLabel: service
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. KubeAI model server — scrape model inference metrics
+# KubeAI exposes OpenAI-compatible metrics at /metrics
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubeai-metrics
+  namespace: kubeai
+  labels:
+    release: kube-prom
+spec:
+  namespaceSelector:
+    matchNames:
+      - kubeai
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubeai
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. PrometheusRule — Alerting rules
+#
+# Key alerts:
+#   - AI gateway high error rate (5xx from kgateway → model backend)
+#   - Model fallback triggered (primary pool failed, using 3B)
+#   - GPU memory pressure (KubeAI OOM risk)
+#   - kagent controller down
+#   - Request rate exceeding GPU capacity
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-platform-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prom
+spec:
+  groups:
+    - name: kgateway-ai
+      interval: 30s
+      rules:
+        # ── Error rate ────────────────────────────────────────────────────
+        - alert: KgatewayHighErrorRate
+          expr: |
+            (
+              sum(rate(envoy_cluster_upstream_rq_5xx{envoy_cluster_name=~"kubeai.*"}[5m]))
+              /
+              sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"kubeai.*"}[5m]))
+            ) > 0.05
+          for: 2m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "kgateway AI error rate >5%"
+            description: "{{ $value | humanizePercentage }} of requests to KubeAI returning 5xx. Check model pod health."
+            runbook: "kubectl get pods -n kubeai; kubectl logs -n kubeai -l app=kubeai --tail=50"
+
+        # ── Latency ───────────────────────────────────────────────────────
+        - alert: KgatewayHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"kubeai.*"}[5m])) by (le)
+            ) > 30000
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "AI gateway p95 latency >30s"
+            description: "p95 response time is {{ $value | humanizeDuration }}. GPU may be overloaded or model too large."
+
+        # ── Model fallback ────────────────────────────────────────────────
+        - alert: KgatewayModelFallbackActive
+          expr: |
+            sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~".*qwen2.*3b.*"}[5m])) > 0
+            and
+            sum(rate(envoy_cluster_upstream_rq_5xx{envoy_cluster_name=~".*qwen2.*14b.*"}[5m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "AI gateway falling back to Qwen 3B"
+            description: "Primary model (14B) returning errors — traffic is being served by 3B fallback. Check GPU memory."
+            runbook: "kubectl get pods -n kubeai; kubectl top pods -n kubeai"
+
+        # ── Rate limiting ─────────────────────────────────────────────────
+        - alert: KgatewayRateLimitHit
+          expr: |
+            sum(rate(envoy_http_local_rate_limit_enabled{envoy_http_conn_manager_prefix="ingress_http"}[5m])) > 0
+          for: 2m
+          labels:
+            severity: info
+            team: platform
+          annotations:
+            summary: "AI gateway rate limit is being hit"
+            description: "Requests are being rate-limited at the AI gateway. Consider increasing token bucket or scaling model capacity."
+
+        # ── Gateway down ──────────────────────────────────────────────────
+        - alert: KgatewayDown
+          expr: |
+            absent(envoy_server_live{namespace="kgateway-system"})
+          for: 1m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "kgateway is not responding"
+            description: "Envoy health metric absent — kgateway pod may be down. All AI agent requests will fail."
+            runbook: "kubectl get pods -n kgateway-system; kubectl describe pod -n kgateway-system -l app.kubernetes.io/name=kgateway"
+
+    - name: kagent
+      interval: 30s
+      rules:
+        # ── Controller down ───────────────────────────────────────────────
+        - alert: KagentControllerDown
+          expr: |
+            absent(up{job="kagent-controller-metrics", namespace="kagent"} == 1)
+          for: 2m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "kagent controller is down"
+            description: "A2A endpoint and all agent invocations will fail."
+            runbook: "kubectl get pods -n kagent; kubectl logs -n kagent deployment/kagent-controller --tail=100"
+
+        # ── High agent error rate ─────────────────────────────────────────
+        - alert: KagentHighErrorRate
+          expr: |
+            rate(kagent_agent_requests_total{status="error"}[5m])
+            /
+            rate(kagent_agent_requests_total[5m])
+            > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "kagent agent error rate >10%"
+            description: "Agent {{ $labels.agent }} is returning errors at {{ $value | humanizePercentage }}."
+
+    - name: kubeai-gpu
+      interval: 60s
+      rules:
+        # ── GPU memory ────────────────────────────────────────────────────
+        - alert: KubeAIGPUMemoryHigh
+          expr: |
+            (
+              container_memory_working_set_bytes{namespace="kubeai"}
+              /
+              container_spec_memory_limit_bytes{namespace="kubeai"}
+            ) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "KubeAI pod memory >85% — OOM risk"
+            description: "Pod {{ $labels.pod }} using {{ $value | humanizePercentage }} of memory limit. 14B model may OOMKill under load."
+            runbook: "kubectl top pods -n kubeai; consider switching to 3B model or reducing concurrency"
+
+        # ── Model pod restarts ────────────────────────────────────────────
+        - alert: KubeAIModelCrashLoop
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="kubeai"}[15m]) * 60 > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "KubeAI model pod restarting"
+            description: "Model pod {{ $labels.pod }} has restarted recently. kgateway fallback to 3B should be active."

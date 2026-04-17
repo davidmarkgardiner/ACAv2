@@ -1,0 +1,37 @@
+# kagent Helm values — OTEL logging enabled
+#
+# Layered on top of kagent-values.yaml. Apply as an additional values file:
+#
+#   helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
+#     --namespace kagent \
+#     -f kagent-values.yaml \
+#     -f kagent-values-otel.yaml
+#
+# This enables structured OTLP log export from the kagent controller to Alloy,
+# which forwards them to Loki. Richer than plain pod log scraping — includes
+# agent name, model, session ID, token counts, and latency as structured fields.
+#
+# Prerequisite: Alloy must be receiving OTLP on port 4317 (gRPC) or 4318 (HTTP).
+# Verify: kubectl get svc alloy -n monitoring
+# Alloy OTLP receiver is configured in alloy-log-pipeline.yaml (see otelcol section).
+# ---
+
+otel:
+  tracing:
+    enabled: true
+    exporter:
+      otlp:
+        # Alloy OTLP gRPC endpoint in monitoring namespace
+        # Verify: kubectl get svc -n monitoring | grep alloy
+        endpoint: "alloy.monitoring.svc.cluster.local:4317"
+        protocol: "grpc"
+        timeout: 15
+        insecure: true   # plain gRPC for in-cluster
+
+  logging:
+    enabled: true
+    exporter:
+      otlp:
+        endpoint: "alloy.monitoring.svc.cluster.local:4317"
+        timeout: 15
+        insecure: true
