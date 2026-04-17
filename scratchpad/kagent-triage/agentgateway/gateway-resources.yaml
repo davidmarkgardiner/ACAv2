@@ -1,0 +1,106 @@
+# agentgateway — Gateway API resources
+#
+# DEPLOY ON: management cluster
+#
+# GatewayClass controllerName: agentgateway.dev/agentgateway  (vs kgateway.dev/kgateway)
+# Gateway listener port 80 (HTTP within cluster, Istio mTLS handles transport security)
+#
+# Routes:
+#   /openai/v1/*  → kubeai-backend   (local KubeAI models via AgentgatewayBackend)
+#   /azure/v1/*   → azure-openai-backend (Azure OpenAI via UAMI)
+#
+# Apply:
+#   kubectl apply -f gateway-resources.yaml
+#
+# Verify:
+#   kubectl get gateway -n agentgateway-system
+#   kubectl get httproute -n agentgateway-system
+# ---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: agentgateway
+spec:
+  controllerName: agentgateway.dev/agentgateway
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-gateway
+  namespace: agentgateway-system
+  labels:
+    app: agentgateway
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+    - name: ai-proxy
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# Allow agentgateway-system to route to kubeai service cross-namespace
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-agentgateway-to-kubeai
+  namespace: kubeai
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: agentgateway-system
+  to:
+    - group: ""
+      kind: Service
+---
+# Route /openai/v1/* → KubeAI local models (via AgentgatewayBackend)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kubeai-route
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: ai-gateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /openai/v1
+      backendRefs:
+        - name: kubeai-backend
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+# Route /azure/v1/* → Azure OpenAI (via AgentgatewayBackend with UAMI)
+# Path rewritten to /openai/v1 before hitting Azure OpenAI
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: azure-openai-route
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: ai-gateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /azure/v1
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /openai/v1
+      backendRefs:
+        - name: azure-openai-backend
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend

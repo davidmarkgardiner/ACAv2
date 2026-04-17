@@ -1,0 +1,74 @@
+# Istio AuthorizationPolicy — restrict mTLS identities that can call agentgateway
+#
+# DEPLOY ON: management cluster
+#
+# Only allow requests from kagent ServiceAccounts on known worker clusters.
+# Identity format for cross-cluster mTLS:
+#   cluster.local/ns/<namespace>/sa/<serviceaccount>
+#
+# Add one principal entry per worker cluster where kagent runs.
+# The SPIFFE IDs must match the trust domain configured in your Istio mesh.
+#
+# Apply:
+#   kubectl apply -f istio-authorization-policy.yaml
+#
+# Verify:
+#   kubectl get authorizationpolicy -n agentgateway-system
+#   istioctl authz check deploy/agentgateway -n agentgateway-system
+# ---
+
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: agentgateway-allow-kagent
+  namespace: agentgateway-system
+spec:
+  selector:
+    matchLabels:
+      app: agentgateway
+  action: ALLOW
+  rules:
+    # Allow kagent ServiceAccount from worker clusters
+    # Replace trust domain if your mesh uses a custom one (not cluster.local)
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/kagent/sa/kagent"
+              - "cluster.local/ns/kagent/sa/kagent-controller"
+              # Add more entries per worker cluster if using distinct trust domains:
+              # - "worker-cluster-1.local/ns/kagent/sa/kagent"
+              # - "worker-cluster-2.local/ns/kagent/sa/kagent"
+      to:
+        - operation:
+            methods: ["POST", "GET"]
+            paths:
+              - "/openai/v1/*"
+              - "/azure/v1/*"
+    # Allow monitoring namespace to scrape metrics
+    - from:
+        - source:
+            namespaces: ["monitoring"]
+      to:
+        - operation:
+            methods: ["GET"]
+            paths:
+              - "/metrics"
+              - "/healthz"
+              - "/readyz"
+---
+# Default DENY for everything else targeting agentgateway
+# (AuthorizationPolicy is additive — this catches anything not explicitly allowed)
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: agentgateway-default-deny
+  namespace: agentgateway-system
+spec:
+  selector:
+    matchLabels:
+      app: agentgateway
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notPrincipals: ["*"]   # will only match requests with no principal (no mTLS)

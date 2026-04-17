@@ -1,0 +1,103 @@
+# NetworkPolicy — restrict traffic in/out of agentgateway-system
+#
+# DEPLOY ON: management cluster
+#
+# Two policies:
+#   1. agentgateway-ingress — who can call the gateway
+#   2. agentgateway-egress  — what the gateway can call out to
+#
+# Ingress is restricted to:
+#   - istio-system (Istio ingress gateway — for cross-cluster kagent traffic)
+#   - agentgateway-system itself (self-traffic for control plane)
+#
+# Egress allows:
+#   - kubeai namespace (to reach KubeAI models)
+#   - DNS (kube-system CoreDNS)
+#   - Azure OpenAI via the Istio egress gateway or direct HTTPS (443)
+#
+# Apply:
+#   kubectl apply -f networkpolicy.yaml
+# ---
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentgateway-ingress
+  namespace: agentgateway-system
+spec:
+  podSelector:
+    matchLabels:
+      app: agentgateway
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow Istio ingress gateway to reach agentgateway (cross-cluster kagent traffic)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 80
+    # Allow health/metrics scraping from monitoring namespace (Prometheus/Alloy)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 80
+    # Allow self-traffic within agentgateway-system (for control plane)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agentgateway-system
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentgateway-egress
+  namespace: agentgateway-system
+spec:
+  podSelector:
+    matchLabels:
+      app: agentgateway
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # KubeAI backend
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kubeai
+      ports:
+        - protocol: TCP
+          port: 80
+    # Azure OpenAI (HTTPS to Azure public endpoints)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    # Kubernetes API (for UAMI token fetch via IMDS / workload identity)
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32   # IMDS endpoint
+      ports:
+        - protocol: TCP
+          port: 80

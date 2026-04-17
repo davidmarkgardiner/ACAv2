@@ -1,0 +1,34 @@
+# kagent ModelConfig — agentgateway → KubeAI local models
+#
+# DEPLOY ON: worker cluster (where kagent runs)
+#
+# Replace REPLACE_AGENTGATEWAY_HOSTNAME with the Istio VirtualService hostname
+# for the agentgateway service on the management cluster.
+#
+# The dummy litellm-key secret is reused — agentgateway handles real auth.
+#
+# Apply:
+#   kubectl apply -f modelconfig-kubeai.yaml
+#
+# Verify:
+#   kubectl get modelconfig -n kagent
+#   kubectl get modelconfig agentgateway-kubeai -n kagent -o jsonpath='{.status.conditions}'
+# ---
+
+# Reuse the same dummy secret from previous LiteLLM setup if already present,
+# or create it:
+#   kubectl create secret generic litellm-key -n kagent --from-literal=api-key="not-required"
+
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: agentgateway-kubeai
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: REPLACE_WITH_PRIMARY_MODEL      # must match AgentgatewayBackend model name on mgmt cluster
+  apiKeySecret: litellm-key
+  apiKeySecretKey: api-key
+  openAI:
+    # /openai/v1 routes to the KubeAI backend via agentgateway
+    baseUrl: "http://REPLACE_AGENTGATEWAY_HOSTNAME/openai/v1"

@@ -1,0 +1,69 @@
+# AgentgatewayBackend — Azure OpenAI via UAMI
+#
+# DEPLOY ON: management cluster
+#
+# agentgateway has NATIVE managed identity support — no CronJob or token refresh needed.
+# The gateway fetches and refreshes Azure AD tokens automatically using the UAMI.
+#
+# Pre-reqs:
+#   - AKS Workload Identity enabled on management cluster
+#   - UAMI has "Cognitive Services OpenAI User" role on the Azure OpenAI resource
+#   - Federated credential configured for the agentgateway-system ServiceAccount
+#
+# Find UAMI client ID:
+#   az identity show --name <uami-name> --resource-group <rg> --query clientId -o tsv
+#
+# Find Azure OpenAI endpoint:
+#   az cognitiveservices account show --name <aoai-name> --resource-group <rg> \
+#     --query properties.endpoint -o tsv
+#
+# Apply:
+#   kubectl apply -f backend-azure-openai.yaml
+#
+# Verify:
+#   kubectl get agentgatewaybackend azure-openai-backend -n agentgateway-system -o yaml
+# ---
+
+# IMPORTANT — Workload Identity setup (do this manually before applying this file)
+#
+# The agentgateway Helm chart creates its own ServiceAccount. You need to:
+#   1. Find it:         kubectl get sa -n agentgateway-system
+#   2. Annotate it:     kubectl annotate sa <sa-name> -n agentgateway-system \
+#                         azure.workload.identity/client-id=REPLACE_WITH_UAMI_CLIENT_ID --overwrite
+#   3. Label the pod template to use workload identity (if not already set by Helm values):
+#                       kubectl label sa <sa-name> -n agentgateway-system \
+#                         azure.workload.identity/use=true --overwrite
+#   4. Restart the controller to pick up the new SA annotations:
+#                       kubectl rollout restart deploy -n agentgateway-system
+#   5. Federate the UAMI with the SA's OIDC subject:
+#                       az identity federated-credential create \
+#                         --identity-name <uami> --resource-group <rg> \
+#                         --name agentgateway-federation \
+#                         --issuer <oidc-issuer-url> \
+#                         --subject system:serviceaccount:agentgateway-system:<sa-name> \
+#                         --audience api://AzureADTokenExchange
+#
+# Azure OpenAI backend with UAMI — no secrets, no CronJob
+# agentgateway fetches and refreshes the token automatically
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: azure-openai-backend
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      azureopenai:
+        endpoint: REPLACE_RESOURCE.openai.azure.com   # e.g. myresource.openai.azure.com
+        deploymentName: REPLACE_DEPLOYMENT_NAME        # e.g. gpt-4o, gpt-4-turbo
+        apiVersion: "2024-10-21"   # stable version — verify against your Azure OpenAI resource
+  policies:
+    auth:
+      azureAuth:
+        explicitConfig:
+          managedIdentity:
+            userAssignedIdentity:
+              clientId: "REPLACE_WITH_UAMI_CLIENT_ID"
+              # objectId and resourceId are optional alternatives to clientId
+              # objectId: "REPLACE_WITH_UAMI_OBJECT_ID"
+              # resourceId: "/subscriptions/.../resourceGroups/.../providers/Microsoft.ManagedIdentity/userAssignedIdentities/<name>"

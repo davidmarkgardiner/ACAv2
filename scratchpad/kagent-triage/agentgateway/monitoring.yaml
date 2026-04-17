@@ -1,0 +1,136 @@
+# Monitoring — ServiceMonitor + example Alloy log pipeline snippet
+#
+# DEPLOY ON: management cluster
+#
+# agentgateway is Envoy-based and exposes Prometheus metrics on its admin port.
+# This ServiceMonitor discovers the agentgateway pods and scrapes them.
+#
+# For logs: the Alloy snippet at the bottom of this file is for pasting into your
+# existing Alloy config — DO NOT apply this section with kubectl.
+#
+# Apply (ServiceMonitor only):
+#   kubectl apply -f monitoring.yaml
+#
+# Adjust the `release:` label if your kube-prometheus-stack uses a different name.
+# Find it:  kubectl get prometheus -A -o jsonpath='{.items[0].spec.serviceMonitorSelector}'
+# ---
+
+# PodMonitor — scrapes agentgateway Envoy stats directly from pods.
+# Envoy admin interface default port is 19000; adjust if agentgateway exposes a different port.
+# Verify the correct port: kubectl exec -n agentgateway-system deploy/agentgateway -- \
+#                            ss -tlnp  | grep -E ':(15090|19000|9090)'
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agentgateway-metrics
+  namespace: agentgateway-system
+  labels:
+    release: kube-prom   # ← match your Prometheus release selector
+spec:
+  namespaceSelector:
+    matchNames:
+      - agentgateway-system
+  selector:
+    matchLabels:
+      app: agentgateway
+  podMetricsEndpoints:
+    - targetPort: 15090         # Istio-style stats port; verify for agentgateway
+      path: /stats/prometheus
+      interval: 30s
+      relabelings:
+        - replacement: agentgateway
+          targetLabel: service
+---
+# PrometheusRule — minimum-viable alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentgateway-alerts
+  namespace: agentgateway-system
+  labels:
+    release: kube-prom
+spec:
+  groups:
+    - name: agentgateway
+      interval: 30s
+      rules:
+        - alert: AgentgatewayDown
+          expr: absent(up{job="agentgateway-metrics"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "agentgateway is not being scraped"
+            description: "No agentgateway metrics have been scraped for 5 minutes. Gateway may be down."
+        - alert: AgentgatewayHighErrorRate
+          expr: |
+            (
+              sum(rate(envoy_cluster_upstream_rq_5xx[5m])) by (envoy_cluster_name)
+              /
+              clamp_min(sum(rate(envoy_cluster_upstream_rq_total[5m])) by (envoy_cluster_name), 1)
+            ) * 100 > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentgateway upstream 5xx rate > 5%"
+            description: "Cluster {{ $labels.envoy_cluster_name }} is returning {{ $value | printf \"%.1f\" }}% 5xx."
+        - alert: AgentgatewayHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum by (envoy_cluster_name, le) (rate(envoy_cluster_upstream_rq_time_bucket[5m]))
+            ) > 10000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentgateway p95 latency > 10s"
+            description: "Cluster {{ $labels.envoy_cluster_name }} p95 latency is {{ $value | printf \"%.0f\" }}ms."
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Alloy log pipeline snippet — PASTE INTO existing Alloy config, do NOT kubectl apply
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Add to the Alloy ConfigMap/CRD on the MANAGEMENT cluster (where agentgateway runs).
+# For the WORKER cluster Alloy, replace "agentgateway-system" with "kagent" to ship
+# kagent controller logs instead.
+#
+# Replace `loki.write.default.receiver` with the name of the loki.write component
+# that's already in your Alloy config. Find it:
+#   kubectl get configmap <alloy-cm> -o yaml | grep 'loki.write'
+#
+# ```alloy
+# discovery.kubernetes "agentgateway_pods" {
+#   role = "pod"
+#   namespaces {
+#     names = ["agentgateway-system"]
+#   }
+# }
+#
+# discovery.relabel "agentgateway_filter" {
+#   targets = discovery.kubernetes.agentgateway_pods.targets
+#   rule {
+#     source_labels = ["__meta_kubernetes_pod_label_app"]
+#     regex         = "agentgateway"
+#     action        = "keep"
+#   }
+#   rule {
+#     source_labels = ["__meta_kubernetes_namespace"]
+#     target_label  = "namespace"
+#   }
+#   rule {
+#     source_labels = ["__meta_kubernetes_pod_name"]
+#     target_label  = "pod"
+#   }
+#   rule {
+#     target_label = "service"
+#     replacement  = "agentgateway"
+#   }
+# }
+#
+# loki.source.kubernetes "agentgateway_logs" {
+#   targets    = discovery.relabel.agentgateway_filter.output
+#   forward_to = [loki.write.default.receiver]   // ← rename to match existing loki.write component
+# }
+# ```
