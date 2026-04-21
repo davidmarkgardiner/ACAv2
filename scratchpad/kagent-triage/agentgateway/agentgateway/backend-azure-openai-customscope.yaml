@@ -1,0 +1,161 @@
+# Azure OpenAI backend — CUSTOM SCOPE via token-refresher CronJob
+#
+# DEPLOY ON: management cluster
+#
+# USE THIS FILE INSTEAD OF backend-azure-openai.yaml WHEN:
+#   Your Azure OpenAI is gated behind a custom AAD app audience
+#   (e.g. api://at12345-xxxx/.default instead of the default
+#    https://cognitiveservices.azure.com/.default)
+#
+# agentgateway's native azureAuth can only request the default
+# cognitiveservices scope. When you need a custom scope, the
+# workaround is: a CronJob fetches a token using the UAMI
+# (Workload Identity → token for api://<app-id>/.default) and
+# writes it to a K8s Secret. agentgateway reads the Secret as
+# an API key (sent as Authorization: Bearer <token>).
+#
+# Trade-off vs native azureAuth:
+#   + Works with any custom scope
+#   - CronJob-based refresh instead of native refresh (30min cadence)
+#   - One more moving part to monitor (KagentCannotReachGateway alert
+#     will fire if token expires and the job fails)
+#
+# Pre-reqs (management cluster):
+#   - AKS Workload Identity enabled
+#   - UAMI has app role assignment on the custom AAD app
+#   - UAMI federated credential for kgateway-token-refresher ServiceAccount
+#
+# Apply:
+#   kubectl apply -f backend-azure-openai-customscope.yaml
+#
+#   # Run once immediately to populate the secret before first gateway request:
+#   kubectl create job --from=cronjob/azure-openai-token-refresher \
+#     azure-openai-token-init -n agentgateway-system
+#
+#   kubectl get secret azure-openai-token -n agentgateway-system
+# ---
+
+# ── 1. ServiceAccount for the token refresher (bound to UAMI) ─────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentgateway-token-refresher
+  namespace: agentgateway-system
+  annotations:
+    azure.workload.identity/client-id: "REPLACE_WITH_UAMI_CLIENT_ID"
+  labels:
+    azure.workload.identity/use: "true"
+---
+# ── 2. RBAC — write to the token secret ───────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentgateway-token-refresher
+  namespace: agentgateway-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentgateway-token-refresher
+  namespace: agentgateway-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentgateway-token-refresher
+subjects:
+  - kind: ServiceAccount
+    name: agentgateway-token-refresher
+    namespace: agentgateway-system
+---
+# ── 3. CronJob — fetch AAD token every 30 min and write to a Secret ───────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: azure-openai-token-refresher
+  namespace: agentgateway-system
+spec:
+  schedule: "*/30 * * * *"   # tokens last ~60 min; refresh every 30 to stay ahead
+  concurrencyPolicy: Replace
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            azure.workload.identity/use: "true"
+        spec:
+          serviceAccountName: agentgateway-token-refresher
+          restartPolicy: OnFailure
+          containers:
+            - name: token-refresher
+              image: mcr.microsoft.com/azure-cli:2.58.0
+              env:
+                # The CUSTOM SCOPE — this is the whole point of using this file
+                # Set to whatever LiteLLM uses today:
+                #   kubectl get cm -n kagent litellm-config -o yaml | grep -i scope
+                - name: AAD_SCOPE
+                  value: "api://REPLACE_WITH_CUSTOM_APP_ID/.default"
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  echo "Requesting token for scope: ${AAD_SCOPE}"
+                  TOKEN=$(az account get-access-token \
+                    --resource "${AAD_SCOPE%/.default}" \
+                    --query accessToken -o tsv)
+
+                  if [ -z "${TOKEN}" ]; then
+                    echo "ERROR: empty token"
+                    exit 1
+                  fi
+
+                  echo "Token length: ${#TOKEN}"
+
+                  # agentgateway secretRef spec:
+                  #   - The Secret data key MUST be named "Authorization"
+                  #   - The value IS the Authorization header verbatim,
+                  #     so include the "Bearer " prefix here.
+                  # Verified against AgentgatewayBackend CRD schema:
+                  #   "secretRef references a Kubernetes Secret storing the
+                  #    key to use as the authorization value. This must be
+                  #    stored in the Authorization key."
+                  kubectl create secret generic azure-openai-token \
+                    -n agentgateway-system \
+                    --from-literal=Authorization="Bearer ${TOKEN}" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+
+                  echo "Secret updated at $(date -u +%FT%TZ)."
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+---
+# ── 4. AgentgatewayBackend using secretRef (NOT azureAuth) ────────────────────
+# This replaces the backend in backend-azure-openai.yaml when custom scope is needed.
+# DO NOT apply both files — they define the same backend name.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: azure-openai-backend
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      azureopenai:
+        endpoint: REPLACE_RESOURCE.openai.azure.com
+        deploymentName: REPLACE_DEPLOYMENT_NAME   # e.g. gpt-4o
+        apiVersion: "2024-10-21"
+  policies:
+    auth:
+      # Read the token the CronJob wrote. agentgateway sends it as the
+      # Authorization header to Azure OpenAI.
+      secretRef:
+        name: azure-openai-token

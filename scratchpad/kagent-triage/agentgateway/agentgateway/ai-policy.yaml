@@ -1,0 +1,98 @@
+# AgentgatewayPolicy — prompt guard (PII only), rate limiting, timeouts
+#
+# DEPLOY ON: management cluster
+#
+# Prompt guard is intentionally minimal — only blocks clear-cut PII in requests
+# and masks PII in responses. SRE agents need to discuss kubectl commands,
+# secrets, kubeconfig issues etc., so those patterns are NOT blocked.
+#
+# Extend patterns carefully in production — false positives break agents.
+#
+# Apply:
+#   kubectl apply -f ai-policy.yaml
+#
+# Verify:
+#   kubectl get agentgatewaypolicy -n agentgateway-system
+# ---
+
+# Policy for KubeAI route — timeout for cold-start + rate limit + PII guard
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: kubeai-ai-policy
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: kubeai-route
+  traffic:
+    # 90s — KubeAI cold-start takes 60-90s. Istio VS timeout is 125s, kagent ≥ 120s.
+    requestTimeout: "90s"
+    rateLimit:
+      local:
+        - requests: 5
+          unit: Seconds
+          burst: 20
+  backend:
+    ai:
+      promptGuard:
+        request:
+          # Reject requests leaking obvious PII (credit cards, SSN, phone numbers).
+          # Email is NOT rejected on request — SRE agents routinely discuss user emails.
+          - regex:
+              builtins:
+                - CreditCard
+                - Ssn
+                - PhoneNumber
+              action: Reject
+            response:
+              message: "Request blocked: contains PII."
+        response:
+          # Mask any PII the model might echo back
+          - regex:
+              builtins:
+                - CreditCard
+                - Ssn
+                - Email
+                - PhoneNumber
+              action: Mask
+---
+# Policy for Azure OpenAI route — same guards, shorter timeout (no cold-start)
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: azure-openai-ai-policy
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: azure-openai-route
+  traffic:
+    requestTimeout: "30s"
+    rateLimit:
+      local:
+        - requests: 10
+          unit: Seconds
+          burst: 30
+  backend:
+    ai:
+      promptGuard:
+        request:
+          - regex:
+              builtins:
+                - CreditCard
+                - Ssn
+                - PhoneNumber
+              action: Reject
+            response:
+              message: "Request blocked: contains PII."
+        response:
+          - regex:
+              builtins:
+                - CreditCard
+                - Ssn
+                - Email
+                - PhoneNumber
+              action: Mask

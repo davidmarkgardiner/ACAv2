@@ -1,0 +1,66 @@
+# AgentgatewayBackend — KubeAI local models (OpenAI-compatible) with priority failover
+#
+# DEPLOY ON: management cluster
+#
+# Uses spec.ai.groups priority groups for proper failover:
+#   - Group 0 (highest priority): primary model
+#   - Group 1 (fallback): secondary model if group 0 fails
+# Within a group, P2C load balancing is used.
+#
+# KubeAI models scale to 0 when idle. First request takes 60-90s (Ollama model load).
+# Failover engages if the primary model returns 5xx or is unreachable.
+#
+# Update model names to match your cluster: kubectl get model -n kubeai
+#
+# If you only have ONE KubeAI model, remove the second group entry.
+#
+# Apply:
+#   kubectl apply -f backend-kubeai.yaml
+#
+# Verify:
+#   kubectl get agentgatewaybackend kubeai-backend -n agentgateway-system -o yaml
+# ---
+
+# Dummy secret — KubeAI doesn't require auth for in-cluster requests
+# but AgentgatewayBackend secretRef is required by the schema.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubeai-dummy-key
+  namespace: agentgateway-system
+type: Opaque
+stringData:
+  api-key: "not-required"
+---
+# Single AgentgatewayBackend with priority-group failover
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: kubeai-backend
+  namespace: agentgateway-system
+spec:
+  ai:
+    groups:
+      # ─── Priority 0: primary model (tried first) ─────────────────────────
+      - providers:
+          - name: kubeai-primary
+            openai:
+              model: REPLACE_WITH_PRIMARY_MODEL    # e.g. gemma2-2b-cpu, llama3-tools
+            # host/port are siblings of the provider type, not inside openai
+            host: kubeai.kubeai.svc.cluster.local
+            port: 80
+            policies:
+              auth:
+                secretRef:
+                  name: kubeai-dummy-key
+      # ─── Priority 1: fallback model (used if all group 0 providers fail) ──
+      - providers:
+          - name: kubeai-fallback
+            openai:
+              model: REPLACE_WITH_FALLBACK_MODEL   # e.g. smaller/faster model
+            host: kubeai.kubeai.svc.cluster.local
+            port: 80
+            policies:
+              auth:
+                secretRef:
+                  name: kubeai-dummy-key

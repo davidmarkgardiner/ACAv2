@@ -1,0 +1,27 @@
+# kagent ModelConfig — agentgateway → Azure OpenAI (UAMI)
+#
+# DEPLOY ON: worker cluster (where kagent runs)
+#
+# The worker cluster has NO Azure credentials.
+# agentgateway on the management cluster handles UAMI token fetch/refresh natively.
+#
+# Apply:
+#   kubectl apply -f modelconfig-azure.yaml
+#
+# Verify:
+#   kubectl get modelconfig agentgateway-azure-openai -n kagent -o yaml
+# ---
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: agentgateway-azure-openai
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: REPLACE_WITH_DEPLOYMENT_NAME   # Azure OpenAI deployment name, e.g. gpt-4o
+  apiKeySecret: litellm-key             # same dummy secret — agentgateway holds real creds
+  apiKeySecretKey: api-key
+  openAI:
+    # /azure/v1 routes to Azure OpenAI backend via agentgateway
+    # agentgateway rewrites path to /openai/v1 before forwarding to Azure
+    baseUrl: "http://REPLACE_AGENTGATEWAY_HOSTNAME/azure/v1"

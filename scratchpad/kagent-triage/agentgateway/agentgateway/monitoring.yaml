@@ -1,0 +1,364 @@
+# Monitoring & Telemetry — both agentgateway AND kagent coverage
+#
+# This file covers:
+#   MANAGEMENT CLUSTER:  agentgateway PodMonitor + alerts
+#   WORKER CLUSTER:      kagent ServiceMonitor + alerts
+#   BOTH CLUSTERS:       Alloy log-discovery + OTLP receiver snippets
+#
+# agentgateway natively exposes Prometheus metrics including:
+#   - Envoy stats (request rates, latency, errors)
+#   - agentgateway_gen_ai_client_token_usage (input/output tokens per model)
+#
+# kagent controller exposes Go runtime + per-agent request metrics on :8083/metrics
+#
+# Apply strategy:
+#   # On management cluster:
+#   kubectl apply -f monitoring.yaml --selector tier=mgmt
+#   # On worker cluster:
+#   kubectl apply -f monitoring.yaml --selector tier=worker
+#   # Or just apply the whole file on each cluster — resources are namespaced
+#   # and will only apply where the target namespace exists.
+#
+# Adjust the `release:` label if your kube-prometheus-stack uses a different name.
+# Find it:  kubectl get prometheus -A -o jsonpath='{.items[0].spec.serviceMonitorSelector}'
+# ---
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MANAGEMENT CLUSTER — agentgateway
+# ═════════════════════════════════════════════════════════════════════════════
+
+# PodMonitor — scrapes agentgateway Envoy + native gen_ai metrics from pods.
+# Verify port:  kubectl exec -n agentgateway-system deploy/agentgateway -- ss -tlnp
+# Envoy stats typically on :15090 (Istio convention) or :19000 (default admin).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agentgateway-metrics
+  namespace: agentgateway-system
+  labels:
+    release: kube-prom   # ← match your Prometheus release selector
+    tier: mgmt
+spec:
+  namespaceSelector:
+    matchNames:
+      - agentgateway-system
+  selector:
+    matchLabels:
+      app: agentgateway
+  podMetricsEndpoints:
+    - targetPort: 15090
+      path: /stats/prometheus
+      interval: 30s
+      relabelings:
+        - replacement: agentgateway
+          targetLabel: service
+---
+# PrometheusRule — availability, error, latency AND token budget alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentgateway-alerts
+  namespace: agentgateway-system
+  labels:
+    release: kube-prom
+    tier: mgmt
+spec:
+  groups:
+    - name: agentgateway-availability
+      interval: 30s
+      rules:
+        - alert: AgentgatewayDown
+          expr: absent(up{job="agentgateway-metrics"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "agentgateway is not being scraped"
+            description: "No agentgateway metrics for 5 minutes. Gateway may be down."
+
+        - alert: AgentgatewayHighErrorRate
+          expr: |
+            (
+              sum(rate(envoy_cluster_upstream_rq_5xx[5m])) by (envoy_cluster_name)
+              /
+              clamp_min(sum(rate(envoy_cluster_upstream_rq_total[5m])) by (envoy_cluster_name), 1)
+            ) * 100 > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentgateway 5xx rate > 5% on {{ $labels.envoy_cluster_name }}"
+            description: "{{ $value | printf \"%.1f\" }}% 5xx errors sustained for 10 minutes."
+
+        - alert: AgentgatewayHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum by (envoy_cluster_name, le) (rate(envoy_cluster_upstream_rq_time_bucket[5m]))
+            ) > 10000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentgateway p95 latency > 10s on {{ $labels.envoy_cluster_name }}"
+            description: "p95 latency is {{ $value | printf \"%.0f\" }}ms."
+
+    - name: agentgateway-token-usage
+      interval: 60s
+      rules:
+        # Total input tokens per minute per model — useful for cost tracking
+        - record: agentgateway:tokens_per_minute:rate1m
+          expr: |
+            sum by (gen_ai_request_model, gen_ai_token_type, gen_ai_system) (
+              rate(agentgateway_gen_ai_client_token_usage_sum[1m]) * 60
+            )
+
+        # Alert when any model burns > 100k input tokens/min for 5m (sign of runaway agent)
+        - alert: AgentgatewayRunawayTokenUsage
+          expr: |
+            sum by (gen_ai_request_model) (
+              rate(agentgateway_gen_ai_client_token_usage_sum{gen_ai_token_type="input"}[5m]) * 60
+            ) > 100000
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Runaway token usage on model {{ $labels.gen_ai_request_model }}"
+            description: "{{ $value | printf \"%.0f\" }} input tokens/min sustained for 5m — check for stuck agent or retry storm."
+
+        # Alert when a model stops being used (either no agent calls OR gateway broken)
+        - alert: AgentgatewayNoTokenActivity
+          expr: |
+            sum(rate(agentgateway_gen_ai_client_token_usage_count[15m])) == 0
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "No AI requests through agentgateway for 30 minutes"
+            description: "Expected if no agents are active; investigate if agents should be running."
+
+---
+# ═════════════════════════════════════════════════════════════════════════════
+# WORKER CLUSTER — kagent
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ServiceMonitor — scrape kagent controller metrics (:8083/metrics)
+# Go runtime stats + per-agent request counters.
+# Verify:  kubectl exec -n kagent deploy/kagent-controller -- \
+#            wget -qO- http://localhost:8083/metrics | head -20
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kagent-controller-metrics
+  namespace: kagent
+  labels:
+    release: kube-prom
+    tier: worker
+spec:
+  namespaceSelector:
+    matchNames:
+      - kagent
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  endpoints:
+    - port: http              # verify port name: kubectl get svc -n kagent kagent-controller -o yaml
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - replacement: kagent
+          targetLabel: service
+---
+# PrometheusRule — kagent controller availability + agent error rate
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kagent-alerts
+  namespace: kagent
+  labels:
+    release: kube-prom
+    tier: worker
+spec:
+  groups:
+    - name: kagent-controller
+      interval: 30s
+      rules:
+        - alert: KagentControllerDown
+          expr: absent(up{job="kagent-controller-metrics", namespace="kagent"} == 1)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "kagent controller is down"
+            description: "A2A endpoint and all agent invocations will fail."
+            runbook: "kubectl get pods -n kagent; kubectl logs -n kagent deployment/kagent-controller --tail=100"
+
+        - alert: KagentHighErrorRate
+          expr: |
+            sum by (agent) (rate(kagent_agent_requests_total{status="error"}[5m]))
+            /
+            clamp_min(sum by (agent) (rate(kagent_agent_requests_total[5m])), 1)
+            > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "kagent agent {{ $labels.agent }} error rate > 10%"
+            description: "Agent {{ $labels.agent }} returning errors at {{ $value | humanizePercentage }} — check upstream (agentgateway, model backend)."
+
+        - alert: KagentAgentHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum by (agent, le) (rate(kagent_agent_request_duration_seconds_bucket[5m]))
+            ) > 60
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "kagent agent {{ $labels.agent }} p95 > 60s"
+            description: "Agent response latency is {{ $value | printf \"%.0fs\" }}. Check agentgateway timeouts + model backend."
+
+        - alert: KagentCannotReachGateway
+          # No successful requests for 15m AND at least one request attempted
+          expr: |
+            sum(rate(kagent_agent_requests_total{status="success"}[15m])) == 0
+            and
+            sum(rate(kagent_agent_requests_total[15m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "kagent agents cannot reach agentgateway"
+            description: "All requests failing for 15m+ but requests are being attempted. Likely VirtualService/AuthorizationPolicy issue or gateway down."
+            runbook: |
+              # Check cross-cluster connectivity:
+              kubectl run -n kagent test --rm -it --image=curlimages/curl -- \
+                curl -sv http://ai-gateway.agentgateway-system.svc.cluster.local/openai/v1/models
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Useful PromQL — paste into Grafana dashboards
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ── AGENTGATEWAY (management cluster) ──
+#
+# INPUT TOKENS PER MINUTE PER MODEL:
+#   sum by (gen_ai_request_model) (
+#     rate(agentgateway_gen_ai_client_token_usage_sum{gen_ai_token_type="input"}[1m]) * 60
+#   )
+#
+# OUTPUT TOKENS PER MINUTE PER MODEL:
+#   sum by (gen_ai_request_model) (
+#     rate(agentgateway_gen_ai_client_token_usage_sum{gen_ai_token_type="output"}[1m]) * 60
+#   )
+#
+# AVG TOKENS PER REQUEST PER MODEL:
+#   sum by (gen_ai_request_model) (rate(agentgateway_gen_ai_client_token_usage_sum[5m]))
+#   /
+#   sum by (gen_ai_request_model) (rate(agentgateway_gen_ai_client_token_usage_count[5m]))
+#
+# REQUEST RATE PER BACKEND:
+#   sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_total[1m]))
+#
+# FAILOVER DETECTION (traffic hitting fallback group):
+#   sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~".*fallback.*"}[5m]))
+#
+# ── KAGENT (worker cluster) ──
+#
+# REQUESTS PER AGENT PER MINUTE:
+#   sum by (agent) (rate(kagent_agent_requests_total[1m]) * 60)
+#
+# SUCCESS RATE PER AGENT:
+#   sum by (agent) (rate(kagent_agent_requests_total{status="success"}[5m]))
+#   /
+#   clamp_min(sum by (agent) (rate(kagent_agent_requests_total[5m])), 1)
+#
+# AGENT P95 LATENCY:
+#   histogram_quantile(0.95,
+#     sum by (agent, le) (rate(kagent_agent_request_duration_seconds_bucket[5m]))
+#   )
+#
+# CONTROLLER MEMORY/CPU (Go runtime):
+#   sum by (pod) (go_memstats_alloc_bytes{job="kagent-controller-metrics"})
+#   rate(process_cpu_seconds_total{job="kagent-controller-metrics"}[5m])
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ALLOY SNIPPETS — paste into EXISTING Alloy config, do NOT kubectl apply
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# MANAGEMENT CLUSTER Alloy — scrape agentgateway pod logs + OTLP traces
+# WORKER CLUSTER Alloy    — scrape kagent namespace pod logs (swap namespace)
+#
+# Replace `loki.write.default.receiver` with the name of the loki.write component
+# that's already wired up in your Alloy config. Find it:
+#    kubectl get configmap <alloy-cm> -o yaml | grep -A2 'loki.write'
+#
+# Replace Tempo endpoint with your actual Tempo OTLP receiver (or delete the
+# Tempo exporter block if you don't have Tempo).
+#
+# ```alloy
+# // ── 1. POD LOG DISCOVERY (agentgateway on mgmt, kagent on worker) ─────
+# discovery.kubernetes "agentgateway_pods" {
+#   role = "pod"
+#   namespaces {
+#     names = ["agentgateway-system"]   // use ["kagent"] on worker cluster
+#   }
+# }
+#
+# discovery.relabel "agentgateway_filter" {
+#   targets = discovery.kubernetes.agentgateway_pods.targets
+#   rule {
+#     source_labels = ["__meta_kubernetes_pod_label_app"]
+#     regex         = "agentgateway"     // or "kagent" on worker
+#     action        = "keep"
+#   }
+#   rule {
+#     source_labels = ["__meta_kubernetes_namespace"]
+#     target_label  = "namespace"
+#   }
+#   rule {
+#     source_labels = ["__meta_kubernetes_pod_name"]
+#     target_label  = "pod"
+#   }
+#   rule {
+#     target_label = "service"
+#     replacement  = "agentgateway"      // or "kagent"
+#   }
+# }
+#
+# loki.source.kubernetes "agentgateway_logs" {
+#   targets    = discovery.relabel.agentgateway_filter.output
+#   forward_to = [loki.write.default.receiver]
+# }
+#
+# // ── 2. OTLP RECEIVER for agentgateway traces (optional) ───────────────
+# // Configure agentgateway Helm values to export traces here:
+# //   tracing.enabled=true, tracing.otlpEndpoint=http://alloy.monitoring:4317
+# otelcol.receiver.otlp "agentgateway" {
+#   grpc {
+#     endpoint = "0.0.0.0:4317"
+#   }
+#   output {
+#     traces  = [otelcol.processor.batch.agentgateway.input]
+#   }
+# }
+#
+# otelcol.processor.batch "agentgateway" {
+#   output {
+#     traces = [otelcol.exporter.otlp.tempo.input]
+#   }
+# }
+#
+# otelcol.exporter.otlp "tempo" {
+#   client {
+#     endpoint = "tempo.monitoring.svc.cluster.local:4317"   // ← your Tempo endpoint
+#     tls {
+#       insecure = true
+#     }
+#   }
+# }
+# ```
+#
+# Then restart Alloy: kubectl rollout restart ds/alloy -n monitoring

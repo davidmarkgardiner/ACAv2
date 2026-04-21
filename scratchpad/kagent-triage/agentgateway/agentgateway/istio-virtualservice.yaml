@@ -1,0 +1,91 @@
+# Istio VirtualService — expose agentgateway to worker clusters
+#
+# DEPLOY ON: management cluster
+#
+# Exposes the agentgateway Gateway (on port 80 in agentgateway-system) via the
+# Istio mesh so worker-cluster kagent pods can reach it cross-cluster over mTLS.
+#
+# Two patterns supported — pick whichever matches your mesh topology:
+#
+# PATTERN A (multi-cluster mesh): ServiceEntry on workers + mesh Gateway here.
+#   Worker cluster kagent uses DNS name: ai-gateway.agentgateway-system.svc.cluster.local
+#   Traffic is routed via the Istio East-West gateway automatically.
+#   This file contains this pattern.
+#
+# PATTERN B (separate meshes): expose via Istio Ingress Gateway on a real hostname.
+#   Use Gateway + VirtualService with hostnames like ai-gateway.internal.example.com.
+#   See commented-out alternate section at the bottom.
+#
+# Apply:
+#   kubectl apply -f istio-virtualservice.yaml
+#
+# Verify on worker cluster:
+#   kubectl run test --rm -it --image=curlimages/curl -n kagent -- \
+#     curl -s http://ai-gateway.agentgateway-system.svc.cluster.local/openai/v1/models
+# ---
+
+# ─── Pattern A: multi-cluster mesh (recommended) ──────────────────────────────
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ai-gateway-vs
+  namespace: agentgateway-system
+spec:
+  hosts:
+    - ai-gateway.agentgateway-system.svc.cluster.local
+  gateways:
+    - mesh   # apply to all sidecar proxies in the mesh
+  http:
+    - match:
+        - uri:
+            prefix: /openai/v1
+        - uri:
+            prefix: /azure/v1
+      route:
+        - destination:
+            host: ai-gateway.agentgateway-system.svc.cluster.local
+            port:
+              number: 80
+      timeout: 125s   # slightly > agentgateway request timeout to avoid cascading cancellations
+      retries:
+        attempts: 3
+        perTryTimeout: 40s
+        retryOn: "5xx,reset,connect-failure,refused-stream"
+---
+
+# ─── Pattern B alternate: Istio Ingress Gateway (uncomment if needed) ─────────
+# apiVersion: networking.istio.io/v1
+# kind: Gateway
+# metadata:
+#   name: ai-gateway-ingress
+#   namespace: agentgateway-system
+# spec:
+#   selector:
+#     istio: ingressgateway   # use the standard Istio ingress gateway
+#   servers:
+#     - port:
+#         number: 443
+#         name: https
+#         protocol: HTTPS
+#       tls:
+#         mode: SIMPLE
+#         credentialName: ai-gateway-tls   # cert-manager managed secret
+#       hosts:
+#         - ai-gateway.internal.example.com
+# ---
+# apiVersion: networking.istio.io/v1
+# kind: VirtualService
+# metadata:
+#   name: ai-gateway-ingress-vs
+#   namespace: agentgateway-system
+# spec:
+#   hosts:
+#     - ai-gateway.internal.example.com
+#   gateways:
+#     - ai-gateway-ingress
+#   http:
+#     - route:
+#         - destination:
+#             host: ai-gateway.agentgateway-system.svc.cluster.local
+#             port:
+#               number: 80
