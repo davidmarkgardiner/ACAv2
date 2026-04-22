@@ -41,6 +41,7 @@ secret-rotation-safe UAMI custom-scope workflow.
 | Check required CRDs | `./preflight-check.sh` |
 | Understand why secret rotation is safe | `SECRET-ROTATION-TEST.md` |
 | See what the Factory review flagged | `FACTORY-REVIEW.md` |
+| TLS / connection errors from kagent | See [Troubleshooting](#troubleshooting) below |
 
 ## Files
 
@@ -137,7 +138,95 @@ for agent in $(kubectl get agent -n kagent -o name | sed 's|agent.kagent.dev/||'
 done
 ```
 
-## Common Gotchas
+## Troubleshooting
+
+### Layered test approach — isolate the failing layer
+
+When anything goes wrong end-to-end, work from the outside in. Each layer
+points at a different cause.
+
+**Layer 0 — mgmt cluster port-forward** (proves agentgateway + backend work)
+```bash
+kubectl port-forward -n agentgateway-system svc/ai-gateway 8080:80 &
+curl -s -X POST http://localhost:8080/azure/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<deployment>","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' | jq .
+```
+Fail here → AgentgatewayBackend, UAMI, or Azure OpenAI issue. Check
+`kubectl get agentgatewaybackend -n agentgateway-system` status and the
+data-plane logs.
+
+**Layer 1 — raw curl from a worker-cluster pod** (proves Istio + TLS + network path)
+```bash
+HOST=agentgateway.<wildcard-domain>
+kubectl run tls-probe -n kagent --rm -it --restart=Never \
+  --image=curlimages/curl --command -- \
+  curl -sv https://$HOST/ -m 10 2>&1 | grep -iE 'SSL|TLS|subject|issuer|verify|HTTP/'
+```
+Fail here → DNS, network routing, or TLS trust. See TLS section below.
+
+**Layer 2 — kagent A2A** (proves kagent + ModelConfig)
+```bash
+kubectl port-forward -n kagent svc/kagent-controller 8083:8083 &
+curl -s -X POST "http://localhost:8083/api/a2a/kagent/$TEST_AGENT/" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send",
+       "params":{"message":{"role":"user","parts":[{"kind":"text","text":"ping"}]}}}' \
+  -m 120 | jq '.result.artifacts[0].parts[0].text, .error'
+```
+Fail here but Layer 1 works → kagent-specific: watch `kubectl logs -n kagent deploy/kagent-controller -f | grep -iE 'tls|x509|handshake|error'`
+
+### TLS / certificate errors
+
+| Symptom in curl -v or kagent logs | Cause | Fix |
+|---|---|---|
+| `unable to get local issuer certificate` | Corporate CA not in pod's trust store | Inject CA via ConfigMap + `SSL_CERT_FILE` env (see Helm overlay below) |
+| `certificate signed by unknown authority` (Go) | Same as above | Same |
+| `certificate is valid for X, not Y` | Wildcard cert doesn't cover the hostname | Use a hostname matching the wildcard; check cert SANs |
+| `tls: handshake failure` / `EOF` | Istio sidecar intercepting or cipher mismatch | Check if kagent pod has an Istio sidecar; verify peer authentication policy |
+| `connection refused` / `no route to host` | Network path broken (NSG, firewall, DNS) | `dig $HOST` from the pod; check AKS outbound routing |
+| `context deadline exceeded` | Cold start or slow backend | Raise timeout on kagent / VirtualService |
+
+**Corporate CA injection (Helm overlay):**
+```bash
+kubectl create configmap corp-ca-bundle -n kagent \
+  --from-file=ca-bundle.crt=/path/to/corp-ca.pem
+
+# kagent-values-ca.yaml:
+# extraVolumes:
+#   - name: corp-ca
+#     configMap: { name: corp-ca-bundle }
+# extraVolumeMounts:
+#   - name: corp-ca
+#     mountPath: /etc/ssl/certs/corp-ca.crt
+#     subPath: ca-bundle.crt
+#     readOnly: true
+# env:
+#   - name: SSL_CERT_FILE
+#     value: /etc/ssl/certs/corp-ca.crt
+
+helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
+  -n kagent -f kagent-values.yaml -f kagent-values-ca.yaml
+kubectl rollout status deploy/kagent-controller -n kagent
+```
+
+### Ingress / VirtualService "route not found"
+
+Almost always means: traffic reached Istio but no VS matched the Host header
+OR traffic reached agentgateway but no HTTPRoute matches the path. See
+`VALIDATE-MGMT.md` §11d test sequence to isolate.
+
+```bash
+# Verify the HTTPRoute is applied on the agentgateway side
+kubectl get httproute -n agentgateway-system
+
+# Verify Istio knows the VS
+kubectl get virtualservice -n agentgateway-system agentgateway-vs -o yaml | yq .status
+istioctl proxy-config route -n aks-istio-ingress \
+  deploy/aks-istio-ingressgateway-external --name https.443 | grep -A5 "$HOST"
+```
+
+### Common gotchas
 
 1. **`Route not found` / `failed to parse request: EOF`** — testing with GET or empty body. AI backends only accept POST with a valid chat-completions JSON body. Use `curl -X POST -H "Content-Type: application/json" -d '{"model":"...","messages":[...]}'`.
 
@@ -148,6 +237,14 @@ done
 4. **Envoy metrics port is 15020** (agentgateway-specific) — not 15090 (Istio default).
 
 5. **AKS Istio add-on = separate mesh per cluster.** Worker reaches mgmt via HTTPS ingress, not mesh. AuthorizationPolicy must use source IP / API key / JWT — not ServiceAccount principals.
+
+6. **Find the ingress IP for `--resolve` testing:**
+   ```bash
+   kubectl get svc -n aks-istio-ingress \
+     aks-istio-ingressgateway-external \
+     -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+   ```
+   Then: `curl --resolve "$HOST:443:$IP" https://$HOST/...` to test before DNS is configured.
 
 ## Rollback
 
