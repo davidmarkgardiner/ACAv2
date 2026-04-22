@@ -1,0 +1,76 @@
+# Istio VirtualService — expose agentgateway via a SHARED wildcard Istio Gateway
+#
+# DEPLOY ON: management cluster
+#
+# Scenario: worker clusters and management cluster are each running their own
+# Istio mesh (typical for AKS Istio add-on — each AKS cluster is a separate
+# mesh by default). Worker kagent calls agentgateway as an EXTERNAL HTTPS
+# endpoint rather than through the mesh.
+#
+# Path:
+#   kagent (worker cluster, separate mesh)
+#     ↓  HTTPS to public/private hostname
+#   mgmt cluster Istio ingress gateway (terminates TLS using wildcard cert)
+#     ↓  routed by Gateway + VirtualService
+#   agentgateway-system/ai-gateway Service
+#     ↓
+#   agentgateway data-plane
+#
+# What you need BEFORE applying this file:
+#   1. A shared Istio wildcard Gateway already installed in istio-system,
+#      with a valid TLS cert for *.<your-domain>
+#   2. Network reachability from the worker cluster to the mgmt cluster's
+#      Istio ingress LB (VNet peering, Private Link, or public internet)
+#   3. A specific hostname picked under the wildcard that you'll use as
+#      the kagent ModelConfig baseUrl
+#
+# ─── Discover your existing wildcard Gateway ───
+#
+#   # List Istio Gateways with wildcard hosts
+#   kubectl get gateway.networking.istio.io -A \
+#     -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.servers[*].hosts}{"\n"}{end}' \
+#     | grep '\*'
+#
+#   # Find the ingress gateway Service (the LB worker clusters will hit)
+#   kubectl get svc -n aks-istio-ingress           # AKS Istio addon default
+#   kubectl get svc -n istio-system -l istio=ingressgateway   # standard Istio
+#
+# Substitute these values in this file:
+#   <SHARED_GATEWAY_NS>    — namespace of the existing Gateway
+#                             (AKS addon: typically `aks-istio-ingress`)
+#   <SHARED_GATEWAY_NAME>  — name of the existing Gateway
+#   <AGENTGATEWAY_HOST>    — the specific host under the wildcard
+#                             e.g. agentgateway.internal.example.com
+# ---
+
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: agentgateway-vs
+  namespace: agentgateway-system
+spec:
+  hosts:
+    - "REPLACE_WITH_AGENTGATEWAY_HOST"    # e.g. agentgateway.internal.example.com
+
+  # Attach ONLY to the shared ingress Gateway — not `mesh`.
+  # `mesh` would only work if the worker cluster were in the same Istio mesh,
+  # which is not the case with default AKS Istio add-on across clusters.
+  gateways:
+    - REPLACE_WITH_SHARED_GATEWAY_NS/REPLACE_WITH_SHARED_GATEWAY_NAME
+
+  http:
+    # Match the exposed paths so only AI traffic is routed here.
+    - match:
+        - uri: { prefix: /openai/v1 }
+        - uri: { prefix: /azure/v1 }
+        - uri: { prefix: /qwen/v1 }
+      route:
+        - destination:
+            host: ai-gateway.agentgateway-system.svc.cluster.local
+            port:
+              number: 80
+      timeout: 125s
+      retries:
+        attempts: 3
+        perTryTimeout: 40s
+        retryOn: 5xx,reset,connect-failure,refused-stream

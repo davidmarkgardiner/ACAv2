@@ -1,0 +1,140 @@
+# Istio AuthorizationPolicy — restrict who can call agentgateway
+#
+# DEPLOY ON: management cluster
+#
+# Scenario: worker clusters are in separate Istio meshes (default for AKS
+# Istio add-on). Worker kagent calls in as an external HTTPS client, so
+# mTLS ServiceAccount principals from the worker cluster are NOT visible
+# here — they get stripped at the ingress.
+#
+# Three realistic authz layers, in order of increasing strength:
+#   (1) Source IP range      — worker cluster egress must come from a known CIDR
+#   (2) API key / Bearer     — kagent sends a shared secret via header
+#   (3) JWT validation       — kagent sends a signed token (AzureAD, etc.)
+#
+# This file sets up (1) by default. Layers (2) and (3) are commented-out
+# snippets you can enable by uncommenting + adding the matching kagent
+# ModelConfig change.
+#
+# Apply:
+#   kubectl apply -f istio-authorization-policy.yaml
+#
+# Verify:
+#   kubectl get authorizationpolicy -n agentgateway-system
+# ---
+
+# ─── Layer 1: source IP allow-list ────────────────────────────────────────────
+# Allows traffic only from known worker cluster egress CIDR(s).
+#
+# Find the egress IP(s) your worker cluster uses to reach the management cluster:
+#   - AKS with default outbound: the AKS cluster's outbound public IP
+#       az aks show --name <worker> --resource-group <rg> \
+#         --query networkProfile.loadBalancerProfile.effectiveOutboundIPs -o tsv
+#   - AKS with user-defined routing / NAT gateway: the NAT GW / FW public IP
+#   - Private clusters over VNet peering: the worker cluster's pod CIDR
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: agentgateway-allow-known-egress
+  namespace: agentgateway-system
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-class-name: agentgateway
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            # Allow-list of worker-cluster egress IPs / CIDRs
+            remoteIpBlocks:
+              - "REPLACE_WITH_WORKER_EGRESS_CIDR"     # e.g. 20.1.2.3/32 or 10.100.0.0/16
+              # - "OTHER_WORKER_EGRESS_CIDR"
+      to:
+        - operation:
+            methods: ["POST", "GET"]
+            paths:
+              - "/openai/v1/*"
+              - "/azure/v1/*"
+              - "/qwen/v1/*"
+---
+# Default DENY — anything that didn't match the ALLOW above is rejected
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: agentgateway-default-deny
+  namespace: agentgateway-system
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-class-name: agentgateway
+  action: DENY
+  rules:
+    - to:
+        - operation:
+            paths: ["*"]
+
+# ─── Layer 2 (OPTIONAL): require a shared API key header ──────────────────────
+# Uncomment and apply AFTER you've:
+#   1. Stored a random shared secret in a Kubernetes Secret on the mgmt cluster
+#   2. Provisioned the same secret on the worker cluster
+#   3. Configured kagent ModelConfig to send it via extraHeaders
+#
+# ---
+# apiVersion: security.istio.io/v1
+# kind: AuthorizationPolicy
+# metadata:
+#   name: agentgateway-require-api-key
+#   namespace: agentgateway-system
+# spec:
+#   selector:
+#     matchLabels:
+#       gateway.networking.k8s.io/gateway-class-name: agentgateway
+#   action: DENY
+#   rules:
+#     - to:
+#         - operation:
+#             paths: ["/openai/v1/*", "/azure/v1/*", "/qwen/v1/*"]
+#       when:
+#         - key: request.headers[x-platform-key]
+#           notValues: ["<your-shared-secret>"]
+
+# ─── Layer 3 (OPTIONAL): JWT validation from AzureAD ─────────────────────────
+# Strongest option — kagent gets a JWT from AzureAD (same UAMI pattern used
+# for Azure OpenAI), sends it as Authorization: Bearer, agentgateway's Istio
+# sidecar validates the JWT before traffic reaches the gateway.
+#
+# Requires a RequestAuthentication resource on top of the AuthorizationPolicy.
+# See: https://istio.io/latest/docs/tasks/security/authentication/authn-policy/
+# ---
+# apiVersion: security.istio.io/v1
+# kind: RequestAuthentication
+# metadata:
+#   name: agentgateway-jwt
+#   namespace: agentgateway-system
+# spec:
+#   selector:
+#     matchLabels:
+#       gateway.networking.k8s.io/gateway-class-name: agentgateway
+#   jwtRules:
+#     - issuer: "https://sts.windows.net/<TENANT_ID>/"
+#       jwksUri: "https://login.microsoftonline.com/<TENANT_ID>/discovery/v2.0/keys"
+#       audiences:
+#         - "api://<agentgateway-app-id>"
+# ---
+# apiVersion: security.istio.io/v1
+# kind: AuthorizationPolicy
+# metadata:
+#   name: agentgateway-require-jwt
+#   namespace: agentgateway-system
+# spec:
+#   selector:
+#     matchLabels:
+#       gateway.networking.k8s.io/gateway-class-name: agentgateway
+#   action: DENY
+#   rules:
+#     - to:
+#         - operation:
+#             paths: ["/openai/v1/*", "/azure/v1/*", "/qwen/v1/*"]
+#       when:
+#         - key: request.auth.principal
+#           values: [""]     # no valid principal = no JWT present = deny
