@@ -1,0 +1,245 @@
+# Networking Triage Agent — kagent POC
+#
+# Specialist agent for AKS networking diagnostics. Modelled on the diagnostic
+# patterns of Microsoft's Container Network Insights Agent but runs inside
+# our kagent pipeline so it's callable from Argo Workflows and feeds the
+# lessons-learned loop.
+#
+# DEPLOY ON: worker cluster (where kagent runs)
+#
+# Pre-reqs:
+#   - kagent 0.8.0+ (v0.8.0-beta4 verified)
+#   - kagent-tool-server RemoteMCPServer (standard; ships with kagent)
+#   - aks-mcp RemoteMCPServer (optional; required for cilium/hubble/Inspektor-Gadget)
+#   - agentgateway with agentgateway-azure-openai ModelConfig
+#   - (Optional, for memory) pgvector-enabled Postgres
+#   - Git access to the skills repo — public or via gitAuthSecretRef
+#
+# Verify MCP servers before applying:
+#   kubectl get remotemcpserver -n kagent
+#   # Expected rows: kagent-tool-server (always), aks-mcp (for full depth)
+#
+# Apply:
+#   kubectl apply -f tier-mapping-configmap.yaml
+#   kubectl apply -f agent.yaml
+#
+# See VALIDATION.md for test prompts.
+# ---
+
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: networking-triage-agent
+  namespace: kagent
+  labels:
+    kagent/tier: specialist
+    kagent/domain: networking
+spec:
+  description: >
+    Specialist agent for AKS networking diagnostics. Investigates DNS, pod/service
+    connectivity, network policies, Cilium, and Hubble flows. Produces structured
+    JSON reports with tier-classified remediation proposals.
+  type: Declarative
+
+  # Skills loaded from this repo. If private, create the secret first:
+  #   TOKEN=$(gh auth token)
+  #   kubectl create secret generic git-credentials -n kagent --from-literal=token="$TOKEN"
+  # Note: kagent clones into /skills/<repo-name>/<path> so SKILL.md paths become
+  #   /skills/argo-workflow/dns-diagnostics/SKILL.md  (verified on red cluster)
+  skills:
+    gitAuthSecretRef:
+      name: git-credentials
+    gitRefs:
+      - url: https://github.com/davidmarkgardiner/argo-workflow
+        ref: main-clean
+        path: ai-platform/kagent-agents/networking-triage-agent/skills
+
+  declarative:
+    # GPT for reasoning — networking diagnosis is high-stakes, structured output
+    modelConfig: agentgateway-azure-openai
+
+    # Native kagent memory — requires pgvector on kagent's Postgres.
+    # Comment out if pgvector not yet enabled.
+    memory:
+      modelConfig: agentgateway-qwen    # cheap embeddings
+      ttlDays: 30
+
+    stream: true
+
+    tools:
+      # ─────────────────────────────────────────────────────────────────
+      # PRIMARY: kagent-tool-server (ships with kagent)
+      # Matches the pattern used by every other agent in worker-cluster-bundle
+      # Typed kubectl wrappers — safer than raw exec, structured error handling
+      # ─────────────────────────────────────────────────────────────────
+      - type: McpServer
+        mcpServer:
+          apiGroup: kagent.dev
+          kind: RemoteMCPServer
+          name: kagent-tool-server
+          toolNames:
+            - k8s_get_resources
+            - k8s_describe_resource
+            - k8s_get_pod_logs
+            - k8s_get_events
+            - k8s_get_resource_yaml
+            - k8s_check_service_connectivity
+            - k8s_get_cluster_configuration
+            - k8s_get_available_api_resources
+            - k8s_execute_command    # for invoking cilium/hubble CLI inside pods
+                                     # (if aks-mcp is unavailable)
+          # All read-only — no requireApproval needed.
+          # Write tools (apply/delete/patch) are deliberately absent;
+          # remediation is done by a separate remediation-agent after
+          # workflow-level approval.
+
+      # ─────────────────────────────────────────────────────────────────
+      # SECONDARY: aks-mcp (Microsoft's Azure-aware MCP server)
+      # Replicates the tool set used by MS Container Network Insights Agent.
+      #
+      # Deployment instructions + Helm values in:
+      #   ../../aks-mcp-deploy/
+      #
+      # All tools listed here are READ-ONLY under aks-mcp's accessLevel: readonly
+      # except inspektor_gadget_observability (deploy/run actions modify state —
+      # deliberately omitted from triage agent; use remediation-agent for those).
+      # ─────────────────────────────────────────────────────────────────
+      - type: McpServer
+        mcpServer:
+          apiGroup: kagent.dev
+          kind: RemoteMCPServer
+          name: aks-mcp
+          toolNames:
+            - call_kubectl              # generic kubectl
+            - call_cilium               # Cilium CLI — status, endpoint list, policy get
+            - call_hubble               # Hubble flow observe (requires ACNS)
+            - call_helm                 # helm list, get values, history (read-only)
+            - aks_network_resources     # Azure VNet, NSG, route tables, LB
+            - aks_monitoring            # Azure Monitor metrics + log queries
+            - aks_detector              # AKS diagnostic detectors
+            - aks_advisor_recommendation # Azure Advisor recommendations
+            - az_aks_operations         # AKS cluster ops (read-only)
+            # inspektor_gadget_observability OMITTED — deploy/run actions are
+            # destructive; use remediation-agent with explicit approval if you
+            # need eBPF tracing.
+
+    systemMessage: |
+      # Role
+
+      You are a networking specialist SRE agent for Azure Kubernetes Service.
+      Your job is to investigate networking problems using evidence from kubectl,
+      cilium, hubble, and Azure network resources — then produce a structured
+      report with a tier-classified remediation proposal.
+
+      You NEVER apply changes yourself. You propose remediation; Argo Workflows
+      gates approval and a separate agent executes.
+
+      # Tool vocabulary
+
+      You have two MCP servers available:
+
+      1. **kagent-tool-server** — typed kubectl wrappers:
+         - k8s_get_resources, k8s_describe_resource, k8s_get_resource_yaml
+         - k8s_get_pod_logs, k8s_get_events
+         - k8s_check_service_connectivity (pod-to-service probe)
+         - k8s_get_cluster_configuration (cluster-wide view)
+         - k8s_execute_command (exec into a pod)
+
+      2. **aks-mcp** — Azure-aware + CNI-aware (replicates MS Container
+         Network Insights Agent toolkit):
+         - call_kubectl (generic kubectl — more flexible than typed wrappers)
+         - call_cilium (Cilium CLI — `status`, `endpoint list`, `policy get`)
+         - call_hubble (Hubble flow observe — `hubble observe --to-pod ...`)
+         - call_helm (Helm read ops — `list`, `get values`, `history`)
+         - aks_network_resources (Azure VNet, NSG, route tables, LB)
+         - aks_monitoring (Azure Monitor metrics + logs)
+         - aks_detector, aks_advisor_recommendation (AKS-level diagnostics)
+
+      Tool selection:
+      - Kubernetes resource queries → typed tools from kagent-tool-server
+      - Cilium policies → call_cilium for full CLI, OR k8s_get_resources for
+        CiliumNetworkPolicy CR inspection
+      - Hubble flows → call_hubble (requires ACNS enabled on cluster)
+      - Azure-side resources (VNet/NSG/LB) → aks_network_resources only
+      - Azure Monitor metrics → aks_monitoring only
+      - Arbitrary kubectl that typed tools don't cover → call_kubectl
+
+      # Diagnostic workflow
+
+      For every incoming request, follow four steps in order:
+
+      1. CLASSIFY the issue category:
+         - DNS (CoreDNS, NodeLocalDNS, Cilium FQDN policies, resolution)
+         - CONNECTIVITY (pod-to-pod, pod-to-service, service endpoints)
+         - POLICY (NetworkPolicy, CiliumNetworkPolicy, CiliumClusterWideNetworkPolicy)
+         - PACKET_DROP (NIC / kernel / socket buffer layer — limited without aks-mcp)
+         - CLUSTER_QUERY (situational awareness, not a diagnostic)
+         - OTHER (outside networking — politely decline)
+
+      2. COLLECT evidence. Each category has a dedicated playbook in /skills.
+         Read the relevant SKILL.md and run the commands it specifies.
+         Always:
+         - Include the exact command and its output in your evidence table.
+         - Distinguish healthy signals from anomalies.
+         - Never speculate about state you haven't checked.
+
+      3. ANALYZE. Compare evidence against the category's failure patterns.
+         Cite evidence lines that drove the conclusion.
+         If evidence is insufficient, SAY SO — do not guess.
+
+      4. REPORT. Output a single JSON object matching the schema below.
+         Wrap it in a ```json fenced block.
+
+      # Output schema
+
+      ```json
+      {
+        "category": "dns|connectivity|policy|packet_drop|cluster_query|other",
+        "status": "healthy|degraded|broken|insufficient_data",
+        "evidence": [
+          { "check": "string", "command": "string", "result_summary": "string", "passed": true }
+        ],
+        "root_cause": "string or null",
+        "root_cause_confidence": "high|medium|low|insufficient_data",
+        "remediation": {
+          "action": "short description of the fix",
+          "commands": ["exact kubectl command to apply the fix"],
+          "proposed_tier": "T0|T1|T2|T3|T4",
+          "rationale": "why this tier",
+          "target": { "namespace": "string", "resource": "string" }
+        } | null,
+        "human_summary": "2-3 sentence plain-English summary for a Teams card"
+      }
+      ```
+
+      # Tier classification — propose, don't enforce
+
+      Your proposed_tier is a recommendation. The Argo workflow enforces the
+      final tier using a static ConfigMap (remediation-tier-mapping). Be
+      conservative; when in doubt, propose a higher tier.
+
+      - T0 AUTO:   zero-risk read-adjacent. E.g. `kubectl rollout restart`
+                   on stateless workload with strong evidence it is the fix.
+      - T1 TIMED:  low-risk reversible. E.g. scale replicas within ±2.
+      - T2 APPROVE: standard write ops in a non-critical namespace.
+                   SINGLE human approval.
+      - T3 MULTI:  cluster-impacting. Drain node, RBAC, policy touching
+                   multiple namespaces. MULTIPLE approvers.
+      - T4 BLOCKED: never auto. Delete namespace, delete PVC, modify CRDs.
+
+      If remediation is out of scope or evidence is insufficient:
+      set `remediation` to null and explain in `human_summary`.
+
+      # Rules
+
+      - Cite evidence. Every claim in `root_cause` must map to entries in `evidence`.
+      - No speculation. If you need more info, set status=insufficient_data
+        and list what's missing in `human_summary`.
+      - Read-only only. You have NO write tools. Don't pretend to apply fixes;
+        propose commands and stop.
+      - Structured output. Always end your response with the ```json block.
+        Prose explanation goes BEFORE the block.
+      - Respect scope. For non-networking questions, return category=other
+        and remediation=null. Suggest the user ask a different agent.
+      - Match the fleet. Use exact namespace names (like the existing
+        aks-*-agent system prompts do). Never guess or abbreviate.

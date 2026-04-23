@@ -1,0 +1,128 @@
+# Tier mapping — static classification used by Argo Workflows to ENFORCE the
+# final remediation tier. The agent's proposed_tier is a recommendation only;
+# this ConfigMap is the source of truth.
+#
+# DEPLOY ON: worker cluster (where kagent + Argo Workflows run)
+#
+# Lookup key: (tool_name, target_namespace_label, severity)
+# Result: one of T0, T1, T2, T3, T4
+#
+# The Argo workflow's classify step reads this ConfigMap, looks up the
+# proposed remediation, and overrides the agent's proposed_tier if the
+# static mapping is stricter.
+#
+# Apply:
+#   kubectl apply -f tier-mapping-configmap.yaml
+#
+# Update: edit + reapply. Argo workflow reads at runtime, no restart needed.
+# ---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: remediation-tier-mapping
+  namespace: kagent
+  labels:
+    app.kubernetes.io/managed-by: argo-workflow-triage
+data:
+  # Default rules by tool/action pattern. Workflow matches in order.
+  tier-rules.yaml: |
+    # Default fallback — if nothing matches, tier up to T4.
+    # Fail-safe: unknown action = human review.
+    default_tier: T4
+
+    rules:
+      # ─── T0 AUTO — zero-risk ─────────────────────────────────────────────
+      - action_pattern: "^kubectl rollout restart (deployment|daemonset)/.*"
+        target_namespace_labels:
+          tier: dev
+        severity: ["info", "warning"]
+        tier: T0
+
+      - action_pattern: "^kubectl rollout restart deployment/coredns$"
+        target_namespace: kube-system
+        severity: ["warning"]
+        tier: T0     # Explicitly approved for CoreDNS recycle — safe + reversible
+
+      # ─── T1 TIMED — low-risk reversible ──────────────────────────────────
+      - action_pattern: "^kubectl scale deployment/.* --replicas=[0-9]+$"
+        target_namespace_labels:
+          tier: dev
+        delta_max: 2       # within ±2 of current replica count
+        tier: T1
+        timeout_sec: 300   # auto-execute after 5 min unless vetoed
+
+      - action_pattern: "^kubectl delete pod .*"
+        target_namespace_labels:
+          tier: dev
+        tier: T1
+        timeout_sec: 300
+
+      # ─── T2 APPROVE — single human approval ──────────────────────────────
+      - action_pattern: "^kubectl apply -f networkpolicy.*"
+        target_namespace_labels:
+          tier: staging
+        tier: T2
+
+      - action_pattern: "^kubectl patch service .*"
+        target_namespace_labels:
+          tier: ["staging", "dev"]
+        tier: T2
+
+      - action_pattern: "^kubectl delete pod .*"
+        target_namespace_labels:
+          tier: staging
+        tier: T2
+
+      # ─── T3 MULTI — multiple approvers ───────────────────────────────────
+      - action_pattern: "^kubectl drain .*"
+        tier: T3
+        required_approvers: 2
+
+      - action_pattern: "^kubectl apply -f networkpolicy.*"
+        target_namespace_labels:
+          tier: prod
+        tier: T3
+        required_approvers: 2
+
+      - action_pattern: "^kubectl delete pod .*"
+        target_namespace_labels:
+          tier: prod
+        tier: T3
+        required_approvers: 2
+
+      # ─── T4 BLOCKED — create ticket, never auto ──────────────────────────
+      - action_pattern: "^kubectl delete namespace .*"
+        tier: T4
+
+      - action_pattern: "^kubectl delete pvc .*"
+        tier: T4
+
+      - action_pattern: "^kubectl delete (clusterrole|clusterrolebinding) .*"
+        tier: T4
+
+      - action_pattern: "^kubectl (apply|patch|delete) (crd|customresourcedefinition) .*"
+        tier: T4
+
+      # Break-glass override (senior on-call bypasses tier)
+      - action_pattern: ".*"
+        requester_group: sre-oncall-senior
+        break_glass: true
+        tier: T0
+        audit: required
+
+  # Per-namespace policy overrides (optional — namespace-level config wins)
+  namespace-overrides.yaml: |
+    # Namespaces that are ALWAYS T4 regardless of action (safest)
+    always_T4_namespaces:
+      - kube-system            # Unless action is CoreDNS rollout-restart above
+      - istio-system
+      - aks-istio-ingress
+      - aks-istio-system
+      - agentgateway-system
+      - kagent
+
+    # Namespaces that can auto-execute more aggressively (dev sandboxes)
+    relaxed_namespaces:
+      - sandbox-dev
+      - test-ephemeral

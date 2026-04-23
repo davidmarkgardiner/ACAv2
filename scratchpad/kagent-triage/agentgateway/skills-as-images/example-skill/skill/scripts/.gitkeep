@@ -1,0 +1,3 @@
+# Put any scripts referenced from SKILL.md in this directory.
+# They'll end up at /skills/<skill-name>/scripts/ in the agent container.
+# The agent can exec them if its tools allow (e.g. k8s_execute_command pointed at itself).
