@@ -1,0 +1,31 @@
+# Argo Events EventSource — receives callbacks from the Teams bot (or Slack/Discord/mock)
+#
+# This is the HTTP endpoint the bot service POSTs to when a user makes a
+# decision (Approve / Reject). The Sensor then reads this event and
+# translates it into an Argo Workflow resume or stop operation.
+#
+# Expose externally via Istio VirtualService + wildcard Gateway. Example URL:
+#   https://hitl-callback.internal.bank.com/approval-callback
+#
+# For testing, use port-forward + curl:
+#   kubectl port-forward -n argo-events \
+#     svc/teams-hitl-callback-eventsource-svc 12000:12000
+#   curl -X POST http://localhost:12000/approval-callback \
+#     -H 'Content-Type: application/json' \
+#     -d '{"workflow_name":"test","decision":"approved"}'
+# ---
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: teams-hitl-callback
+  namespace: argo-events
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    approval:
+      port: "12000"
+      endpoint: /approval-callback
+      method: POST

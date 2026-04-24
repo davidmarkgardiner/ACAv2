@@ -1,0 +1,136 @@
+# Test approval workflow — no real triage, no remediation, just the gate.
+#
+# Flow:
+#   1. say-before    (print context)
+#   2. request-approval  (POST to mock bot)
+#   3. wait-for-approval (suspend — resumed by Sensor on mock bot callback)
+#   4. say-after     (print decision outcome)
+#
+# Exercises the full Argo Events → Sensor → workflow-resume chain end-to-end
+# without requiring agentgateway, kagent, AKS MCP, or any other real component.
+#
+# Prereqs:
+#   - ai-platform/teams-hitl/eventsource.yaml applied
+#   - ai-platform/teams-hitl/sensor.yaml applied
+#   - mock-bot deployed (see ./deployment.yaml) OR port-forwarded locally
+#
+# Run:
+#   argo submit -n argo test-approval-workflow.yaml \
+#     --watch \
+#     --parameter bot_endpoint=http://mock-bot.argo:8080/approvals \
+#     --parameter callback_url=http://teams-hitl-callback-eventsource-svc.argo-events:12000/approval-callback
+#
+# While it's suspended, approve or reject via the mock:
+#   kubectl port-forward -n argo svc/mock-bot 8080:8080 &
+#   APP=$(curl -s http://localhost:8080/pending | jq -r '.[0].approval_id')
+#   curl -X POST "http://localhost:8080/decide/$APP?decision=approved"
+#   # (or decision=rejected)
+#
+# Or run smoke-test.sh to do it all in one command.
+# ---
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: test-approval-
+  namespace: argo
+spec:
+  entrypoint: main
+  # No SA with cluster-wide rights needed — just basic pod exec
+  serviceAccountName: argo-workflow-sa
+  # Bounded lifetime so test workflows don't pile up
+  ttlStrategy:
+    secondsAfterCompletion: 600
+    secondsAfterSuccess: 300
+    secondsAfterFailure: 600
+  activeDeadlineSeconds: 900     # 15 min max total runtime (suspend + execution)
+
+  arguments:
+    parameters:
+      - name: bot_endpoint
+        value: "http://mock-bot.argo:8080/approvals"
+      - name: callback_url
+        value: "http://teams-hitl-callback-eventsource-svc.argo-events:12000/approval-callback"
+      - name: test_tier
+        value: "T2"
+      - name: test_action
+        value: "kubectl rollout restart deploy/example -n test"
+      - name: test_target
+        value: "test/deployment/example"
+
+  templates:
+    # ─── main DAG ──────────────────────────────────────────────────────────
+    - name: main
+      dag:
+        tasks:
+          - name: say-before
+            template: echo
+            arguments:
+              parameters:
+                - name: msg
+                  value: "🔵 [{{workflow.name}}] starting — will request approval for: {{workflow.parameters.test_action}}"
+
+          - name: request-approval
+            template: request-approval
+            dependencies: [say-before]
+
+          - name: wait-for-approval
+            template: wait-for-approval
+            dependencies: [request-approval]
+
+          - name: say-after
+            template: echo
+            dependencies: [wait-for-approval]
+            arguments:
+              parameters:
+                - name: msg
+                  value: "🟢 [{{workflow.name}}] approved by human — would execute remediation here"
+
+    # ─── Template: echo a message ──────────────────────────────────────────
+    - name: echo
+      inputs:
+        parameters:
+          - name: msg
+      container:
+        image: busybox:1.37
+        command: [sh, -c]
+        args:
+          - echo "{{inputs.parameters.msg}}"
+
+    # ─── Template: POST to mock bot ────────────────────────────────────────
+    - name: request-approval
+      outputs:
+        parameters:
+          - name: approval_id
+            valueFrom:
+              path: /tmp/approval_id
+      script:
+        image: curlimages/curl:8.10.1
+        command: [sh]
+        source: |
+          set -e
+          echo "POSTing approval request to: {{workflow.parameters.bot_endpoint}}"
+          cat > /tmp/req.json <<EOF
+          {
+            "workflow_name": "{{workflow.name}}",
+            "workflow_namespace": "{{workflow.namespace}}",
+            "callback_url": "{{workflow.parameters.callback_url}}",
+            "tier": "{{workflow.parameters.test_tier}}",
+            "action": "{{workflow.parameters.test_action}}",
+            "target": "{{workflow.parameters.test_target}}",
+            "rationale": "Smoke test — exercises the approval gate only; no real remediation",
+            "expiry_seconds": 600
+          }
+          EOF
+          curl -sS -X POST "{{workflow.parameters.bot_endpoint}}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/req.json \
+            -o /tmp/resp.json \
+            -w "HTTP %{http_code}\n"
+          cat /tmp/resp.json
+          jq -r '.approval_id' /tmp/resp.json > /tmp/approval_id
+          echo "approval_id: $(cat /tmp/approval_id)"
+
+    # ─── Template: suspend until Sensor resumes or timeout ────────────────
+    - name: wait-for-approval
+      suspend:
+        duration: "10m"           # safety net; mock bot's expiry is also 10min

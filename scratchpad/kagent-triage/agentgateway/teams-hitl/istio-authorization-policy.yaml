@@ -1,0 +1,89 @@
+# Istio AuthorizationPolicy — restrict who can POST to the callback webhook
+#
+# DEPLOY ON: management cluster
+#
+# Scenario: only the Teams bot platform (and possibly a few known test
+# sources) should be allowed to POST approval decisions. Same layered
+# approach we used for agentgateway:
+#   Layer 1: source IP allow-list (remoteIpBlocks) — always on
+#   Layer 2 (commented): shared header / HMAC — uncomment when bot is ready
+#
+# Find the bot's egress IP(s):
+#   - Ask the bot platform team for their outbound NAT ranges
+#   - OR check the incoming X-Forwarded-For on a test request to
+#     Argo Events access logs after a real callback
+#
+# Apply:
+#   kubectl apply -f istio-authorization-policy.yaml
+#
+# Verify:
+#   kubectl get authorizationpolicy -n argo-events
+#   istioctl authz check deploy/teams-hitl-callback-eventsource -n argo-events
+# ---
+
+# ─── Layer 1: source IP allow-list ──────────────────────────────────────────
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: hitl-callback-allow-bot
+  namespace: argo-events
+spec:
+  selector:
+    matchLabels:
+      # EventSource pods are labelled by Argo Events with the eventsource name
+      eventsource-name: teams-hitl-callback
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            remoteIpBlocks:
+              - "REPLACE_WITH_BOT_EGRESS_CIDR"     # e.g. 20.1.2.3/32 or 10.100.0.0/16
+              # - "OTHER_BOT_EGRESS_CIDR"
+      to:
+        - operation:
+            methods: ["POST"]
+            paths:
+              - "/approval-callback"
+              - "/approval-callback/"
+---
+# Default DENY — anything that didn't match the ALLOW above is rejected.
+# Also means /metrics, /healthz etc. on the EventSource pod are blocked from
+# the ingress path — that's fine; they're still reachable in-cluster for
+# Prometheus.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: hitl-callback-default-deny
+  namespace: argo-events
+spec:
+  selector:
+    matchLabels:
+      eventsource-name: teams-hitl-callback
+  action: DENY
+  rules:
+    - to:
+        - operation:
+            paths: ["*"]
+
+# ─── Layer 2 (OPTIONAL): require shared header / HMAC ──────────────────────
+# Uncomment once the bot is signing callbacks. Matches the HMAC header spec
+# in BOT-CONTRACT.md.
+#
+# ---
+# apiVersion: security.istio.io/v1
+# kind: AuthorizationPolicy
+# metadata:
+#   name: hitl-callback-require-signature
+#   namespace: argo-events
+# spec:
+#   selector:
+#     matchLabels:
+#       eventsource-name: teams-hitl-callback
+#   action: DENY
+#   rules:
+#     - to:
+#         - operation:
+#             paths: ["/approval-callback", "/approval-callback/"]
+#       when:
+#         - key: request.headers[x-bot-signature]
+#           notValues: ["*"]     # no signature header present = deny

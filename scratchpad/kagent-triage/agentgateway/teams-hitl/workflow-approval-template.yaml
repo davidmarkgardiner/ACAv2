@@ -1,0 +1,198 @@
+# WorkflowTemplate snippets for the approval gate — merge into your existing
+# triage WorkflowTemplate (e.g. aks-mgmt-stack/k8s-event-triage/...).
+#
+# The `main` DAG shows the full flow; the individual templates are referenced
+# from it. Adjust the tier mapping lookup (step 2) to match your existing
+# remediation-tier-mapping ConfigMap layout.
+# ---
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: triage-with-approval
+  namespace: argo
+spec:
+  entrypoint: main
+  serviceAccountName: argo-workflow-sa
+
+  arguments:
+    parameters:
+      - name: alert_payload
+      - name: bot_endpoint
+        value: "https://teams-bot.internal.bank.com/approvals"
+      - name: callback_url
+        value: "https://hitl-callback.internal.bank.com/approval-callback"
+
+  templates:
+    # ─── main DAG — tier-dispatched flow ────────────────────────────────────
+    - name: main
+      dag:
+        tasks:
+          - name: triage
+            template: call-triage-agent
+            arguments:
+              parameters:
+                - name: alert
+                  value: "{{workflow.parameters.alert_payload}}"
+
+          - name: classify-tier
+            template: classify-tier
+            dependencies: [triage]
+            arguments:
+              parameters:
+                - name: triage_report
+                  value: "{{tasks.triage.outputs.parameters.report}}"
+
+          # T0/T1 → auto-execute path
+          - name: auto-execute
+            template: call-remediation-agent
+            dependencies: [classify-tier]
+            when: "{{tasks.classify-tier.outputs.parameters.tier}} =~ ^T[01]$"
+            arguments:
+              parameters:
+                - name: action
+                  value: "{{tasks.triage.outputs.parameters.action}}"
+                - name: target
+                  value: "{{tasks.triage.outputs.parameters.target}}"
+
+          # T2/T3 → approval path
+          - name: request-approval
+            template: request-approval
+            dependencies: [classify-tier]
+            when: "{{tasks.classify-tier.outputs.parameters.tier}} =~ ^T[23]$"
+            arguments:
+              parameters:
+                - name: tier
+                  value: "{{tasks.classify-tier.outputs.parameters.tier}}"
+                - name: action
+                  value: "{{tasks.triage.outputs.parameters.action}}"
+                - name: target
+                  value: "{{tasks.triage.outputs.parameters.target}}"
+                - name: rationale
+                  value: "{{tasks.triage.outputs.parameters.rationale}}"
+
+          - name: wait-for-approval
+            template: wait-for-approval
+            dependencies: [request-approval]
+            when: "{{tasks.classify-tier.outputs.parameters.tier}} =~ ^T[23]$"
+
+          - name: approved-execute
+            template: call-remediation-agent
+            dependencies: [wait-for-approval]
+            when: "{{tasks.classify-tier.outputs.parameters.tier}} =~ ^T[23]$"
+            arguments:
+              parameters:
+                - name: action
+                  value: "{{tasks.triage.outputs.parameters.action}}"
+                - name: target
+                  value: "{{tasks.triage.outputs.parameters.target}}"
+
+          # T4 → fail fast, create ticket
+          - name: create-ticket
+            template: create-gitlab-ticket
+            dependencies: [classify-tier]
+            when: "{{tasks.classify-tier.outputs.parameters.tier}} == T4"
+            arguments:
+              parameters:
+                - name: action
+                  value: "{{tasks.triage.outputs.parameters.action}}"
+                - name: rationale
+                  value: "{{tasks.triage.outputs.parameters.rationale}}"
+
+          # Verify outcome (all auto + approved paths)
+          - name: verify
+            template: call-triage-agent-verify
+            dependencies: [auto-execute, approved-execute]
+
+    # ─── Template: POST to Teams bot, record approval_id ─────────────────
+    - name: request-approval
+      inputs:
+        parameters:
+          - name: tier
+          - name: action
+          - name: target
+          - name: rationale
+      outputs:
+        parameters:
+          - name: approval_id
+            valueFrom:
+              path: /tmp/approval_id
+      script:
+        image: curlimages/curl:8.10.1
+        command: [sh]
+        source: |
+          set -e
+
+          cat > /tmp/request.json <<EOF
+          {
+            "workflow_name": "{{workflow.name}}",
+            "workflow_namespace": "{{workflow.namespace}}",
+            "callback_url": "{{workflow.parameters.callback_url}}",
+            "tier": "{{inputs.parameters.tier}}",
+            "action": "{{inputs.parameters.action}}",
+            "target": "{{inputs.parameters.target}}",
+            "rationale": "{{inputs.parameters.rationale}}",
+            "expiry_seconds": 86400
+          }
+          EOF
+
+          echo "Posting approval request to bot..."
+          curl -sS -X POST "{{workflow.parameters.bot_endpoint}}" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $(cat /var/secrets/teams-bot/token)" \
+            -d @/tmp/request.json \
+            -o /tmp/response.json \
+            -w "HTTP %{http_code}\n"
+
+          cat /tmp/response.json
+
+          # Extract approval_id for annotation / audit
+          jq -r '.approval_id' /tmp/response.json > /tmp/approval_id
+        volumeMounts:
+          - name: teams-bot-token
+            mountPath: /var/secrets/teams-bot
+            readOnly: true
+      volumes:
+        - name: teams-bot-token
+          secret:
+            secretName: teams-bot-token
+
+    # ─── Template: suspend until Sensor resumes or timeout ───────────────
+    - name: wait-for-approval
+      suspend:
+        duration: "24h"
+      # Timeout → step fails → workflow fails → alert fires
+
+    # ─── Template: tier classifier — looks up remediation-tier-mapping CM ─
+    - name: classify-tier
+      inputs:
+        parameters:
+          - name: triage_report
+      outputs:
+        parameters:
+          - name: tier
+            valueFrom:
+              path: /tmp/tier
+      script:
+        image: alpine:3.19
+        command: [sh]
+        source: |
+          apk add --no-cache jq >/dev/null 2>&1
+
+          # Extract proposed tier + action from triage JSON
+          TRIAGE='{{inputs.parameters.triage_report}}'
+          ACTION=$(echo "$TRIAGE" | jq -r '.remediation.commands[0] // ""')
+          PROPOSED_TIER=$(echo "$TRIAGE" | jq -r '.remediation.proposed_tier // "T4"')
+
+          # Load tier mapping ConfigMap (pre-mounted) and match against rules.
+          # Simplified — your real logic may involve regex matching against the
+          # action command + namespace tier labels. See tier-mapping-configmap.yaml
+          # in ../kagent-agents/networking-triage-agent/.
+          # For now: trust agent's proposed tier unless it's lower than T4 default.
+          FINAL_TIER="${PROPOSED_TIER}"
+
+          echo "proposed=${PROPOSED_TIER} final=${FINAL_TIER} action=${ACTION}"
+          echo -n "${FINAL_TIER}" > /tmp/tier
+
+    # Templates call-triage-agent, call-remediation-agent, create-gitlab-ticket,
+    # call-triage-agent-verify — reference your existing definitions from
+    # aks-mgmt-stack/k8s-event-triage/. Not duplicated here.

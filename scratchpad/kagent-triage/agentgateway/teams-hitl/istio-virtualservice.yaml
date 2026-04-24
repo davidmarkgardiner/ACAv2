@@ -1,0 +1,80 @@
+# Istio VirtualService — expose the Argo Events callback webhook
+#
+# DEPLOY ON: management cluster (where Argo Events runs)
+#
+# Scenario: the Teams bot platform lives outside the AKS cluster. It needs
+# to POST approval callbacks to our EventSource webhook. We expose that
+# webhook via the existing shared Istio wildcard Gateway (same pattern used
+# for agentgateway — see ../agentgateway/istio-virtualservice.yaml).
+#
+# Path:
+#   Teams bot (external)
+#     ↓  HTTPS POST to https://hitl-callback.<wildcard-domain>/approval-callback
+#   Istio ingress gateway (terminates TLS via wildcard cert)
+#     ↓  matched by VirtualService host
+#   VirtualService (this file)
+#     ↓  forwards to EventSource Service
+#   teams-hitl-callback-eventsource-svc.argo-events:12000
+#     ↓
+#   Argo Events webhook → Sensor → argoWorkflow resume/stop
+#
+# ─── Discover your existing wildcard Gateway ──────────────────────────────
+#
+#   kubectl get gateway.networking.istio.io -A \
+#     -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.servers[*].hosts}{"\n"}{end}' \
+#     | grep '\*'
+#
+#   kubectl get svc -n aks-istio-ingress   # find the external ingress LB IP
+#
+# Substitute placeholders before applying:
+#   REPLACE_WITH_CALLBACK_HOST        e.g. hitl-callback.internal.bank.com
+#   REPLACE_WITH_SHARED_GATEWAY_NS    e.g. aks-istio-ingress
+#   REPLACE_WITH_SHARED_GATEWAY_NAME  the wildcard Gateway's name
+#
+# Apply:
+#   kubectl apply -f istio-virtualservice.yaml
+#
+# Verify:
+#   kubectl get virtualservice -n argo-events teams-hitl-callback-vs
+#   istioctl proxy-config route -n aks-istio-ingress \
+#     deploy/aks-istio-ingressgateway-external --name https.443 \
+#     | grep hitl-callback
+# ---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: teams-hitl-callback-vs
+  namespace: argo-events
+spec:
+  hosts:
+    - "REPLACE_WITH_CALLBACK_HOST"    # e.g. hitl-callback.internal.bank.com
+
+  # Attach ONLY to the shared ingress Gateway — not `mesh`.
+  # AKS Istio addon clusters are separate meshes by default; the Teams bot
+  # is not in the same mesh.
+  gateways:
+    - REPLACE_WITH_SHARED_GATEWAY_NS/REPLACE_WITH_SHARED_GATEWAY_NAME
+
+  http:
+    # Match the specific callback path. Anything else on this hostname 404s
+    # at Istio, which keeps the attack surface minimal.
+    - match:
+        - uri:
+            exact: /approval-callback
+        - uri:
+            exact: /approval-callback/      # trailing slash variant
+    - match:
+        - method:
+            exact: POST
+      # The EventSource's webhook service name follows the pattern:
+      #   <eventsource-name>-eventsource-svc
+      route:
+        - destination:
+            host: teams-hitl-callback-eventsource-svc.argo-events.svc.cluster.local
+            port:
+              number: 12000
+      timeout: 10s
+      retries:
+        attempts: 2                   # bot retries on its side; 2 is a safety net
+        perTryTimeout: 5s
+        retryOn: 5xx,reset,connect-failure,refused-stream
