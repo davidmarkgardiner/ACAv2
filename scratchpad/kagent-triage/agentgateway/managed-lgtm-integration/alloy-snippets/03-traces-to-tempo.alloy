@@ -1,0 +1,103 @@
+// =============================================================================
+// TRACES → MANAGED TEMPO
+// =============================================================================
+// Apps push OTLP to Alloy (gRPC :4317 or HTTP :4318), Alloy adds resource
+// attributes for cross-signal correlation, then forwards to managed Tempo.
+//
+// Apps configure:
+//   OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy.monitoring.svc.cluster.local:4317
+// =============================================================================
+
+// ---- 1. OTLP receiver — apps push here ----------------------------------------
+otelcol.receiver.otlp "apps" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces  = [otelcol.processor.attributes.add_common.input]
+    // Optional: also forward metrics / logs from OTLP-emitting apps
+    metrics = [otelcol.processor.attributes.add_common.input]
+    logs    = [otelcol.processor.attributes.add_common.input]
+  }
+}
+
+// ---- 2. Add common resource attributes ----------------------------------------
+otelcol.processor.attributes "add_common" {
+  action {
+    key    = "cluster"
+    value  = sys.env("CLUSTER_NAME")
+    action = "upsert"
+  }
+  action {
+    key    = "environment"
+    value  = sys.env("ENVIRONMENT")
+    action = "upsert"
+  }
+  action {
+    key    = "region"
+    value  = sys.env("REGION")
+    action = "upsert"
+  }
+  action {
+    key    = "tenant"
+    value  = sys.env("TENANT")
+    action = "upsert"
+  }
+
+  output {
+    traces  = [otelcol.processor.batch.tempo.input]
+    metrics = [otelcol.exporter.prometheus.bridge.input]
+    logs    = [otelcol.exporter.loki.bridge.input]
+  }
+}
+
+// ---- 3. Batch + sample (head-sample at 10% by default) ------------------------
+otelcol.processor.batch "tempo" {
+  timeout         = "5s"
+  send_batch_size = 8192
+
+  output {
+    traces = [otelcol.processor.probabilistic_sampler.tempo.input]
+  }
+}
+
+otelcol.processor.probabilistic_sampler "tempo" {
+  sampling_percentage = 10.0  // tune per platform-team SLAs
+
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// ---- 4. Export to managed Tempo -----------------------------------------------
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = sys.env("TEMPO_OTLP_ENDPOINT")  // e.g. tempo.lgtm.example.com:4317
+
+    headers = {
+      "X-Scope-OrgID" = sys.env("TEMPO_TENANT_ID"),
+      "Authorization" = string.format("Bearer %s", sys.env("TEMPO_BEARER_TOKEN")),
+    }
+
+    // mTLS to managed Tempo
+    tls {
+      insecure = false
+      // ca_file = "/etc/alloy/certs/ca.crt"
+    }
+  }
+}
+
+// ---- 5. Bridge OTLP metrics into the same Mimir pipeline ----------------------
+// (so apps that emit OTLP metrics don't need a separate scrape config)
+otelcol.exporter.prometheus "bridge" {
+  forward_to = [prometheus.remote_write.managed_mimir.receiver]
+}
+
+// ---- 6. Bridge OTLP logs into the same Loki pipeline --------------------------
+otelcol.exporter.loki "bridge" {
+  forward_to = [loki.write.managed_loki.receiver]
+}

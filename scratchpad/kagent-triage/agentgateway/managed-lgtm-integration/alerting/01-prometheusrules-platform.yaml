@@ -1,0 +1,145 @@
+# =============================================================================
+# PrometheusRule examples — synced to managed Mimir Ruler by Alloy
+# =============================================================================
+# These rules live in this repo, get applied to the cluster, and Alloy's
+# `mimir.rules.kubernetes` component (see ../alloy-snippets/04-rule-sync.alloy)
+# pushes them to the managed Mimir Ruler API. The managed AlertManager then
+# fires them and (per Q4 design) routes them back to us via webhook → Kafka.
+#
+# The two opt-in labels matter:
+#   shipto.lgtm: "true"     — picked up by mimir.rules.kubernetes selector
+#   route_to: triage        — used by managed AlertManager routing tree to
+#                             pick the webhook receiver that goes to our bridge
+# =============================================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-triage-alerts
+  namespace: monitoring
+  labels:
+    # Required for Alloy rule sync to pick up this CR
+    shipto.lgtm: "true"
+    lgtm.tenant: platform
+    # Required for managed AM routing tree (per Q4)
+    route_to: triage
+    # Local Prometheus selector (so kube-prometheus-stack also evaluates them)
+    release: kube-prom
+spec:
+  groups:
+    # ---- Pod health ---------------------------------------------------------
+    - name: pod-health
+      interval: 30s
+      rules:
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total[10m]) > 3
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} crash looping"
+            description: |
+              Container {{ $labels.container }} restarted {{ $value | printf "%.0f" }} times in 10 minutes.
+            runbook_url: "https://runbooks.example.com/PodCrashLooping"
+
+        - alert: PodOOMKilled
+          expr: |
+            kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+          for: 0m
+          labels:
+            severity: critical
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} OOMKilled"
+            description: "Container {{ $labels.container }} was killed for exceeding memory limit."
+            runbook_url: "https://runbooks.example.com/OOMKilled"
+
+    # ---- Workload error rates (RED) -----------------------------------------
+    - name: workload-red
+      interval: 30s
+      rules:
+        - alert: HighRequestErrorRate
+          expr: |
+            (
+              sum by (service, namespace) (rate(http_requests_total{status=~"5.."}[5m]))
+              /
+              clamp_min(sum by (service, namespace) (rate(http_requests_total[5m])), 1)
+            ) * 100 > 5
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.service }} 5xx > 5%"
+            description: "{{ $value | printf \"%.1f\" }}% 5xx errors over 10 minutes."
+
+        - alert: HighRequestLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum by (service, namespace, le) (rate(http_request_duration_seconds_bucket[5m]))
+            ) > 1
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.service }} p95 latency > 1s"
+            description: "p95 = {{ $value | printf \"%.2fs\" }}."
+
+    # ---- agentgateway / KAgent specific (mirrors monitoring.yaml) -----------
+    - name: agentgateway-token-budget
+      interval: 60s
+      rules:
+        - alert: AgentgatewayRunawayTokenUsage
+          expr: |
+            sum by (gen_ai_request_model) (
+              rate(agentgateway_gen_ai_client_token_usage_sum{gen_ai_token_type="input"}[5m]) * 60
+            ) > 100000
+          for: 5m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+          annotations:
+            summary: "Runaway token usage on {{ $labels.gen_ai_request_model }}"
+            description: |
+              {{ $value | printf "%.0f" }} input tokens/min sustained for 5m.
+              Likely a stuck agent or retry storm.
+            runbook_url: "https://runbooks.example.com/RunawayTokens"
+
+    # ---- Pipeline self-health (the triage system itself) --------------------
+    - name: pipeline-self-health
+      interval: 30s
+      rules:
+        - alert: TriageEventSourceLagging
+          expr: |
+            kafka_consumergroup_lag{consumergroup=~"consumer-(critical|warnings|infra|alerts)"} > 1000
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "Triage consumer group {{ $labels.consumergroup }} lagging"
+            description: "{{ $value | printf \"%.0f\" }} messages behind. Pipeline backed up."
+
+        - alert: TriageWorkflowFailureRate
+          expr: |
+            sum by (workflow_template) (rate(argo_workflows_count{status="Failed"}[10m]))
+            /
+            clamp_min(sum by (workflow_template) (rate(argo_workflows_count[10m])), 1)
+            > 0.2
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "Triage workflow {{ $labels.workflow_template }} failing > 20%"
+            description: "Check workflow logs and KAgent A2A health."

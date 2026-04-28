@@ -1,0 +1,116 @@
+# =============================================================================
+# Loki rules — log-based alerts, synced to managed Loki Ruler by Alloy
+# =============================================================================
+# Same pattern as 01-prometheusrules-platform.yaml but for log queries (LogQL).
+# Loki rules use the same RuleGroup shape as Prometheus rules. Some platform
+# teams use a custom CRD (e.g. `loki.grafana.com/v1` LokiRule); others reuse
+# `monitoring.coreos.com/v1` PrometheusRule with a label that tells the sync
+# component to use the Loki ruler. Confirm with platform team (Q3).
+#
+# This example uses the simpler "PrometheusRule with a tenant label" pattern.
+# If platform team mandates a separate `LokiRule` CRD, the rule body below
+# transfers verbatim — only the apiVersion/kind change.
+# =============================================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-triage-log-alerts
+  namespace: monitoring
+  labels:
+    shipto.lgtm: "true"
+    lgtm.tenant: platform
+    lgtm.engine: loki        # tells Alloy rule-sync to push to Loki Ruler not Mimir
+    route_to: triage
+    release: kube-prom
+spec:
+  groups:
+    # ---- Application errors -------------------------------------------------
+    - name: application-error-patterns
+      interval: 1m
+      rules:
+        - alert: ApplicationPanicLogged
+          # Fires if a Go panic appears in any app log
+          expr: |
+            sum by (cluster, namespace, pod, container) (
+              count_over_time({cluster=~".+"} |~ "(?i)panic:|fatal error:|goroutine \\d+ \\[running\\]" [5m])
+            ) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "Panic in {{ $labels.namespace }}/{{ $labels.pod }}"
+            description: "Container {{ $labels.container }} logged a panic in the last 5m."
+            runbook_url: "https://runbooks.example.com/AppPanic"
+
+        - alert: HighErrorLogRate
+          expr: |
+            sum by (cluster, namespace, service) (
+              rate({cluster=~".+"} |~ "(?i)\\b(error|exception|fail)\\b" [5m])
+            ) > 10
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            route_to: triage
+          annotations:
+            summary: "High error log rate in {{ $labels.namespace }}/{{ $labels.service }}"
+            description: "{{ $value | printf \"%.1f\" }} error lines/sec sustained for 10m."
+
+    # ---- Security signals ---------------------------------------------------
+    - name: security-log-signals
+      interval: 1m
+      rules:
+        - alert: AuthFailureBurst
+          expr: |
+            sum by (cluster, namespace, service) (
+              count_over_time({cluster=~".+"} |~ "(?i)(401 unauthorized|403 forbidden|invalid token|authentication failed)" [5m])
+            ) > 50
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+            route_to: triage
+          annotations:
+            summary: "Auth failure burst in {{ $labels.namespace }}/{{ $labels.service }}"
+            description: "{{ $value | printf \"%.0f\" }} auth failures in 5m. Possible credential stuffing."
+            runbook_url: "https://runbooks.example.com/AuthFailureBurst"
+
+    # ---- KAgent / agentgateway specific -------------------------------------
+    - name: kagent-log-signals
+      interval: 1m
+      rules:
+        - alert: KagentA2AParseError
+          # Fires if KAgent fails to parse an A2A request — usually a workflow
+          # template bug we shipped (missing `kind: text` etc.)
+          expr: |
+            sum by (cluster) (
+              count_over_time({namespace="kagent"} |~ "parse error|JSON-RPC.*invalid" [5m])
+            ) > 5
+          for: 5m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+          annotations:
+            summary: "KAgent A2A parse errors"
+            description: |
+              {{ $value | printf "%.0f" }} parse errors in 5m. Likely a malformed
+              message/send payload from a recently-changed workflow template.
+            runbook_url: "https://runbooks.example.com/KagentA2AParse"
+
+        - alert: AgentgatewayUpstreamReset
+          expr: |
+            sum by (cluster) (
+              count_over_time({namespace="agentgateway-system"} |~ "upstream reset|connection.*reset" [10m])
+            ) > 20
+          for: 10m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+          annotations:
+            summary: "agentgateway upstream resets"
+            description: "{{ $value | printf \"%.0f\" }} upstream resets in 10m. Backend model may be flapping."

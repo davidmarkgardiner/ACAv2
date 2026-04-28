@@ -1,0 +1,129 @@
+// =============================================================================
+// LOGS → MANAGED LOKI
+// =============================================================================
+// Two sources:
+//   1. Pod logs from kubelet (loki.source.kubernetes)
+//   2. K8s events as logs (loki.source.kubernetes_events)
+//
+// Both flow through a shared `loki.process` pipeline that adds common labels
+// and rate-limits. Both write to the same `loki.write` endpoint.
+// =============================================================================
+
+// ---- 1. Pod log discovery ------------------------------------------------------
+discovery.kubernetes "pods" {
+  role = "pod"
+}
+
+discovery.relabel "pod_logs" {
+  targets = discovery.kubernetes.pods.targets
+
+  // Standard k8s metadata → Loki labels
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+    target_label  = "service"
+  }
+
+  // Drop noisy infra namespaces — comment out once you want them.
+  rule {
+    source_labels = ["namespace"]
+    regex         = "kube-system|kube-node-lease|kube-public"
+    action        = "drop"
+  }
+}
+
+loki.source.kubernetes "pod_logs" {
+  targets    = discovery.relabel.pod_logs.output
+  forward_to = [loki.process.add_common_labels.receiver]
+}
+
+// ---- 2. K8s events as logs -----------------------------------------------------
+// Replaces watching individual `Warning` events at the workflow level — Loki
+// becomes the source of truth for "what happened in the cluster".
+loki.source.kubernetes_events "events" {
+  // Restrict to namespaces you care about; empty = all
+  namespaces = []
+  job_name   = "kubernetes-events"
+  log_format = "json"
+
+  forward_to = [loki.process.parse_event.receiver]
+}
+
+// Pre-process events: extract reason/type as labels for fast filtering in LogQL
+loki.process "parse_event" {
+  stage.json {
+    expressions = {
+      event_type    = "type",
+      event_reason  = "reason",
+      obj_kind      = "involvedObject.kind",
+      obj_namespace = "involvedObject.namespace",
+    }
+  }
+  stage.labels {
+    values = {
+      event_type    = "",
+      event_reason  = "",
+      obj_kind      = "",
+      obj_namespace = "namespace",  // map for consistency with pod logs
+    }
+  }
+  forward_to = [loki.process.add_common_labels.receiver]
+}
+
+// ---- 3. Add common labels + rate limit -----------------------------------------
+loki.process "add_common_labels" {
+  stage.static_labels {
+    values = {
+      cluster     = sys.env("CLUSTER_NAME"),
+      environment = sys.env("ENVIRONMENT"),
+      region      = sys.env("REGION"),
+      tenant      = sys.env("TENANT"),
+    }
+  }
+
+  // Cardinality safety — drop log lines from runaway sources
+  stage.limit {
+    rate  = 1000
+    burst = 5000
+    drop  = true
+  }
+
+  forward_to = [loki.write.managed_loki.receiver]
+}
+
+// ---- 4. Write to managed Loki --------------------------------------------------
+loki.write "managed_loki" {
+  endpoint {
+    url = sys.env("LOKI_PUSH_URL")        // e.g. https://loki.lgtm.example.com/loki/api/v1/push
+
+    headers = {
+      "X-Scope-OrgID" = sys.env("LOKI_TENANT_ID"),
+    }
+
+    // Pick ONE — see 01-metrics-to-mimir.alloy for the auth choices
+    bearer_token = sys.env("LOKI_BEARER_TOKEN")
+
+    // Backpressure
+    batch_size  = 1048576    // 1 MB
+    batch_wait  = "2s"
+    max_streams = 10000
+  }
+
+  external_labels = {
+    cluster     = sys.env("CLUSTER_NAME"),
+    environment = sys.env("ENVIRONMENT"),
+    region      = sys.env("REGION"),
+    tenant      = sys.env("TENANT"),
+  }
+}

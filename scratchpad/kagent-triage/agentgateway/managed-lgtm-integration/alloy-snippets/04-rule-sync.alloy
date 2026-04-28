@@ -1,0 +1,77 @@
+// =============================================================================
+// ALERT RULE SYNC — CRDs in cluster → managed Mimir / Loki Ruler API
+// =============================================================================
+// `mimir.rules.kubernetes` watches PrometheusRule CRs and pushes them to the
+// Mimir Ruler. `loki.rules.kubernetes` does the same for LokiRule CRs.
+//
+// Both components manage rule groups by namespace — rules in k8s namespace `foo`
+// become rule group `foo` in the Ruler, etc. They reconcile on a schedule and
+// remove rules from the Ruler when the CR is deleted from the cluster.
+//
+// Required: a Mimir/Loki Ruler API token from the platform team (see Q3 in
+// OPEN-QUESTIONS.md). If they only support central-repo PRs, delete this file
+// and use that workflow instead.
+// =============================================================================
+
+// ---- 1. Sync PrometheusRules → Mimir Ruler ------------------------------------
+mimir.rules.kubernetes "sync" {
+  // Mimir Ruler endpoint (NOT the push endpoint).
+  // Usually the same host with /api/v1/rules path family.
+  address = sys.env("MIMIR_RULER_URL")    // e.g. https://mimir.lgtm.example.com
+
+  tenant_id    = sys.env("MIMIR_TENANT_ID")
+  bearer_token = sys.env("MIMIR_RULER_BEARER_TOKEN")
+
+  // Restrict which CRs we pick up so we don't blast platform-team rules.
+  rule_selector {
+    match_labels = {
+      // Only sync rules explicitly opted-in. Avoids accidental sync of
+      // kube-prometheus-stack defaults.
+      "shipto.lgtm" = "true",
+    }
+  }
+
+  // Limit to certain namespaces if the platform team requires per-team isolation.
+  rule_namespace_selector {
+    match_labels = {
+      "lgtm.tenant" = sys.env("TENANT"),
+    }
+  }
+
+  // Reconcile interval — rules updated in cluster appear in Mimir within this.
+  sync_interval = "1m"
+}
+
+// ---- 2. Sync LokiRules → Loki Ruler -------------------------------------------
+loki.rules.kubernetes "sync" {
+  address = sys.env("LOKI_RULER_URL")
+
+  tenant_id    = sys.env("LOKI_TENANT_ID")
+  bearer_token = sys.env("LOKI_RULER_BEARER_TOKEN")
+
+  rule_selector {
+    match_labels = {
+      "shipto.lgtm" = "true",
+    }
+  }
+
+  rule_namespace_selector {
+    match_labels = {
+      "lgtm.tenant" = sys.env("TENANT"),
+    }
+  }
+
+  sync_interval = "1m"
+}
+
+// =============================================================================
+// RBAC NOTE
+// =============================================================================
+// The Alloy ServiceAccount needs:
+//   - get/list/watch on `monitoring.coreos.com/v1` PrometheusRule
+//   - get/list/watch on `loki.grafana.com/v1` LokiRule (or whatever CRD group
+//     the platform team standardises on — check this)
+//   - get/list on Namespace (for `rule_namespace_selector` matching)
+//
+// See ../../examples/alloy-rbac.yaml for the ClusterRole + binding.
+// =============================================================================

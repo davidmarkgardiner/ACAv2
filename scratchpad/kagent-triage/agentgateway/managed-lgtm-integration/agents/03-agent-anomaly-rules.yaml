@@ -1,0 +1,370 @@
+# =============================================================================
+# Agent anomaly detection — recording rules + alerts for kagent / agentgateway
+# =============================================================================
+# Strategy: pre-compute rolling baselines as recording rules, then trigger on
+# z-score / ratio deviations rather than static thresholds. Agents are too
+# bursty for "tokens > 100k" style alerts to behave well.
+#
+# Synced to managed Mimir Ruler by Alloy (../alloy-snippets/04-rule-sync.alloy)
+# via the `shipto.lgtm: "true"` opt-in label.
+# =============================================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agent-anomaly-rules
+  namespace: monitoring
+  labels:
+    shipto.lgtm: "true"
+    lgtm.tenant: ai-platform
+    route_to: triage
+    release: kube-prom
+spec:
+  groups:
+
+    # =========================================================================
+    # 1. RECORDING RULES — rolling baselines (1h, 24h)
+    # =========================================================================
+    - name: agent-baselines
+      interval: 60s
+      rules:
+        # ---- agentgateway: token usage baseline per model ----
+        - record: agentgateway:tokens_per_minute:current
+          expr: |
+            sum by (gen_ai_request_model, gen_ai_token_type) (
+              rate(agentgateway_gen_ai_client_token_usage_sum[1m]) * 60
+            )
+
+        - record: agentgateway:tokens_per_minute:baseline_1h_avg
+          expr: |
+            avg_over_time(agentgateway:tokens_per_minute:current[1h])
+
+        - record: agentgateway:tokens_per_minute:baseline_1h_stddev
+          expr: |
+            stddev_over_time(agentgateway:tokens_per_minute:current[1h])
+
+        - record: agentgateway:tokens_per_minute:zscore
+          expr: |
+            (
+              agentgateway:tokens_per_minute:current
+              - agentgateway:tokens_per_minute:baseline_1h_avg
+            )
+            /
+            clamp_min(agentgateway:tokens_per_minute:baseline_1h_stddev, 1)
+
+        # ---- agentgateway: request rate baseline per backend ----
+        - record: agentgateway:requests_per_minute:current
+          expr: |
+            sum by (envoy_cluster_name) (
+              rate(envoy_cluster_upstream_rq_total[1m]) * 60
+            )
+
+        - record: agentgateway:requests_per_minute:baseline_1h_avg
+          expr: |
+            avg_over_time(agentgateway:requests_per_minute:current[1h])
+
+        # ---- kagent: per-agent request rate ----
+        - record: kagent:request_rate:per_agent
+          expr: |
+            sum by (agent, cluster) (rate(kagent_agent_requests_total[5m]))
+
+        - record: kagent:request_rate:cohort_median
+          expr: |
+            quantile(0.5, kagent:request_rate:per_agent)
+
+        # ---- kagent: per-agent error rate ----
+        - record: kagent:error_rate:per_agent
+          expr: |
+            sum by (agent, cluster) (rate(kagent_agent_requests_total{status="error"}[5m]))
+            /
+            clamp_min(sum by (agent, cluster) (rate(kagent_agent_requests_total[5m])), 1)
+
+        - record: kagent:error_rate:cohort_median
+          expr: |
+            quantile(0.5, kagent:error_rate:per_agent)
+
+        # ---- kagent: latency p50/p99 ratio (long tail detection) ----
+        - record: kagent:latency_p50_seconds:per_agent
+          expr: |
+            histogram_quantile(0.50,
+              sum by (agent, cluster, le) (rate(kagent_agent_request_duration_seconds_bucket[5m]))
+            )
+
+        - record: kagent:latency_p99_seconds:per_agent
+          expr: |
+            histogram_quantile(0.99,
+              sum by (agent, cluster, le) (rate(kagent_agent_request_duration_seconds_bucket[5m]))
+            )
+
+        - record: kagent:latency_p99_p50_ratio
+          expr: |
+            kagent:latency_p99_seconds:per_agent
+            /
+            clamp_min(kagent:latency_p50_seconds:per_agent, 0.001)
+
+        # ---- Cost proxy: tokens × $/1k tokens (annotate via Grafana mapping) ----
+        - record: agentgateway:cost_per_hour_usd_proxy
+          expr: |
+            # Multiply by per-model rate via Grafana value mapping; this rule
+            # just exposes the raw token rate per model + tenant for cost UIs.
+            sum by (gen_ai_request_model, tenant) (
+              rate(agentgateway_gen_ai_client_token_usage_sum[1h]) * 3600 / 1000
+            )
+
+    # =========================================================================
+    # 2. ANOMALY ALERTS — z-score / ratio / cohort comparison
+    # =========================================================================
+    - name: agent-token-anomalies
+      interval: 60s
+      rules:
+        - alert: AgentTokenUsageAnomaly
+          # Current rate is > 5σ above the 1h rolling average
+          expr: |
+            agentgateway:tokens_per_minute:zscore{gen_ai_token_type="input"} > 5
+            and
+            agentgateway:tokens_per_minute:current{gen_ai_token_type="input"} > 5000
+          for: 3m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: token_burst
+          annotations:
+            summary: "Token usage anomaly on {{ $labels.gen_ai_request_model }}"
+            description: |
+              Current rate is {{ $value | printf "%.1f" }}σ above the 1h baseline.
+              Likely a stuck agent or retry storm.
+            runbook_url: "https://runbooks.example.com/AgentTokenAnomaly"
+
+        - alert: AgentTokenUsageCostSpike
+          # Tokens-per-hour for this model is > 3× same hour yesterday
+          expr: |
+            agentgateway:cost_per_hour_usd_proxy
+            >
+            (3 * agentgateway:cost_per_hour_usd_proxy offset 24h)
+          for: 15m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: cost_spike
+          annotations:
+            summary: "Cost spike on {{ $labels.gen_ai_request_model }} ({{ $labels.tenant }})"
+            description: |
+              {{ $value | printf "%.0f" }}k tokens/hr — 3× same hour yesterday.
+              Investigate before next billing cycle.
+
+    - name: kagent-behavioural-anomalies
+      interval: 60s
+      rules:
+        - alert: KagentSilentFailure
+          # Requests being made but ZERO succeeding for 15m — semantic failure
+          # that won't show up as an HTTP-error alert
+          expr: |
+            sum by (agent, cluster) (rate(kagent_agent_requests_total[15m])) > 0.01
+            and
+            sum by (agent, cluster) (rate(kagent_agent_requests_total{status="success"}[15m])) == 0
+          for: 5m
+          labels:
+            severity: critical
+            team: ai-platform
+            route_to: triage
+            anomaly_type: silent_failure
+          annotations:
+            summary: "kagent {{ $labels.agent }} silently failing"
+            description: |
+              Agent has received traffic for 15m+ with zero successful responses.
+              Likely upstream model unreachable or auth broken.
+              Check: agentgateway logs, A2A endpoint, KAGENT_URL config.
+            runbook_url: "https://runbooks.example.com/KagentSilentFailure"
+
+        - alert: KagentCohortOutlier
+          # One agent has 3× the cohort median error rate
+          expr: |
+            kagent:error_rate:per_agent
+            >
+            (3 * scalar(kagent:error_rate:cohort_median))
+            and
+            kagent:error_rate:per_agent > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: cohort_outlier
+          annotations:
+            summary: "Agent {{ $labels.agent }} is a cohort outlier"
+            description: |
+              Error rate {{ $value | humanizePercentage }} is 3× the median
+              across all agents. Other agents healthy → problem is specific
+              to this agent's prompt / tool config / model.
+
+        - alert: KagentLatencyLongTail
+          # p99/p50 ratio explosion — most requests fast, some agonisingly slow
+          expr: |
+            kagent:latency_p99_p50_ratio > 10
+            and
+            kagent:latency_p99_seconds:per_agent > 30
+          for: 15m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: latency_long_tail
+          annotations:
+            summary: "Agent {{ $labels.agent }} long-tail latency"
+            description: |
+              p99/p50 ratio is {{ $value | printf "%.1f" }}x with p99 > 30s.
+              Suggests a subset of queries hitting slow tools or model timeouts.
+
+        - alert: AgentgatewayBackendFlap
+          # Upstream connection resets sustained — backend model unstable
+          expr: |
+            sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_cx_destroy_remote_with_active_rq[5m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: backend_flap
+          annotations:
+            summary: "agentgateway backend {{ $labels.envoy_cluster_name }} flapping"
+            description: |
+              Upstream resets > 0.1/s for 10m. Backend model deployment
+              likely cycling pods or hitting timeouts.
+
+---
+# =============================================================================
+# Loki rules — log-pattern anomalies for agents
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule    # carrying lgtm.engine: loki tells Alloy to ship to Loki Ruler
+metadata:
+  name: agent-log-anomaly-rules
+  namespace: monitoring
+  labels:
+    shipto.lgtm: "true"
+    lgtm.tenant: ai-platform
+    lgtm.engine: loki
+    route_to: triage
+    release: kube-prom
+spec:
+  groups:
+    - name: agent-loop-detection
+      interval: 1m
+      rules:
+        - alert: KagentToolCallLoop
+          # Same tool name called > 50× in 5m by same agent — classic loop
+          expr: |
+            sum by (cluster, agent, tool_name) (
+              count_over_time(
+                {namespace="kagent"} |~ "tool_call.*name="
+                  | regexp `tool_call.*name="(?P<tool_name>[^"]+)".*agent="(?P<agent>[^"]+)"`
+                  [5m]
+              )
+            ) > 50
+          for: 0m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: tool_call_loop
+          annotations:
+            summary: "kagent {{ $labels.agent }} looping on tool {{ $labels.tool_name }}"
+            description: |
+              Tool {{ $labels.tool_name }} called {{ $value | printf "%.0f" }}
+              times in 5m. Agent is likely stuck in a reasoning loop.
+
+        - alert: KagentRepeatedQuery
+          # Same prompt/query hash repeated > 10× in 10m — user retry storm
+          # or agent confused
+          expr: |
+            sum by (cluster, agent, query_hash) (
+              count_over_time(
+                {namespace="kagent"} |~ "query_hash="
+                  | regexp `query_hash="(?P<query_hash>[^"]+)".*agent="(?P<agent>[^"]+)"`
+                  [10m]
+              )
+            ) > 10
+          for: 0m
+          labels:
+            severity: info
+            team: ai-platform
+            route_to: triage
+            anomaly_type: repeated_query
+          annotations:
+            summary: "Repeated query on agent {{ $labels.agent }}"
+            description: |
+              Same query_hash submitted {{ $value | printf "%.0f" }} times
+              in 10m. Could be a stuck workflow or unhappy user.
+
+    - name: agent-semantic-failures
+      interval: 1m
+      rules:
+        - alert: KagentRefusalBurst
+          # Model returning "I cannot help with..." > 20× in 10m — prompt drift
+          # or upstream policy block
+          expr: |
+            sum by (cluster, agent) (
+              count_over_time(
+                {namespace="kagent"}
+                  |~ "(?i)(I cannot|I'm unable to|I can't help|I am not able)"
+                  [10m]
+              )
+            ) > 20
+          for: 5m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: refusal_burst
+          annotations:
+            summary: "Refusal burst on kagent {{ $labels.agent }}"
+            description: |
+              Agent returned refusal text {{ $value | printf "%.0f" }} times
+              in 10m. Possible policy change at the model backend or prompt
+              regression.
+
+        - alert: KagentEmptyResponseBurst
+          # Agent returning empty/whitespace response — stuck token stream
+          expr: |
+            sum by (cluster, agent) (
+              count_over_time(
+                {namespace="kagent"} |~ "response.*length=0|empty.*response"
+                  [10m]
+              )
+            ) > 5
+          for: 5m
+          labels:
+            severity: warning
+            team: ai-platform
+            route_to: triage
+            anomaly_type: empty_response
+          annotations:
+            summary: "Empty responses from kagent {{ $labels.agent }}"
+            description: |
+              {{ $value | printf "%.0f" }} empty responses in 10m.
+              Likely token stream cut off or model returning no content.
+
+        - alert: AgentgatewayAuthAnomaly
+          # Sudden burst of 401/403 from agentgateway — credential rotation
+          # broke an agent
+          expr: |
+            sum by (cluster, gen_ai_request_model) (
+              count_over_time(
+                {namespace="agentgateway-system"}
+                  |~ "status.*40[13]|unauthorized|forbidden"
+                  [5m]
+              )
+            ) > 50
+          for: 5m
+          labels:
+            severity: critical
+            team: ai-platform
+            route_to: triage
+            anomaly_type: auth_failure
+          annotations:
+            summary: "agentgateway auth failures on {{ $labels.gen_ai_request_model }}"
+            description: |
+              {{ $value | printf "%.0f" }} 4xx auth errors in 5m. Likely a
+              rotated key not propagated, or upstream model account suspended.

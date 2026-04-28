@@ -1,0 +1,1159 @@
+---
+# ResourceGraphDefinition for UK8S Cluster Certification Workflow — V2
+#
+# What's new vs uk8s-certification.yaml (v1.0.0):
+#   1. Per-task results captured into a per-workflow ConfigMap (ownerRef = Workflow,
+#      so it's GC'd with the workflow). No artifact store / Minio required.
+#   2. New agent-triage DAG task: hands the structured certification result to the
+#      KAgent sre-triage-agent via A2A and parses a strict-schema verdict back into
+#      Argo output parameters (severity / blast_radius / first_remediation).
+#   3. Existing validation tasks unchanged except for a single appended kubectl patch
+#      line at the end of each script — keeps the diff against v1 minimal.
+#
+# The handover (cert workflow → agent) is the focus. Notification routing
+# (Teams etc.) is out of scope here — downstream tasks can read the verdict
+# output parameters via {{tasks.agent-triage.outputs.parameters.severity}}.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: uk8scertificationv2.kro.run
+  labels:
+    kro.run/type: certification
+    kro.run/category: validation
+    kro.run/version: v2
+  annotations:
+    kro.run/description: "Automated certification workflow with KAgent triage handover"
+    kro.run/version: "2.0.0"
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: UK8SCertificationV2
+    spec:
+      # ========================================
+      # Cluster Identity
+      # ========================================
+      clusterName: string | required=true description="The name of the AKS cluster to certify"
+      resourceGroup: string | required=true description="The resource group containing the cluster"
+      targetNamespace: string | required=true description="The namespace where cluster resources are managed"
+      instanceName: string | required=true description="The name of the UK8SClusterPublic instance"
+      subscriptionId: string | required=true description="Azure subscription ID" pattern="^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+      # ========================================
+      # Environment and Metadata
+      # ========================================
+      environment: string | required=true enum="dev,staging,production" description="Environment classification"
+      clusterType: string | default="PUBLIC" enum="PUBLIC,PRIVATE" description="Cluster access type for validation"
+
+      # ========================================
+      # Certification Configuration
+      # ========================================
+      certification:
+        timeout: integer | default=1800 description="Certification timeout in seconds"
+        schedule: 'string | default="0 2 * * 0" description="Cron schedule for weekly certification (default: Sunday 2 AM UTC)"'
+        suspended: boolean | default=true description="Whether to start the CronWorkflow suspended"
+        autoTrigger: boolean | default=true description="Automatically trigger initial certification after cluster creation"
+
+      # ========================================
+      # Agent Analysis Configuration (v2)
+      # ========================================
+      agentAnalysis:
+        enabled: boolean | default=true description="Whether to invoke KAgent triage on certification results"
+        kagentService: string | default="kagent.kagent.svc.cluster.local" description="DNS name of the KAgent service"
+        kagentPort: integer | default=80 description="Port for the KAgent service"
+        agentName: string | default="sre-triage-agent" description="A2A agent name to invoke"
+        timeoutSeconds: integer | default=120 description="HTTP timeout for the A2A call"
+        failOnCritical: boolean | default=false description="Fail the workflow if the agent returns severity=CRITICAL"
+
+  # ========================================
+  # Resources Created by this RGD
+  # ========================================
+  resources:
+    # ----------------------------------------
+    # Certification WorkflowTemplate
+    # ----------------------------------------
+    - id: certificationWorkflow
+      template:
+        apiVersion: argoproj.io/v1alpha1
+        kind: WorkflowTemplate
+        metadata:
+          name: certify-v2-${schema.spec.clusterName}
+          namespace: argo
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: certification
+            kro.run/version: v2
+            environment: ${schema.spec.environment}
+          annotations:
+            kro.run/description: "Automated certification workflow (v2) for UK8S ${schema.spec.clusterType} cluster ${schema.spec.clusterName}"
+            kro.run/version: "2.0.0"
+        spec:
+          entrypoint: certify-cluster
+          serviceAccountName: argo-workflow-executor
+
+          # Projected service account token for Azure workload identity
+          volumes:
+            - name: azure-identity-token
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: azure-identity-token
+                      expirationSeconds: 3600
+                      audience: api://AzureADTokenExchange
+
+          # Disable artifact archiving and GC to avoid Minio dependency
+          archiveLogs: false
+          artifactGC:
+            strategy: Never
+
+          # Clean up pods after workflow completes
+          podGC:
+            strategy: OnWorkflowSuccess
+
+          # Pre-configure parameters with cluster-specific values
+          arguments:
+            parameters:
+              - name: clusterName
+                value: ${schema.spec.clusterName}
+              - name: resourceGroup
+                value: ${schema.spec.resourceGroup}
+              - name: targetNamespace
+                value: ${schema.spec.targetNamespace}
+              - name: instanceName
+                value: ${schema.spec.instanceName}
+              - name: subscriptionId
+                value: ${schema.spec.subscriptionId}
+              - name: environment
+                value: ${schema.spec.environment}
+              - name: clusterType
+                value: ${schema.spec.clusterType}
+              - name: certification-timeout
+                value: "${schema.spec.certification.timeout}"
+              - name: agentEnabled
+                value: "${schema.spec.agentAnalysis.enabled ? 'true' : 'false'}"
+              - name: kagentService
+                value: ${schema.spec.agentAnalysis.kagentService}
+              - name: kagentPort
+                value: "${schema.spec.agentAnalysis.kagentPort}"
+              - name: agentName
+                value: ${schema.spec.agentAnalysis.agentName}
+              - name: agentTimeoutSeconds
+                value: "${schema.spec.agentAnalysis.timeoutSeconds}"
+              - name: failOnCritical
+                value: "${schema.spec.agentAnalysis.failOnCritical ? 'true' : 'false'}"
+
+          onExit: generate-final-report
+
+          templates:
+            # Main certification DAG
+            - name: certify-cluster
+              dag:
+                tasks:
+                  - name: init-results-store
+                    template: init-results-configmap
+
+                  - name: wait-for-cluster
+                    template: wait-for-cluster-ready
+                    dependencies: [init-results-store]
+
+                  - name: validate-config
+                    template: validate-configuration
+                    dependencies: [wait-for-cluster]
+
+                  - name: validate-kro
+                    template: validate-kro-resources
+                    dependencies: [validate-config]
+
+                  - name: validate-aso
+                    template: validate-aso-resources
+                    dependencies: [validate-kro]
+
+                  - name: validate-flux
+                    template: validate-flux-gitops
+                    dependencies: [validate-aso]
+
+                  - name: get-aks-credentials
+                    template: get-aks-credentials
+                    dependencies: [validate-aso]
+
+                  - name: validate-aks-system-components
+                    template: validate-aks-system-components
+                    dependencies: [get-aks-credentials]
+
+                  - name: validate-connectivity
+                    template: validate-cluster-connectivity
+                    dependencies: [validate-aks-system-components]
+
+                  - name: validate-security
+                    template: validate-security-compliance
+                    dependencies: [validate-connectivity]
+
+                  - name: validate-api-access
+                    template: validate-api-access-type
+                    dependencies: [validate-connectivity]
+
+                  - name: aggregate-results
+                    template: aggregate-certification
+                    dependencies: [validate-kro, validate-aso, validate-flux, validate-aks-system-components, validate-connectivity, validate-security, validate-api-access]
+
+                  - name: agent-triage
+                    template: agent-triage
+                    dependencies: [aggregate-results]
+                    when: "{{workflow.parameters.agentEnabled}} == true"
+                    arguments:
+                      parameters:
+                        - name: cert-report
+                          value: "{{tasks.aggregate-results.outputs.parameters.report}}"
+
+                  - name: gate-on-critical
+                    template: gate-critical
+                    dependencies: [agent-triage]
+                    when: "{{workflow.parameters.failOnCritical}} == true && {{tasks.agent-triage.outputs.parameters.severity}} == CRITICAL"
+
+            # ====================================================
+            # NEW (v2): create per-workflow ConfigMap for results.
+            # ownerReference => Workflow so it's GC'd automatically.
+            # ====================================================
+            - name: init-results-configmap
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Initializing results ConfigMap ==="
+
+                  WF_NAME="{{workflow.name}}"
+                  WF_UID=$(kubectl get workflow "$WF_NAME" -n argo -o jsonpath='{.metadata.uid}')
+
+                  if [ -z "$WF_UID" ]; then
+                    echo "✗ Could not resolve workflow UID — ConfigMap will not be GC'd by ownerRef"
+                    OWNER_BLOCK=""
+                  else
+                    OWNER_BLOCK=$(cat <<EOF
+                    ownerReferences:
+                    - apiVersion: argoproj.io/v1alpha1
+                      kind: Workflow
+                      name: $WF_NAME
+                      uid: $WF_UID
+                      controller: true
+                      blockOwnerDeletion: false
+                  EOF
+                  )
+                  fi
+
+                  cat <<YAML | kubectl apply -f -
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: cert-results-$WF_NAME
+                    namespace: argo
+                    labels:
+                      kro.run/component: certification-results
+                      kro.run/cluster: "{{workflow.parameters.clusterName}}"
+                  $OWNER_BLOCK
+                  data:
+                    cluster: "{{workflow.parameters.clusterName}}"
+                    environment: "{{workflow.parameters.environment}}"
+                    clusterType: "{{workflow.parameters.clusterType}}"
+                    workflow: "$WF_NAME"
+                  YAML
+
+                  echo "✅ ConfigMap cert-results-$WF_NAME created"
+
+            # Wait for cluster to be ready
+            - name: wait-for-cluster-ready
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Waiting for Cluster to be Ready ==="
+
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  INSTANCE="{{workflow.parameters.instanceName}}"
+                  CLUSTER="{{workflow.parameters.clusterName}}"
+                  MAX_WAIT=1800
+                  INTERVAL=30
+                  ELAPSED=0
+
+                  echo "Waiting for UK8SClusterPublic instance to be ACTIVE and Ready..."
+
+                  while [ $ELAPSED -lt $MAX_WAIT ]; do
+                    STATE=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE \
+                      -o jsonpath='{.status.state}' 2>/dev/null || echo "NOT_FOUND")
+                    READY=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+
+                    echo "[$ELAPSED/$MAX_WAIT seconds] State: $STATE, Ready: $READY"
+
+                    if [[ "$STATE" == "ACTIVE" ]] && [[ "$READY" == "True" ]]; then
+                      echo "✓ UK8SClusterPublic is ACTIVE and Ready"
+                      break
+                    fi
+
+                    sleep $INTERVAL
+                    ELAPSED=$((ELAPSED + INTERVAL))
+                  done
+
+                  if [ $ELAPSED -ge $MAX_WAIT ]; then
+                    echo "✗ Timeout waiting for UK8SClusterPublic to be ready"
+                    exit 1
+                  fi
+
+                  echo ""
+                  echo "Waiting for ManagedCluster to be Ready..."
+                  ELAPSED=0
+
+                  while [ $ELAPSED -lt $MAX_WAIT ]; do
+                    MC_READY=$(kubectl get managedcluster $CLUSTER -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+                    MC_REASON=$(kubectl get managedcluster $CLUSTER -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || echo "Unknown")
+
+                    echo "[$ELAPSED/$MAX_WAIT seconds] ManagedCluster Ready: $MC_READY ($MC_REASON)"
+
+                    if [[ "$MC_READY" == "True" ]]; then
+                      echo "✓ ManagedCluster is Ready"
+                      break
+                    fi
+
+                    sleep $INTERVAL
+                    ELAPSED=$((ELAPSED + INTERVAL))
+                  done
+
+                  if [ $ELAPSED -ge $MAX_WAIT ]; then
+                    echo "✗ Timeout waiting for ManagedCluster to be ready"
+                    exit 1
+                  fi
+
+                  echo ""
+                  echo "Cluster is ready! Waiting 60 seconds for cluster to stabilize..."
+                  sleep 60
+
+                  echo "✅ Cluster is ready for certification"
+
+            # Configuration validation
+            - name: validate-configuration
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Configuration Validation ==="
+                  kubectl get uk8sclusterpublic {{workflow.parameters.instanceName}} \
+                    -n {{workflow.parameters.targetNamespace}} -o yaml > /tmp/instance.yaml
+                  echo "✓ Instance YAML retrieved"
+                  VERSION=$(kubectl get uk8sclusterpublic {{workflow.parameters.instanceName}} \
+                    -n {{workflow.parameters.targetNamespace}} \
+                    -o jsonpath='{.spec.kubernetesVersion}')
+                  echo "✓ Kubernetes version: $VERSION"
+                  echo "✅ Configuration validation complete"
+
+                  # v2: record outcome
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-config\":\"passed=1 failed=0 warnings=0 version=$VERSION\"}}"
+
+            # KRO validation
+            - name: validate-kro-resources
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== KRO Resource Validation ==="
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  INSTANCE="{{workflow.parameters.instanceName}}"
+                  PASSED=0
+                  FAILED=0
+
+                  for rgd in uk8sclusterpublic.kro.run uk8sjobs.kro.run uk8sfluxgitops.kro.run uk8scertification.kro.run uk8scertificationv2.kro.run; do
+                    if kubectl get resourcegraphdefinition $rgd &>/dev/null; then
+                      STATE=$(kubectl get resourcegraphdefinition $rgd -o jsonpath='{.status.state}')
+                      if [[ "$STATE" == "Active" ]]; then
+                        echo "✓ $rgd is Active"
+                        PASSED=$((PASSED+1))
+                      else
+                        echo "✗ $rgd not Active (state: $STATE)"
+                        FAILED=$((FAILED+1))
+                      fi
+                    else
+                      echo "✗ $rgd not found"
+                      FAILED=$((FAILED+1))
+                    fi
+                  done
+
+                  if kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE &>/dev/null; then
+                    echo "✓ UK8SClusterPublic instance exists"
+                    PASSED=$((PASSED+1))
+
+                    STATE=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE -o jsonpath='{.status.state}')
+                    if [[ "$STATE" == "ACTIVE" ]]; then
+                      echo "✓ Instance state is ACTIVE"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ Instance state is $STATE"
+                      FAILED=$((FAILED+1))
+                    fi
+
+                    READY=$(kubectl get uk8sclusterpublic $INSTANCE -n $NAMESPACE -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    if [[ "$READY" == "True" ]]; then
+                      echo "✓ Instance Ready condition is True"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ Instance Ready condition is $READY"
+                      FAILED=$((FAILED+1))
+                    fi
+                  else
+                    echo "✗ UK8SClusterPublic instance not found"
+                    FAILED=$((FAILED+3))
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ KRO validation complete"
+
+                  # v2: record outcome
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-kro\":\"passed=$PASSED failed=$FAILED warnings=0\"}}"
+
+            # ASO validation
+            - name: validate-aso-resources
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== ASO Resource Validation ==="
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  PASSED=0
+                  FAILED=0
+
+                  if kubectl get resourcegroup {{workflow.parameters.resourceGroup}} -n $NAMESPACE &>/dev/null; then
+                    RG_READY=$(kubectl get resourcegroup {{workflow.parameters.resourceGroup}} -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    if [[ "$RG_READY" == "True" ]]; then
+                      echo "✓ ResourceGroup is ready"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ ResourceGroup not ready"
+                      FAILED=$((FAILED+1))
+                    fi
+                  fi
+
+                  if kubectl get managedcluster {{workflow.parameters.clusterName}} -n $NAMESPACE &>/dev/null; then
+                    MC_READY=$(kubectl get managedcluster {{workflow.parameters.clusterName}} -n $NAMESPACE \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+                    if [[ "$MC_READY" == "True" ]]; then
+                      echo "✓ ManagedCluster is ready"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ ManagedCluster not ready"
+                      FAILED=$((FAILED+1))
+                    fi
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ ASO validation complete"
+
+                  # v2: record outcome
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-aso\":\"passed=$PASSED failed=$FAILED warnings=0\"}}"
+
+            # Flux validation
+            - name: validate-flux-gitops
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Flux GitOps Validation ==="
+                  PASSED=0
+                  FAILED=0
+
+                  if kubectl get namespace flux-system &>/dev/null; then
+                    echo "✓ flux-system namespace exists"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "✗ flux-system namespace not found"
+                    FAILED=$((FAILED+1))
+                  fi
+
+                  for controller in source-controller kustomize-controller helm-controller; do
+                    if kubectl get deployment $controller -n flux-system &>/dev/null; then
+                      READY=$(kubectl get deployment $controller -n flux-system \
+                        -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+                      if [[ "$READY" == "True" ]]; then
+                        echo "✓ $controller is ready"
+                        PASSED=$((PASSED+1))
+                      else
+                        echo "✗ $controller not ready"
+                        FAILED=$((FAILED+1))
+                      fi
+                    fi
+                  done
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ Flux validation complete"
+
+                  # v2: record outcome
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-flux\":\"passed=$PASSED failed=$FAILED warnings=0\"}}"
+
+            # Get AKS credentials and save kubeconfig
+            - name: get-aks-credentials
+              script:
+                image: mcr.microsoft.com/azure-cli:latest
+                command: [bash]
+                env:
+                  - name: AZURE_TENANT_ID
+                    value: "550cfcda-8a2d-452c-ba71-d6bc6bf5bb31"
+                  - name: AZURE_CLIENT_ID
+                    value: "425776a0-790c-4a98-a432-36719e72d4d9"
+                  - name: AZURE_FEDERATED_TOKEN_FILE
+                    value: /var/run/secrets/azure/tokens/azure-identity-token
+                volumeMounts:
+                  - name: azure-identity-token
+                    mountPath: /var/run/secrets/azure/tokens
+                    readOnly: true
+                source: |
+                  set -e
+                  echo "=== Getting AKS Credentials ==="
+
+                  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                  chmod +x kubectl
+                  mv kubectl /usr/local/bin/
+
+                  CLUSTER_NAME="{{workflow.parameters.clusterName}}"
+                  RESOURCE_GROUP="{{workflow.parameters.resourceGroup}}"
+                  SUBSCRIPTION_ID="{{workflow.parameters.subscriptionId}}"
+
+                  az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                    --service-principal \
+                    -u "$AZURE_CLIENT_ID" \
+                    -t "$AZURE_TENANT_ID"
+
+                  az account set --subscription $SUBSCRIPTION_ID
+
+                  DISABLE_LOCAL=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query disableLocalAccounts \
+                    -o tsv 2>/dev/null || echo "false")
+
+                  if [ "$DISABLE_LOCAL" == "true" ]; then
+                    az aks get-credentials \
+                      --resource-group $RESOURCE_GROUP \
+                      --name $CLUSTER_NAME \
+                      --overwrite-existing
+                    CONTEXT_NAME="$CLUSTER_NAME"
+                  else
+                    az aks get-credentials \
+                      --resource-group $RESOURCE_GROUP \
+                      --name $CLUSTER_NAME \
+                      --overwrite-existing \
+                      --admin
+                    CONTEXT_NAME="$CLUSTER_NAME-admin"
+                  fi
+
+                  echo "✓ Kubeconfig saved"
+                  kubectl cluster-info --context $CONTEXT_NAME
+                  echo "$CONTEXT_NAME" > /tmp/aks-context-name
+                  echo "✅ AKS credentials acquired successfully"
+
+            # Validate system components IN the AKS cluster
+            - name: validate-aks-system-components
+              script:
+                image: mcr.microsoft.com/azure-cli:latest
+                command: [bash]
+                env:
+                  - name: AZURE_TENANT_ID
+                    value: "550cfcda-8a2d-452c-ba71-d6bc6bf5bb31"
+                  - name: AZURE_CLIENT_ID
+                    value: "425776a0-790c-4a98-a432-36719e72d4d9"
+                  - name: AZURE_FEDERATED_TOKEN_FILE
+                    value: /var/run/secrets/azure/tokens/azure-identity-token
+                volumeMounts:
+                  - name: azure-identity-token
+                    mountPath: /var/run/secrets/azure/tokens
+                    readOnly: true
+                source: |
+                  set -e
+                  echo "=== AKS System Components Validation ==="
+
+                  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                  chmod +x kubectl
+                  mv kubectl /usr/local/bin/
+
+                  CLUSTER_NAME="{{workflow.parameters.clusterName}}"
+                  PASSED=0
+                  FAILED=0
+                  WARNINGS=0
+
+                  check_component() {
+                    local NS=$1
+                    local COMPONENT_NAME=$2
+                    local LABEL_SELECTOR=$3
+                    UNHEALTHY_DEPLOYMENTS=0
+                    UNHEALTHY_DAEMONSETS=0
+
+                    echo ""
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "Checking $COMPONENT_NAME..."
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+                    if ! kubectl get namespace $NS &>/dev/null; then
+                      echo "⚠ Namespace $NS not found (component may not be installed)"
+                      WARNINGS=$((WARNINGS+1))
+                      return
+                    fi
+
+                    PASSED=$((PASSED+1))
+
+                    local SELECTOR_FLAG=""
+                    if [ -n "$LABEL_SELECTOR" ]; then
+                      SELECTOR_FLAG="-l $LABEL_SELECTOR"
+                    fi
+
+                    TOTAL_PODS=$(kubectl get pods -n $NS $SELECTOR_FLAG --no-headers 2>/dev/null | wc -l)
+                    if [ $TOTAL_PODS -eq 0 ]; then
+                      WARNINGS=$((WARNINGS+1))
+                      return
+                    fi
+
+                    CRASH_LOOP=$(kubectl get pods -n $NS $SELECTOR_FLAG -o json 2>/dev/null | \
+                      jq -r '.items[] | select(.status.containerStatuses[]?.state.waiting?.reason == "CrashLoopBackOff") | .metadata.name' 2>/dev/null | wc -l)
+                    IMAGE_PULL_ERROR=$(kubectl get pods -n $NS $SELECTOR_FLAG -o json 2>/dev/null | \
+                      jq -r '.items[] | select(.status.containerStatuses[]?.state.waiting?.reason == "ImagePullBackOff" or .status.containerStatuses[]?.state.waiting?.reason == "ErrImagePull") | .metadata.name' 2>/dev/null | wc -l)
+                    HIGH_RESTARTS=$(kubectl get pods -n $NS $SELECTOR_FLAG -o json 2>/dev/null | \
+                      jq -r '.items[] | select(.status.containerStatuses[]?.restartCount > 5) | .metadata.name' 2>/dev/null | wc -l)
+
+                    if [ $CRASH_LOOP -gt 0 ]; then
+                      echo "  ✗ $CRASH_LOOP pod(s) in CrashLoopBackOff"
+                      FAILED=$((FAILED+1))
+                    fi
+                    if [ $IMAGE_PULL_ERROR -gt 0 ]; then
+                      echo "  ✗ $IMAGE_PULL_ERROR pod(s) with ImagePullBackOff"
+                      FAILED=$((FAILED+1))
+                    fi
+                    if [ $HIGH_RESTARTS -gt 0 ]; then
+                      WARNINGS=$((WARNINGS+1))
+                    fi
+
+                    if [ $CRASH_LOOP -gt 0 ] || [ $IMAGE_PULL_ERROR -gt 0 ]; then
+                      echo "❌ $COMPONENT_NAME has CRITICAL issues"
+                      FAILED=$((FAILED+1))
+                    else
+                      PASSED=$((PASSED+1))
+                    fi
+                  }
+
+                  az login --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
+                    --service-principal \
+                    -u "$AZURE_CLIENT_ID" \
+                    -t "$AZURE_TENANT_ID"
+                  az account set --subscription {{workflow.parameters.subscriptionId}}
+
+                  RESOURCE_GROUP="{{workflow.parameters.resourceGroup}}"
+                  DISABLE_LOCAL=$(az aks show \
+                    --resource-group $RESOURCE_GROUP \
+                    --name $CLUSTER_NAME \
+                    --query disableLocalAccounts \
+                    -o tsv 2>/dev/null || echo "false")
+
+                  if [ "$DISABLE_LOCAL" == "true" ]; then
+                    az aks get-credentials --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --overwrite-existing
+                    CONTEXT_NAME="$CLUSTER_NAME"
+                  else
+                    az aks get-credentials --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --overwrite-existing --admin
+                    CONTEXT_NAME="$CLUSTER_NAME-admin"
+                  fi
+
+                  export KUBECONFIG=~/.kube/config
+                  kubectl config use-context $CONTEXT_NAME
+
+                  check_component "flux-system" "Flux" "app.kubernetes.io/part-of=flux"
+                  check_component "cert-manager" "Cert-Manager" "app.kubernetes.io/instance=cert-manager"
+                  check_component "external-dns" "External DNS" "app.kubernetes.io/name=external-dns"
+                  check_component "external-secrets" "External Secrets" "app.kubernetes.io/name=external-secrets"
+                  check_component "kyverno" "Kyverno" "app.kubernetes.io/part-of=kyverno"
+                  check_component "reloader" "Reloader" "app=reloader-reloader"
+                  check_component "kube-system" "Kube-System" ""
+
+                  echo ""
+                  echo "Summary: $PASSED passed, $FAILED failed, $WARNINGS warnings"
+                  echo "✅ AKS system components validation complete"
+
+                  # v2: record outcome — must use management-cluster kubeconfig for the patch
+                  unset KUBECONFIG
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-aks-system-components\":\"passed=$PASSED failed=$FAILED warnings=$WARNINGS\"}}"
+
+            # Connectivity validation
+            - name: validate-cluster-connectivity
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Cluster Connectivity Validation ==="
+                  PASSED=0
+                  FAILED=0
+
+                  if kubectl cluster-info &>/dev/null; then
+                    echo "✓ API server is accessible"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "✗ Cannot connect to API server"
+                    FAILED=$((FAILED+1))
+                  fi
+
+                  TOTAL_NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+                  READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready" || true)
+                  echo "Nodes: $READY_NODES/$TOTAL_NODES ready"
+
+                  if [[ $READY_NODES -eq $TOTAL_NODES ]] && [[ $TOTAL_NODES -gt 0 ]]; then
+                    echo "✓ All nodes are ready"
+                    PASSED=$((PASSED+1))
+                  else
+                    echo "✗ Some nodes are not ready"
+                    FAILED=$((FAILED+1))
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ Connectivity validation complete"
+
+                  # v2: record outcome
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-connectivity\":\"passed=$PASSED failed=$FAILED nodes=$READY_NODES/$TOTAL_NODES\"}}"
+
+            # Security validation
+            - name: validate-security-compliance
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Security & Compliance Validation ==="
+                  PASSED=0
+                  FAILED=0
+
+                  WI_SA=$(kubectl get serviceaccount -A \
+                    -o json | jq -r '.items[] | select(.metadata.annotations["azure.workload.identity/client-id"]) | .metadata.name' | wc -l)
+                  echo "Found $WI_SA service accounts with workload identity"
+                  if [[ $WI_SA -gt 0 ]]; then
+                    PASSED=$((PASSED+1))
+                  fi
+
+                  if kubectl get pods -n kube-system -l app=azure-policy &>/dev/null; then
+                    echo "✓ Azure Policy addon found"
+                    PASSED=$((PASSED+1))
+                  fi
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ Security validation complete"
+
+                  # v2: record outcome
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-security\":\"passed=$PASSED failed=$FAILED workload_identity_sa=$WI_SA\"}}"
+
+            # API access type validation (PUBLIC or PRIVATE)
+            - name: validate-api-access-type
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== API Access Type Validation ==="
+                  PASSED=0
+                  FAILED=0
+                  CLUSTER_TYPE="{{workflow.parameters.clusterType}}"
+
+                  NAMESPACE="{{workflow.parameters.targetNamespace}}"
+                  PRIVATE=$(kubectl get managedcluster {{workflow.parameters.clusterName}} -n $NAMESPACE \
+                    -o jsonpath='{.spec.apiServerAccessProfile.enablePrivateCluster}' 2>/dev/null || echo "false")
+
+                  if [[ "$CLUSTER_TYPE" == "PUBLIC" ]]; then
+                    if [[ "$PRIVATE" == "false" ]]; then
+                      echo "✓ Cluster has public API access"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ Expected PUBLIC cluster but enablePrivateCluster: $PRIVATE"
+                      FAILED=$((FAILED+1))
+                    fi
+                  else
+                    if [[ "$PRIVATE" == "true" ]]; then
+                      echo "✓ Cluster has private API access"
+                      PASSED=$((PASSED+1))
+                    else
+                      echo "✗ Expected PRIVATE cluster but enablePrivateCluster: $PRIVATE"
+                      FAILED=$((FAILED+1))
+                    fi
+                  fi
+
+                  OUTBOUND=$(kubectl get managedcluster {{workflow.parameters.clusterName}} -n $NAMESPACE \
+                    -o jsonpath='{.spec.networkProfile.outboundType}' 2>/dev/null || echo "")
+                  echo "Outbound type: $OUTBOUND"
+
+                  echo "Summary: $PASSED passed, $FAILED failed"
+                  echo "✅ API access validation complete"
+
+                  # v2: record outcome
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "{\"data\":{\"validate-api-access\":\"passed=$PASSED failed=$FAILED expected=$CLUSTER_TYPE private=$PRIVATE\"}}"
+
+            # ====================================================
+            # CHANGED (v2): aggregate-certification now reads the
+            # per-workflow ConfigMap and emits a structured JSON
+            # output parameter. Downstream tasks consume this via
+            # {{tasks.aggregate-results.outputs.parameters.report}}.
+            # ====================================================
+            - name: aggregate-certification
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set -e
+                  echo "=== Aggregating Certification Results ==="
+
+                  # Pull the full ConfigMap data block
+                  kubectl get configmap cert-results-{{workflow.name}} -n argo \
+                    -o json | jq '.data' > /tmp/results.json
+
+                  # Compute aggregate verdict from per-task summaries
+                  TOTAL_FAILED=$(jq -r 'to_entries
+                    | map(.value
+                        | capture("failed=(?<n>[0-9]+)").n // "0"
+                        | tonumber)
+                    | add // 0' /tmp/results.json)
+
+                  TOTAL_PASSED=$(jq -r 'to_entries
+                    | map(.value
+                        | capture("passed=(?<n>[0-9]+)").n // "0"
+                        | tonumber)
+                    | add // 0' /tmp/results.json)
+
+                  if [ "$TOTAL_FAILED" -eq 0 ]; then
+                    STATUS="CERTIFIED"
+                  else
+                    STATUS="FAILED"
+                  fi
+
+                  TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+                  jq -n \
+                    --arg cluster "{{workflow.parameters.clusterName}}" \
+                    --arg ns "{{workflow.parameters.targetNamespace}}" \
+                    --arg env "{{workflow.parameters.environment}}" \
+                    --arg type "{{workflow.parameters.clusterType}}" \
+                    --arg ts "$TIMESTAMP" \
+                    --arg wf "{{workflow.name}}" \
+                    --arg status "$STATUS" \
+                    --argjson passed "$TOTAL_PASSED" \
+                    --argjson failed "$TOTAL_FAILED" \
+                    --slurpfile checks /tmp/results.json \
+                    '{
+                       cluster: $cluster,
+                       namespace: $ns,
+                       environment: $env,
+                       cluster_type: $type,
+                       timestamp: $ts,
+                       workflow: $wf,
+                       certification: {
+                         status: $status,
+                         total_passed: $passed,
+                         total_failed: $failed,
+                         per_check: $checks[0]
+                       }
+                     }' > /tmp/cert-report.json
+
+                  echo "============================================================"
+                  echo "UK8S CLUSTER CERTIFICATION REPORT (v2)"
+                  echo "============================================================"
+                  cat /tmp/cert-report.json | jq .
+                  echo "============================================================"
+
+                  # Persist back into ConfigMap (so the agent task can re-read it
+                  # without depending on the prior pod's outputs being available)
+                  REPORT_PAYLOAD=$(jq -c '.' /tmp/cert-report.json)
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "$(jq -n --arg r "$REPORT_PAYLOAD" '{data:{"_aggregated":$r}}')"
+              outputs:
+                parameters:
+                  - name: report
+                    valueFrom:
+                      path: /tmp/cert-report.json
+
+            # ====================================================
+            # NEW (v2): hand the structured report to KAgent via A2A
+            # and parse a strict-schema verdict back into outputs.
+            # ====================================================
+            - name: agent-triage
+              inputs:
+                parameters:
+                  - name: cert-report
+              script:
+                image: bitnami/kubectl:latest
+                command: [bash]
+                source: |
+                  set +e  # we never want this task to take the workflow down
+                  echo "=== Agent Triage (KAgent A2A) ==="
+
+                  CERT_REPORT='{{inputs.parameters.cert-report}}'
+                  KAGENT_URL="http://{{workflow.parameters.kagentService}}:{{workflow.parameters.kagentPort}}"
+                  AGENT_NAME="{{workflow.parameters.agentName}}"
+                  TIMEOUT="{{workflow.parameters.agentTimeoutSeconds}}"
+                  CLUSTER="{{workflow.parameters.clusterName}}"
+                  ENV="{{workflow.parameters.environment}}"
+
+                  # Write report to file so jq --rawfile can ingest it without
+                  # any heredoc / shell-escape pitfalls (per our prior bug notes).
+                  echo "$CERT_REPORT" > /tmp/cert-report.json
+
+                  # Build A2A payload via jq -n. The prompt anchors the cluster
+                  # name explicitly to defeat smaller-model name hallucination.
+                  jq -n \
+                    --rawfile report /tmp/cert-report.json \
+                    --arg cluster "$CLUSTER" \
+                    --arg env "$ENV" \
+                    '{
+                       jsonrpc: "2.0",
+                       id: ("cert-triage-" + $cluster + "-" + (now|tostring)),
+                       method: "message/send",
+                       params: {
+                         message: {
+                           role: "user",
+                           parts: [{
+                             kind: "text",
+                             text: ("CRITICAL: cluster name is exactly \"" + $cluster + "\" in environment \"" + $env + "\". " +
+                                    "Analyze the UK8S certification report below and respond with ONLY a single JSON object matching this schema, no markdown, no prose:\n" +
+                                    "{\"severity\":\"CRITICAL|WARNING|INFO\",\"blast_radius\":\"<single subsystem name>\",\"failed_checks\":[\"<check-name>\"],\"first_remediation\":\"<one short sentence>\"}\n\n" +
+                                    "Severity rules:\n" +
+                                    "- CRITICAL: cluster unusable (api server down, no ready nodes, ManagedCluster not Ready)\n" +
+                                    "- WARNING: degraded but functional (some addon failures, partial pod readiness)\n" +
+                                    "- INFO: all green or only transient warnings\n\n" +
+                                    "Certification report:\n" + $report)
+                           }]
+                         }
+                       }
+                     }' > /tmp/payload.json
+
+                  echo "POSTing to ${KAGENT_URL}/api/a2a/kagent/${AGENT_NAME}/"
+
+                  # Trailing slash is REQUIRED on the A2A path (kagent quirk)
+                  HTTP_CODE=$(curl -sS -o /tmp/agent-response.json -w "%{http_code}" \
+                    --max-time "$TIMEOUT" \
+                    -X POST \
+                    -H "Content-Type: application/json" \
+                    -d @/tmp/payload.json \
+                    "${KAGENT_URL}/api/a2a/kagent/${AGENT_NAME}/" || echo "000")
+
+                  echo "HTTP $HTTP_CODE"
+
+                  if [ "$HTTP_CODE" != "200" ]; then
+                    echo "⚠ Agent call failed (HTTP $HTTP_CODE) — emitting AGENT_UNAVAILABLE verdict"
+                    cat /tmp/agent-response.json 2>/dev/null || true
+                    echo '{"severity":"AGENT_UNAVAILABLE","blast_radius":"agent","failed_checks":[],"first_remediation":"Check kagent service health"}' > /tmp/verdict.json
+                    echo "AGENT_UNAVAILABLE" > /tmp/severity
+                    exit 0
+                  fi
+
+                  # Pull text out of A2A response shape
+                  RAW=$(jq -r '.result.artifacts[0].parts[0].text // empty' /tmp/agent-response.json)
+                  if [ -z "$RAW" ]; then
+                    echo "⚠ Agent returned no text artifact — emitting PARSE_ERROR verdict"
+                    cat /tmp/agent-response.json | jq . || cat /tmp/agent-response.json
+                    echo '{"severity":"PARSE_ERROR","blast_radius":"agent","failed_checks":[],"first_remediation":"Inspect agent response shape"}' > /tmp/verdict.json
+                    echo "PARSE_ERROR" > /tmp/severity
+                    exit 0
+                  fi
+
+                  echo "--- Agent raw response ---"
+                  echo "$RAW"
+                  echo "--------------------------"
+
+                  # Strip optional markdown fences, then attempt to extract first JSON object
+                  CLEANED=$(echo "$RAW" \
+                    | sed -E 's/^[[:space:]]*```(json)?//; s/```[[:space:]]*$//')
+
+                  # First try: parse cleaned response as JSON directly
+                  if VERDICT=$(echo "$CLEANED" | jq -c '.' 2>/dev/null) && [ -n "$VERDICT" ]; then
+                    :
+                  else
+                    # Fallback: grep the first {...} block containing "severity"
+                    VERDICT=$(echo "$CLEANED" \
+                      | tr -d '\n' \
+                      | grep -oE '\{[^{}]*"severity"[^{}]*\}' \
+                      | head -1 || echo "")
+                  fi
+
+                  if [ -z "$VERDICT" ]; then
+                    echo "⚠ Could not extract JSON verdict from agent response"
+                    SEVERITY=$(echo "$RAW" | grep -oiE 'CRITICAL|WARNING|INFO' | head -1 | tr a-z A-Z)
+                    SEVERITY=${SEVERITY:-PARSE_ERROR}
+                    VERDICT=$(jq -n --arg s "$SEVERITY" '{severity:$s,blast_radius:"unknown",failed_checks:[],first_remediation:"Agent response did not match schema; review logs"}')
+                  fi
+
+                  SEVERITY=$(echo "$VERDICT" | jq -r '.severity // "UNKNOWN"')
+
+                  echo "$VERDICT" > /tmp/verdict.json
+                  echo "$SEVERITY" > /tmp/severity
+
+                  echo ""
+                  echo "=== Agent Verdict ==="
+                  echo "$VERDICT" | jq .
+                  echo "Severity: $SEVERITY"
+
+                  # Persist verdict alongside results in the ConfigMap
+                  kubectl patch configmap cert-results-{{workflow.name}} -n argo --type=merge \
+                    -p "$(jq -n --arg v "$VERDICT" '{data:{"_agent_verdict":$v}}')" || true
+              outputs:
+                parameters:
+                  - name: verdict
+                    valueFrom:
+                      path: /tmp/verdict.json
+                  - name: severity
+                    valueFrom:
+                      path: /tmp/severity
+
+            # ====================================================
+            # NEW (v2): optional gating step. Fails the workflow
+            # only when failOnCritical=true AND severity=CRITICAL.
+            # Off by default — most users will want the verdict to
+            # be informational and route via downstream consumers.
+            # ====================================================
+            - name: gate-critical
+              container:
+                image: alpine:latest
+                command: [sh, -c]
+                args:
+                  - |
+                    echo "Agent reported CRITICAL severity and failOnCritical=true"
+                    echo "Failing workflow to surface in upstream alerting."
+                    exit 1
+
+            # Exit handler
+            - name: generate-final-report
+              container:
+                image: alpine:latest
+                command: [sh, -c]
+                args:
+                  - |
+                    echo "======================================"
+                    echo "Certification Complete (v2)"
+                    echo "======================================"
+                    echo "Cluster: {{workflow.parameters.clusterName}}"
+                    echo "Status: {{workflow.status}}"
+                    echo "Environment: {{workflow.parameters.environment}}"
+                    echo "Type: {{workflow.parameters.clusterType}}"
+                    echo "Agent enabled: {{workflow.parameters.agentEnabled}}"
+                    echo "ConfigMap: cert-results-{{workflow.name}} (auto-GC'd with workflow)"
+                    echo "======================================"
+
+    # ----------------------------------------
+    # Weekly Certification Schedule
+    # ----------------------------------------
+    - id: certificationSchedule
+      template:
+        apiVersion: argoproj.io/v1alpha1
+        kind: CronWorkflow
+        metadata:
+          name: weekly-cert-v2-${schema.spec.clusterName}
+          namespace: argo
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: certification-schedule
+            kro.run/version: v2
+            environment: ${schema.spec.environment}
+          annotations:
+            kro.run/description: "Weekly automated certification (v2) for ${schema.spec.clusterType} cluster ${schema.spec.clusterName}"
+        spec:
+          schedule: ${schema.spec.certification.schedule}
+          timezone: "UTC"
+          suspend: ${schema.spec.certification.suspended}
+          workflowSpec:
+            workflowTemplateRef:
+              name: certify-v2-${schema.spec.clusterName}
+
+    # ----------------------------------------
+    # Automatic Initial Certification Trigger
+    # ----------------------------------------
+    - id: certificationTrigger
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: trigger-cert-v2-${schema.spec.clusterName}
+          namespace: argo
+          labels:
+            kro.run/cluster: ${schema.spec.clusterName}
+            kro.run/component: certification-trigger
+            kro.run/version: v2
+            environment: ${schema.spec.environment}
+          annotations:
+            kro.run/description: "Triggers initial certification (v2) for ${schema.spec.clusterType} cluster ${schema.spec.clusterName}"
+        spec:
+          ttlSecondsAfterFinished: 300
+          backoffLimit: 3
+          template:
+            metadata:
+              labels:
+                kro.run/cluster: ${schema.spec.clusterName}
+            spec:
+              serviceAccountName: argo-workflow-executor
+              restartPolicy: OnFailure
+              containers:
+                - name: trigger-certification
+                  image: bitnami/kubectl:latest
+                  command: [bash, -c]
+                  env:
+                    - name: AUTO_TRIGGER
+                      value: "${schema.spec.certification.autoTrigger ? 'true' : 'false'}"
+                  args:
+                    - |
+                      set -e
+
+                      if [[ "$AUTO_TRIGGER" == "false" ]]; then
+                        echo "Auto-trigger disabled, skipping initial certification"
+                        exit 0
+                      fi
+
+                      echo "Waiting for WorkflowTemplate to be ready..."
+                      for i in $(seq 1 30); do
+                        if kubectl get workflowtemplate certify-v2-${schema.spec.clusterName} -n argo &>/dev/null; then
+                          echo "✓ WorkflowTemplate found"
+                          break
+                        fi
+                        echo "Waiting for WorkflowTemplate... ($i/30)"
+                        sleep 10
+                      done
+
+                      echo "Waiting for UK8SClusterPublic to be ACTIVE and Ready..."
+                      for i in $(seq 1 60); do
+                        STATE=$(kubectl get uk8sclusterpublic ${schema.spec.instanceName} -n ${schema.spec.targetNamespace} -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+                        READY=$(kubectl get uk8sclusterpublic ${schema.spec.instanceName} -n ${schema.spec.targetNamespace} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+
+                        if [[ "$STATE" == "ACTIVE" ]] && [[ "$READY" == "True" ]]; then
+                          echo "✓ UK8SClusterPublic is ACTIVE and Ready"
+                          break
+                        fi
+                        echo "Current state: $STATE, Ready: $READY (waiting... $i/60)"
+                        sleep 30
+                      done
+
+                      MC_READY=$(kubectl get managedcluster ${schema.spec.clusterName} -n ${schema.spec.targetNamespace} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+                      echo "ManagedCluster Ready: $MC_READY"
+
+                      cat <<EOF | kubectl create -f -
+                      apiVersion: argoproj.io/v1alpha1
+                      kind: Workflow
+                      metadata:
+                        generateName: certify-v2-${schema.spec.clusterName}-auto-
+                        namespace: argo
+                        labels:
+                          kro.run/cluster: ${schema.spec.clusterName}
+                          kro.run/trigger: automatic
+                          kro.run/version: v2
+                      spec:
+                        workflowTemplateRef:
+                          name: certify-v2-${schema.spec.clusterName}
+                      EOF
+
+                      echo "✅ Certification workflow (v2) submitted successfully"

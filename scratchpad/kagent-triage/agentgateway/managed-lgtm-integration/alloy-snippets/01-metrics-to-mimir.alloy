@@ -1,0 +1,111 @@
+// =============================================================================
+// METRICS → MANAGED MIMIR
+// =============================================================================
+// Strategy: discover ServiceMonitor / PodMonitor CRDs already maintained by
+// kube-prometheus-stack, scrape them, remote_write to managed Mimir.
+//
+// This means application teams keep using ServiceMonitor / PodMonitor as their
+// API — no Alloy config changes needed when a new app is onboarded.
+//
+// Replace the `endpoint.url`, `X-Scope-OrgID`, and bearer_token / sigv4 / oauth2
+// block with whatever the platform team gives us (see OPEN-QUESTIONS.md Q1).
+// =============================================================================
+
+// ---- 1. Discover ServiceMonitors -----------------------------------------------
+prometheus.operator.servicemonitors "all" {
+  // Restrict the namespaces if the platform team wants per-team isolation.
+  // Empty = all namespaces.
+  namespaces = []
+
+  // The Mimir-bound writer.
+  forward_to = [prometheus.relabel.add_cluster_labels.receiver]
+
+  // (Optional) restrict by selector to opt-in only.
+  // selector {
+  //   match_labels = { "shipto.lgtm" = "true" }
+  // }
+}
+
+// ---- 2. Discover PodMonitors ---------------------------------------------------
+prometheus.operator.podmonitors "all" {
+  namespaces = []
+  forward_to = [prometheus.relabel.add_cluster_labels.receiver]
+}
+
+// ---- 3. (Optional) static scrape of well-known endpoints ----------------------
+// Useful for things that don't have a ServiceMonitor (kube-state-metrics, etc.)
+prometheus.scrape "kube_state_metrics" {
+  targets = [
+    {"__address__" = "kube-state-metrics.kube-system.svc.cluster.local:8080"},
+  ]
+  forward_to = [prometheus.relabel.add_cluster_labels.receiver]
+  scrape_interval = "30s"
+  job_name        = "kube-state-metrics"
+}
+
+// ---- 4. Apply common labels at the relabel stage ------------------------------
+// This is in addition to external_labels on the writer — relabeling lets us
+// drop / rewrite labels per series before they leave the cluster.
+prometheus.relabel "add_cluster_labels" {
+  rule {
+    target_label = "cluster"
+    replacement  = sys.env("CLUSTER_NAME")
+  }
+  rule {
+    target_label = "environment"
+    replacement  = sys.env("ENVIRONMENT")
+  }
+  // Drop ultra-noisy default labels that explode cardinality.
+  rule {
+    regex  = "container_id"
+    action = "labeldrop"
+  }
+  forward_to = [prometheus.remote_write.managed_mimir.receiver]
+}
+
+// ---- 5. Remote write to managed Mimir -----------------------------------------
+prometheus.remote_write "managed_mimir" {
+  endpoint {
+    url = sys.env("MIMIR_PUSH_URL")     // e.g. https://mimir.lgtm.example.com/api/v1/push
+
+    headers = {
+      "X-Scope-OrgID" = sys.env("MIMIR_TENANT_ID"),  // tenant id from platform team
+    }
+
+    // Pick ONE auth block per platform-team direction:
+
+    // Option A — bearer token (simple)
+    bearer_token = sys.env("MIMIR_BEARER_TOKEN")
+
+    // Option B — OAuth2 client credentials (preferred if AAD-backed)
+    // oauth2 {
+    //   client_id     = sys.env("MIMIR_OAUTH_CLIENT_ID")
+    //   client_secret = sys.env("MIMIR_OAUTH_CLIENT_SECRET")
+    //   token_url     = sys.env("MIMIR_OAUTH_TOKEN_URL")
+    //   scopes        = ["metrics.write"]
+    // }
+
+    // Option C — mTLS
+    // tls_config {
+    //   cert_file = "/etc/alloy/certs/client.crt"
+    //   key_file  = "/etc/alloy/certs/client.key"
+    //   ca_file   = "/etc/alloy/certs/ca.crt"
+    // }
+
+    // Tame retry storms; tune to platform-team SLAs.
+    queue_config {
+      capacity           = 10000
+      max_shards         = 10
+      max_samples_per_send = 2000
+      batch_send_deadline  = "5s"
+    }
+  }
+
+  // Belt-and-braces — applied to every series even if relabel is bypassed.
+  external_labels = {
+    cluster     = sys.env("CLUSTER_NAME"),
+    environment = sys.env("ENVIRONMENT"),
+    region      = sys.env("REGION"),
+    tenant      = sys.env("TENANT"),
+  }
+}

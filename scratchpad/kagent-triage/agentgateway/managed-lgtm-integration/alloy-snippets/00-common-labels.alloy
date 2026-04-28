@@ -1,0 +1,76 @@
+// =============================================================================
+// COMMON LABEL CONVENTION
+// =============================================================================
+// Every signal (metric / log / trace) we ship to managed LGTM MUST carry these
+// labels so that cross-signal correlation in Grafana works (click metric →
+// click logs link → same time range, same pod).
+//
+// Required labels:
+//   cluster      — short cluster name, e.g. "uks-prod-a"
+//   environment  — dev | preprod | prod
+//   region       — azure region, e.g. "uksouth"
+//   tenant       — team / business unit owner, e.g. "platform"
+//
+// Recommended labels (when applicable):
+//   namespace    — k8s namespace
+//   pod          — k8s pod name
+//   container    — k8s container name
+//   service      — logical service name (NOT the k8s Service kind)
+//
+// These are applied as `external_labels` on prometheus.remote_write and as
+// `stage.static_labels` in loki.process.
+// =============================================================================
+
+// Reusable: replace REPLACE_* with environment-specific values.
+// In production, source these from a ConfigMap or env vars rather than hardcoding.
+
+// ---- METRICS — applied to every series before remote_write ----
+//
+// prometheus.remote_write "managed_mimir" {
+//   endpoint {
+//     url = sys.env("MIMIR_PUSH_URL")
+//     headers = {
+//       "X-Scope-OrgID" = sys.env("MIMIR_TENANT_ID"),
+//     }
+//     bearer_token = sys.env("MIMIR_BEARER_TOKEN")
+//   }
+//   external_labels = {
+//     cluster     = sys.env("CLUSTER_NAME"),
+//     environment = sys.env("ENVIRONMENT"),
+//     region      = sys.env("REGION"),
+//     tenant      = sys.env("TENANT"),
+//   }
+// }
+
+// ---- LOGS — applied as static labels in the loki.process pipeline ----
+//
+// loki.process "add_common_labels" {
+//   stage.static_labels {
+//     values = {
+//       cluster     = sys.env("CLUSTER_NAME"),
+//       environment = sys.env("ENVIRONMENT"),
+//       region      = sys.env("REGION"),
+//       tenant      = sys.env("TENANT"),
+//     }
+//   }
+//   forward_to = [loki.write.managed_loki.receiver]
+// }
+
+// ---- TRACES — applied as resource attributes on the OTLP exporter ----
+//
+// otelcol.processor.attributes "add_common_labels" {
+//   action {
+//     key    = "cluster"
+//     value  = sys.env("CLUSTER_NAME")
+//     action = "upsert"
+//   }
+//   action {
+//     key    = "environment"
+//     value  = sys.env("ENVIRONMENT")
+//     action = "upsert"
+//   }
+//   // ... etc
+//   output {
+//     traces = [otelcol.exporter.otlp.tempo.input]
+//   }
+// }

@@ -1,0 +1,129 @@
+// =============================================================================
+// ALERTMANAGER WEBHOOK → KAFKA / EVENT HUB BRIDGE
+// =============================================================================
+// Closes the loop: managed AlertManager fires → POSTs JSON to this Alloy HTTP
+// receiver → Alloy wraps it as an OTLP log envelope → Kafka producer → Event
+// Hub → existing Argo Events Kafka EventSource → triage workflow.
+//
+// Network: Alloy must be reachable from the managed AlertManager. Easiest path
+// is an Ingress / LoadBalancer Service in front of port 9999. See README.md
+// section 4 for path options and OPEN-QUESTIONS.md Q4 for the open decision.
+//
+// Auth: this snippet uses a shared bearer token verified in `loki.process`. For
+// production add mTLS at the Ingress layer too.
+// =============================================================================
+
+// ---- 1. HTTP receiver for AlertManager webhook --------------------------------
+// We use loki.source.api here because it accepts arbitrary HTTP POSTs and lets
+// us route them through loki.process for shaping. (otelcol.receiver.loki is
+// also an option but adds an extra hop.)
+loki.source.api "alertmanager_webhook" {
+  http {
+    listen_address = "0.0.0.0"
+    listen_port    = 9999
+  }
+
+  forward_to = [loki.process.alertmanager_to_otlp.receiver]
+
+  labels = {
+    source = "alertmanager",
+  }
+
+  // Path expected from AlertManager webhook_config:
+  //   url: https://<our-public-host>/loki/api/v1/raw
+  //   path is fixed by loki.source.api — see Alloy docs.
+}
+
+// ---- 2. Auth + shape AlertManager payload into a flat log line ---------------
+loki.process "alertmanager_to_otlp" {
+  // Verify shared token (lightweight auth — replace with mTLS at ingress).
+  stage.match {
+    selector = `{source="alertmanager"} != "Bearer ${ALERTMANAGER_WEBHOOK_TOKEN}"`
+    action   = "drop"
+  }
+
+  // The AlertManager payload is `{"alerts": [...], "groupLabels": {...}, ...}`.
+  // We flatten one log line per alert so the downstream jq parser sees one
+  // alert per OTLP log record (matches the existing K8s-event pipeline shape).
+  stage.json {
+    expressions = {
+      alerts        = "alerts",
+      group_labels  = "groupLabels",
+      common_labels = "commonLabels",
+      receiver      = "receiver",
+      status        = "status",
+      external_url  = "externalURL",
+    }
+  }
+
+  // Add common labels so cross-signal correlation works in Grafana.
+  stage.static_labels {
+    values = {
+      cluster     = sys.env("CLUSTER_NAME"),
+      environment = sys.env("ENVIRONMENT"),
+      pipeline    = "alertmanager-bridge",
+    }
+  }
+
+  // Cap fan-out
+  stage.limit {
+    rate  = 50
+    burst = 200
+    drop  = true
+  }
+
+  forward_to = [otelcol.receiver.loki.bridge.receiver]
+}
+
+// ---- 3. Loki → OTLP bridge → Kafka exporter -----------------------------------
+otelcol.receiver.loki "bridge" {
+  output {
+    logs = [otelcol.processor.batch.alerts.input]
+  }
+}
+
+otelcol.processor.batch "alerts" {
+  timeout         = "2s"
+  send_batch_size = 50          // alerts are bursty but small
+
+  output {
+    logs = [otelcol.exporter.kafka.alerts_eventhub.input]
+  }
+}
+
+// ---- 4. Kafka exporter to Event Hub -------------------------------------------
+// Re-uses the same Event Hub namespace as `eventhub-otlp-pipeline` but a NEW
+// topic so the existing K8s-event Sensor doesn't see alert payloads.
+otelcol.exporter.kafka "alerts_eventhub" {
+  brokers          = [sys.env("EVENTHUB_BROKERS")]   // evh-NS.servicebus.windows.net:9093
+  protocol_version = "2.1.0"
+
+  logs {
+    topic    = "alerts"           // separate from "k8s-events"
+    encoding = "otlp_json"
+  }
+
+  authentication {
+    tls {
+      insecure = false
+    }
+    sasl {
+      username  = "$ConnectionString"
+      password  = sys.env("EVENTHUB_CONNECTION_STRING")
+      mechanism = "PLAIN"
+    }
+  }
+
+  sending_queue {
+    enabled    = true
+    queue_size = 1000
+  }
+
+  // Retries — alerts are critical, give them more headroom than logs.
+  retry_on_failure {
+    enabled          = true
+    initial_interval = "1s"
+    max_interval     = "30s"
+    max_elapsed_time = "5m"
+  }
+}

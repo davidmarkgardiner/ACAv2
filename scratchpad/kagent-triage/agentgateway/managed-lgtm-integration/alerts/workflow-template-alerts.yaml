@@ -1,0 +1,196 @@
+# =============================================================================
+# Argo WorkflowTemplate — triage AlertManager alerts arriving via Event Hub
+# =============================================================================
+# Sibling of `eventhub-otlp-pipeline/04-workflow-template.yaml` — same OTLP
+# envelope shape, but the parse step pulls `alertname / severity / labels /
+# annotations` instead of the K8s `event_reason / involvedObject` fields.
+#
+# Triggered by a Sensor that consumes from Event Hub topic `alerts` (see
+# README.md). The Sensor passes the raw OTLP JSON as the `otlp-payload`
+# parameter — no other plumbing needed.
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: alert-triage
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: managed-lgtm-integration
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: main
+
+  arguments:
+    parameters:
+      - name: otlp-payload
+        description: Raw OTLP-JSON envelope from Event Hub (one log record per alert)
+
+  templates:
+    # ---- 1. Entry DAG ------------------------------------------------------
+    - name: main
+      dag:
+        tasks:
+          - name: parse-alerts
+            template: parse-alerts
+
+          - name: triage-each-alert
+            depends: parse-alerts
+            template: triage-one-alert
+            arguments:
+              parameters:
+                - name: alert
+                  value: "{{item}}"
+            withParam: "{{tasks.parse-alerts.outputs.parameters.alerts}}"
+
+    # ---- 2. Unwrap OTLP envelope, fan out one alert per array element -----
+    - name: parse-alerts
+      inputs:
+        parameters:
+          - name: otlp-payload
+            value: "{{workflow.parameters.otlp-payload}}"
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        source: |
+          set -eu
+
+          # The OTLP body is a JSON-encoded AlertManager payload.
+          # Path: resourceLogs[].scopeLogs[].logRecords[].body.stringValue
+          # That stringValue is itself JSON: {"alerts":[...],"groupLabels":{...},...}
+
+          PAYLOAD='{{inputs.parameters.otlp-payload}}'
+
+          echo "$PAYLOAD" \
+            | jq -c '
+                [ .resourceLogs[].scopeLogs[].logRecords[]
+                  | (.body.stringValue | fromjson) as $am
+                  | $am.alerts[]
+                  | {
+                      alertname:   .labels.alertname,
+                      severity:    (.labels.severity // "info"),
+                      status:      .status,
+                      namespace:   (.labels.namespace // ""),
+                      pod:         (.labels.pod // ""),
+                      service:     (.labels.service // ""),
+                      cluster:     (.labels.cluster // ""),
+                      summary:     .annotations.summary,
+                      description: .annotations.description,
+                      runbook_url: (.annotations.runbook_url // ""),
+                      starts_at:   .startsAt,
+                      generator_url: .generatorURL
+                    }
+                ]
+                | unique_by(.alertname + .namespace + .pod)
+              ' \
+            > /tmp/alerts.json
+
+          cat /tmp/alerts.json
+      outputs:
+        parameters:
+          - name: alerts
+            valueFrom:
+              path: /tmp/alerts.json
+
+    # ---- 3. Per-alert triage: KAgent analysis → Mattermost / GitLab -------
+    - name: triage-one-alert
+      inputs:
+        parameters:
+          - name: alert
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        source: |
+          set -eu
+
+          ALERT='{{inputs.parameters.alert}}'
+
+          ALERTNAME=$(echo "$ALERT" | jq -r '.alertname')
+          SEVERITY=$(echo "$ALERT" | jq -r '.severity')
+          NAMESPACE=$(echo "$ALERT" | jq -r '.namespace')
+          POD=$(echo "$ALERT" | jq -r '.pod')
+          CLUSTER=$(echo "$ALERT" | jq -r '.cluster')
+          SUMMARY=$(echo "$ALERT" | jq -r '.summary')
+          RUNBOOK=$(echo "$ALERT" | jq -r '.runbook_url')
+
+          # ---- 3a. Build KAgent A2A prompt ----
+          # Critical anchoring: tell the model the EXACT cluster + namespace so
+          # Qwen 14B doesn't typo it (lesson from existing pipeline).
+          PROMPT=$(jq -n \
+            --arg alertname "$ALERTNAME" \
+            --arg severity  "$SEVERITY" \
+            --arg ns        "$NAMESPACE" \
+            --arg pod       "$POD" \
+            --arg cluster   "$CLUSTER" \
+            --arg summary   "$SUMMARY" \
+            '"Triage this alert. CRITICAL: use exact namespace \"" + $ns + "\" and cluster \"" + $cluster + "\".\n\nAlert: " + $alertname + "\nSeverity: " + $severity + "\nPod: " + $pod + "\nSummary: " + $summary + "\n\nReturn:\n1. Likely root cause (1 sentence)\n2. Three remediation options ranked by safety\n3. The exact kubectl commands to investigate further"')
+
+          # ---- 3b. Call KAgent A2A ----
+          KAGENT_URL=$(cat /etc/kagent-config/KAGENT_URL)
+          AGENT=$(cat /etc/kagent-config/KAGENT_TRIAGE_AGENT)
+
+          A2A_BODY=$(jq -n \
+            --argjson prompt "$PROMPT" \
+            '{jsonrpc:"2.0",id:"alert-triage",method:"message/send",params:{message:{role:"user",parts:[{kind:"text",text:$prompt}]}}}')
+
+          ANALYSIS=$(curl -sf -X POST \
+            "${KAGENT_URL}/api/a2a/kagent/${AGENT}/" \
+            -H "Content-Type: application/json" \
+            -d "$A2A_BODY" \
+            | jq -r '.result.artifacts[0].parts[0].text // "KAgent analysis unavailable"')
+
+          # ---- 3c. Send to Mattermost ----
+          WEBHOOK=$(cat /etc/mattermost-config/WEBHOOK_URL)
+
+          # Color map by severity
+          case "$SEVERITY" in
+            critical) COLOR="#e74c3c" ; EMOJI=":red_circle:" ;;
+            warning)  COLOR="#e67e22" ; EMOJI=":large_orange_circle:" ;;
+            *)        COLOR="#95a5a6" ; EMOJI=":white_circle:" ;;
+          esac
+
+          MM_BODY=$(jq -n \
+            --arg color    "$COLOR" \
+            --arg emoji    "$EMOJI" \
+            --arg name     "$ALERTNAME" \
+            --arg sev      "$SEVERITY" \
+            --arg ns       "$NAMESPACE" \
+            --arg pod      "$POD" \
+            --arg cluster  "$CLUSTER" \
+            --arg summary  "$SUMMARY" \
+            --arg analysis "$ANALYSIS" \
+            --arg runbook  "$RUNBOOK" \
+            '{
+              text: ($emoji + " :fire: **" + $name + "** (" + $sev + ")"),
+              attachments: [{
+                color: $color,
+                fields: [
+                  {short:true, title:"cluster",   value:$cluster},
+                  {short:true, title:"namespace", value:$ns},
+                  {short:true, title:"pod",       value:$pod},
+                  {short:false, title:"summary",  value:$summary},
+                  {short:false, title:"AI triage", value:$analysis},
+                  {short:false, title:"runbook",  value:$runbook}
+                ]
+              }]
+            }')
+
+          curl -sf -X POST "$WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$MM_BODY"
+
+          echo "Triaged $ALERTNAME for $NAMESPACE/$POD"
+
+      volumeMounts:
+        - name: kagent-config
+          mountPath: /etc/kagent-config
+        - name: mattermost-config
+          mountPath: /etc/mattermost-config
+
+  volumes:
+    - name: kagent-config
+      configMap:
+        name: kagent-config
+    - name: mattermost-config
+      configMap:
+        name: mattermost-webhook-config
