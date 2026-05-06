@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Argo Events EventSource — direct Alloy → Argo PoC ingress.
+#
+# Listens on cluster service:
+#   alloy-poc-eventsource-svc.argo-events.svc.cluster.local:12001
+#   POST /alloy
+#
+# Auth: bearer token from Secret alloy-poc-webhook-token (key: token).
+# Argo Events validates `Authorization: Bearer <token>` itself.
+#
+# Body: any JSON. We do not constrain the shape at this layer — the Sensor
+# pipes the entire body verbatim into the workflow as a string parameter.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: alloy-poc
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: alloy-direct-poc
+spec:
+  eventBusName: default
+  template:
+    serviceAccountName: argo-events-sa
+    container:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+  service:
+    ports:
+      - port: 12001
+        targetPort: 12001
+  webhook:
+    alloy:
+      port: "12001"
+      endpoint: /alloy
+      method: POST
+      authSecret:
+        name: alloy-poc-webhook-token
+        key: token

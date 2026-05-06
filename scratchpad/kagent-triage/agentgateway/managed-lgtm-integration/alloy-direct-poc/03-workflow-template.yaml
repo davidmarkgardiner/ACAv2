@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------------
+# WorkflowTemplate — alloy-poc-echo
+#
+# Bare-bones echo workflow: receives the raw JSON body Alloy posted, dumps
+# it pretty-printed to stdout (visible in Argo UI / `argo logs`), and writes
+# the byte-size + a couple of fields if they exist as outputs so you can
+# inspect them in the workflow status block.
+#
+# This is the PoC verification target — once you can see Alloy payloads in
+# these logs, the wire is good. After that, swap this template for the real
+# triage workflow (or webhook-hub-ai-triage if you want kagent triage).
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: alloy-poc-echo
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: alloy-direct-poc
+spec:
+  serviceAccountName: argo-events-sa
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: alloy-payload
+        description: Raw JSON body Alloy POSTed to /alloy
+
+  templates:
+    - name: main
+      script:
+        image: badouralix/curl-jq:alpine
+        command: [sh]
+        source: |
+          set -eu
+          PAYLOAD='{{workflow.parameters.alloy-payload}}'
+
+          echo "=========================================================="
+          echo "alloy-poc-echo  —  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "=========================================================="
+          echo "Raw bytes received: $(printf '%s' "$PAYLOAD" | wc -c)"
+          echo
+          echo "---- pretty-printed JSON --------------------------------"
+          echo "$PAYLOAD" | jq '.' || {
+            echo "Body is not valid JSON — printing as-is:"
+            printf '%s\n' "$PAYLOAD"
+            exit 0
+          }
+          echo
+
+          # If the body looks like a Loki push (loki.write from Alloy),
+          # surface a couple of useful fields. Loki shape:
+          #   {"streams":[{"stream":{...labels...},"values":[["<ts_ns>","<line>"], ...]}]}
+          STREAMS=$(echo "$PAYLOAD" | jq -r '.streams // empty | length')
+          if [ -n "$STREAMS" ] && [ "$STREAMS" != "0" ]; then
+            echo "---- detected Loki push ($STREAMS streams) -------------"
+            echo "$PAYLOAD" | jq -r '
+              .streams[]
+              | "stream-labels: " + (.stream | tostring)
+              + "\nfirst-line:    " + ((.values[0][1]) // "<empty>")
+            '
+            echo
+          fi
+
+          # If it's an AlertManager-shaped body (handy for cross-testing).
+          ALERTS=$(echo "$PAYLOAD" | jq -r '.alerts // empty | length')
+          if [ -n "$ALERTS" ] && [ "$ALERTS" != "0" ]; then
+            echo "---- detected AlertManager body ($ALERTS alerts) -------"
+            echo "$PAYLOAD" | jq -r '
+              .alerts[]
+              | "alertname: " + (.labels.alertname // "?")
+              + "  severity: " + (.labels.severity // "?")
+              + "  status: " + (.status // "?")
+            '
+            echo
+          fi
+
+          echo "ok — payload received, parsed, logged."

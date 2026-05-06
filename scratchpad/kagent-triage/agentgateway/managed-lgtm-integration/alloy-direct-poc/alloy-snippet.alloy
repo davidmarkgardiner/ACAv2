@@ -1,0 +1,93 @@
+// =============================================================================
+// ALLOY → ARGO EVENTS WEBHOOK (DIRECT) — PoC SNIPPET
+// =============================================================================
+// Drops into your Alloy config alongside the existing OTLP / Loki / Mimir
+// blocks. Sends a stream of test log lines straight to the Argo Events
+// EventSource at /alloy. No AlertManager, no Kafka, no ConfigMap reload.
+//
+// Pre-reqs:
+//   1. Apply 00-secret.yaml … 03-workflow-template.yaml on the cluster.
+//   2. Mount the same bearer token into the Alloy Pod at /etc/alloy-webhook/token
+//      e.g. via a projected Secret volume named "alloy-webhook-token".
+//   3. Make sure the Alloy Pod can reach
+//        alloy-poc-eventsource-svc.argo-events.svc.cluster.local:12001
+//      (in-cluster — same as our other webhook receivers).
+//      For external Alloy, swap to the Istio VirtualService FQDN.
+//
+// Verify after deploy:
+//   kubectl -n argo-events logs -l eventsource-name=alloy-poc -f
+//   kubectl -n argo-events get wf -l app.kubernetes.io/part-of=alloy-direct-poc
+// =============================================================================
+
+
+// ---- 1. Synthetic test stream --------------------------------------------
+// Generates one log line every 15 s so you can see end-to-end traffic
+// without wiring real sources first. Delete after the wire works.
+loki.source.api "alloy_poc_synthetic" {
+  http {
+    listen_address = "0.0.0.0"
+    listen_port    = 9998       // local-only — not exposed
+  }
+
+  forward_to = [loki.process.alloy_poc_shape.receiver]
+
+  labels = {
+    source = "alloy-poc",
+    env    = "lab",
+  }
+}
+
+
+// ---- 2. Shape (add the bits we want to see in the workflow) --------------
+loki.process "alloy_poc_shape" {
+  stage.static_labels {
+    values = {
+      cluster   = sys.env("CLUSTER_NAME"),
+      pipeline  = "alloy-direct-poc",
+      severity  = "info",
+    }
+  }
+
+  stage.limit {
+    rate  = 5
+    burst = 20
+    drop  = true
+  }
+
+  forward_to = [loki.write.alloy_poc_argo.receiver]
+}
+
+
+// ---- 3. Push to Argo Events webhook --------------------------------------
+// loki.write speaks the standard Loki push API: a JSON envelope of
+// {"streams":[{"stream":{...labels...},"values":[["<ns>","<line>"]]}]}.
+// Argo Events' webhook EventSource is content-agnostic — it accepts the
+// JSON verbatim and the Sensor pipes it into the workflow as a string.
+loki.write "alloy_poc_argo" {
+  endpoint {
+    url = "http://alloy-poc-eventsource-svc.argo-events.svc.cluster.local:12001/alloy"
+
+    // Bearer token — must match the Secret stamped in 00-secret.yaml.
+    bearer_token_file = "/etc/alloy-webhook/token"
+
+    // The webhook EventSource speaks JSON natively. No tenant header
+    // needed; comment out X-Scope-OrgID if you copied this from a Loki
+    // exporter block.
+  }
+
+  // Tight retry loop is fine for PoC — Argo Events queues onto NATS so
+  // any short blip is recoverable.
+  external_labels = {
+    pipeline = "alloy-direct-poc",
+  }
+}
+
+
+// ---- 4. (Optional) feed real data instead of the synthetic source --------
+// Once the synthetic loop is proven, comment out the loki.source.api block
+// above and forward whatever you actually want — e.g. tail kubelet logs:
+//
+//   loki.source.kubernetes "k8s" {
+//     targets    = discovery.kubernetes.pods.targets
+//     forward_to = [loki.process.alloy_poc_shape.receiver]
+//   }
