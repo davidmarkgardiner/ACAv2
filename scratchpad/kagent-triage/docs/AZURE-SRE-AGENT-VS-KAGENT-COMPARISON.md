@@ -104,14 +104,14 @@ on velocity-of-change and freedom from Microsoft's release cadence.
 | | Azure SRE Agent | kagent stack |
 |---|---|---|
 | Idle cost | 4 AAUs / agent / hour always-on, every agent, every hour | Marginal pod cost on existing nodes; **plus** LLM-hosting compute (GPU node for Qwen-14B if self-hosted) and the **LGTM stack** (Loki / Mimir / Tempo / Grafana) which is sunk cost — already deployed and shared across the platform |
-| Usage cost | Token-based AAU per model provider | Self-hosted Qwen via LiteLLM ≈ $0 inference once the GPU is paid for; Azure OpenAI charged at standard token rates when used |
+| Usage cost | Token-based AAU per model provider | Direct LLM API spend via agentgateway (Azure OpenAI, Anthropic, etc.) at provider list rates; self-hosted Qwen ≈ $0 inference once the GPU is paid for |
 | Build / sustain cost | Microsoft absorbs framework engineering | **Engineering FTE to close the persistent-memory, code-context, and approval-gate gaps** (Section 6) — not zero |
 | Scaling | Linear in agents × tenants × hours | Roughly fixed compute; LLM cost only when workflows fire |
 | Lock-in | Azure account, Azure billing, Azure runtime | Portable across K8s distributions and LLM providers |
 
 For **N agents × M clusters**, Microsoft's bill scales with N and M. The kagent
 stack scales sub-linearly because the heavy components (Argo, kagent controller,
-LiteLLM, GPU host) are shared across all agents. At ~10+ teams or clusters the
+agentgateway, GPU host) are shared across all agents. At ~10+ teams or clusters the
 always-on AAU charge typically exceeds the marginal cost of running another
 agent on the in-house stack — but the in-house stack only wins **after** the
 gap-closure engineering investment in Section 6 is funded.
@@ -165,7 +165,7 @@ into a PR review loop** — a different control point than runtime hooks.
 - **Multi-cluster, mixed estate** (AKS + on-prem + edge + dev kind/minikube)
 - **Cost-sensitive at fleet scale** (10+ clusters or teams)
 - Already invested in **Argo Workflows / Argo Events** as the orchestration plane
-- Want **local-LLM optionality** (Qwen via LiteLLM is essentially free inference)
+- Want **flexible LLM routing via agentgateway** (mix Anthropic / Azure OpenAI / self-hosted Qwen per task tier)
 - Need **real A2A composition** — peers, not Microsoft's hierarchy
 - Want to extend agents into **non-SRE flows** (namespace onboarding, dev pipelines,
   app onboarding template factories)
@@ -275,40 +275,230 @@ Key design choices in a hybrid setup:
 
 ---
 
-## 5. Cost-modelling rule of thumb
+## 5. Cost comparison with concrete figures
 
-A back-of-envelope view to take into a budget conversation. Substitute real
-AAU pricing from `aka.ms/sreagent/pricing` when you have it.
+### 5.0 What actually drives cost in our environment
 
-```
-Azure SRE Agent annual cost
-  = Σ_agents ( 4 AAU/hr × 8,760 hr × $/AAU )      # always-on
-  + Σ_incidents ( token_AAU × $/AAU )             # usage
+The kagent + Argo + LGTM control plane is essentially **free at the margin** —
+the pods run on existing K8s nodes, the controllers are tiny, the observability
+stack is already deployed for the wider platform. There is no GPU bill unless
+we choose to self-host an LLM, and we are not doing that as the default path.
 
-kagent stack annual cost
-  = cluster compute for kagent + Argo pods                       (often sunk)
-  + GPU host for self-hosted LLM         (~$5–15k/yr/GPU node depending on SKU)
-  + LiteLLM / agentgateway ops cost                              (sunk)
-  + LGTM stack ops cost (Loki + Mimir + Tempo + Grafana)         (sunk — shared)
-  + Postgres + pgvector for kagent native memory  (sunk if shared with platform)
-  + (optional) Pinecone subscription if external memory is preferred
-  + LLM inference (≈ $0 if Qwen-local once GPU is paid for, else token cost)
-  + ~0.25–0.5 engineering FTE for governance / approval-gate / agent learning loop
-```
+**The only real variable cost is LLM token spend.** Everything else either
+runs on sunk infrastructure or is a one-off engineering investment.
 
-For 5 agents × 8,760 hours × 4 AAU at any non-trivial $/AAU rate, the always-on
-charge alone is real money before a single incident is investigated. The kagent
-stack pays a GPU + engineering tax up front instead, but most of the dependent
-infrastructure (LGTM, Postgres, kagent controller, Argo) is already deployed
-and shared, so the marginal cost of adding agents is low. **The cross-over
-point is sensitive to AAU pricing, GPU SKU, and how much of the gap-closure
-engineering is already done — a sensitivity table should be produced once AAU
-pricing is known.** For most Azure-heavy estates with 10+ planned agents the
-in-house stack wins on TCO once the platform investment is amortised; below
-that, the managed service is hard to beat on time-to-value — though in our
-specific environment (no GitHub, GitLab-hosted code) the headline managed-side
-benefit of GitHub deep-context RCA does not apply, narrowing the case for
-Azure SRE Agent further.
+So the right question is not "what does the in-house stack cost" but:
+**"how many tokens will our agents burn per investigation, how many
+investigations per day, on which model, and what is the unit token price?"**
+That answer evolves over time and needs measurement, not a static spreadsheet.
+
+The Azure SRE Agent comparison then collapses to a much simpler shape:
+
+| | Azure SRE Agent | kagent stack |
+|---|---|---|
+| Fixed always-on baseline | **4 AAU/agent/hour** ($3,504/yr/agent at $0.10/AAU) | **$0** |
+| Variable LLM cost | Tokens × MS's AAU rate | Tokens × direct provider rate |
+| Provider choice | Anthropic, OpenAI (MS-mediated) | Any — Azure OpenAI direct, Anthropic API, self-hosted, OpenRouter, mix per agent |
+| Engineering tail | None (managed) | Modest — gap-closure FTE in Year 1, low after |
+
+**The structural advantage is the missing always-on charge** plus freedom to
+route cheap models to cheap tasks. The numbers below are sized to make those
+levers concrete.
+
+All Microsoft figures use the published rates from
+[learn.microsoft.com/azure/sre-agent/pricing-billing](https://learn.microsoft.com/en-us/azure/sre-agent/pricing-billing)
+and the **$0.10 per AAU illustrative figure** from Microsoft's April 2026
+billing-model blog. There is no free tier and pricing varies by region; treat
+$0.10/AAU as a reference point, not a contractual rate.
+
+### 5.1 Azure SRE Agent — always-on baseline (per agent)
+
+| Period | AAUs | $ at $0.10/AAU |
+|---|---|---|
+| Hour | 4 | **$0.40** |
+| Day (24h) | 96 | **$9.60** |
+| Month (30d) | 2,880 | **~$288** |
+| Year (8,760h) | 35,040 | **~$3,504** |
+
+This is what you pay **before any work happens**, for every agent that exists,
+24/7. Stopping an agent does not stop this charge — only deletion does.
+
+### 5.2 Active flow per task (Microsoft's published scenarios)
+
+| Scenario | AAUs (Claude Opus 4.6) | $ | AAUs (GPT 5.3 Codex) | $ |
+|---|---|---|---|---|
+| Quick question (~20K in / 2K out + cache) | 3.8 | $0.38 | 1.6 | $0.16 |
+| Incident investigation (~200K in / 15K out + cache) | 35.5 | $3.55 | 13.7 | $1.37 |
+| Full remediation (~500K in / 40K out + cache) | 86.5 | $8.65 | 33.9 | $3.39 |
+
+Anthropic models are roughly **2.5× the cost per task** of OpenAI GPT-5.x on
+this product. Microsoft notes Opus often reaches a conclusion in fewer
+reasoning steps, so the per-task delta in practice is smaller than the
+per-token delta.
+
+### 5.3 Worked example — single agent, GPT 5.3 Codex, moderate use
+
+| Component | Calculation | Annual $ |
+|---|---|---|
+| Always-on | 35,040 AAU × $0.10 | **$3,504** |
+| 100 quick questions / month × 12 | 1,200 × 1.6 AAU × $0.10 | $192 |
+| 50 incident investigations / month × 12 | 600 × 13.7 AAU × $0.10 | $822 |
+| 10 full remediations / month × 12 | 120 × 33.9 AAU × $0.10 | $407 |
+| **Total — 1 agent / yr** | | **~$4,925** |
+
+Switch to Claude Opus 4.6 and the per-task figures roughly 2.5×, pushing this
+single-agent total to **~$7,400 / year**.
+
+### 5.4 Fleet scenarios
+
+The always-on charge is what dominates at scale. Active-flow usage is
+sub-linear (one agent can serve many tasks).
+
+| Fleet size | Always-on / yr | + ~$1,400 active-flow / agent / yr (GPT) | Total / yr |
+|---|---|---|---|
+| 1 agent | $3,504 | $1,400 | **~$4,900** |
+| 5 agents | $17,520 | $7,000 | **~$24,500** |
+| 10 agents | $35,040 | $14,000 | **~$49,000** |
+| 25 agents | $87,600 | $35,000 | **~$122,600** |
+
+For a meaningful estate (one agent per service team, or per cluster) you are
+looking at **mid-five-figures to low-six-figures USD/year just for the SaaS
+agent**, before any GPU- or engineering-side savings the in-house stack would
+also incur.
+
+### 5.5 kagent stack — token-cost forecast model
+
+Pods, controllers, observability, and Postgres are sunk cost in our
+environment. The variable bill is the LLM API spend, which is a function of
+**token volume** and **provider rate**.
+
+#### LLM rate card (public list prices, May 2026)
+
+These are reference rates per 1M tokens. Real Azure OpenAI / Anthropic
+contract rates may be lower under EA / committed-use discounts.
+
+| Model | Input $/1M | Output $/1M | Suitable for |
+|---|---|---|---|
+| Claude Opus 4.6 (Anthropic / AWS Bedrock) | ~$15 | ~$75 | Hardest investigations, root-cause synthesis |
+| Claude Sonnet 4.6 | ~$3 | ~$15 | Default for investigations / remediation reasoning |
+| Claude Haiku 4.5 | ~$1 | ~$5 | Cheap classification, alert summarisation |
+| GPT-5.x (Azure OpenAI) | ~$5 | ~$30 | Comparable to Sonnet for most tasks |
+| Qwen3-14B (self-hosted) | ~$0 | ~$0 | Once GPU is paid for; high-volume noise filtering |
+
+**Implication:** Microsoft's AAU pricing translates roughly to retail token
+rates ($10/1M Opus input × Microsoft = ~$15/1M direct), so the per-token
+*active-flow* charge is similar in shape to going direct. The **win comes
+from removing the always-on tax and being able to mix models per task tier**.
+
+#### Per-investigation token model
+
+Calibrated against Microsoft's published task scenarios (which we have no
+reason to believe are wildly off for our workloads):
+
+| Task tier | Input tokens | Output tokens | Default model |
+|---|---|---|---|
+| Triage / classification | ~30K | ~3K | Sonnet or Haiku |
+| Incident investigation | ~200K | ~15K | Sonnet (fallback Opus) |
+| Full remediation | ~500K | ~40K | Sonnet, Opus only if remediation involves code synthesis |
+
+#### Cost per investigation by model
+
+Direct token cost (no AAU markup, no always-on baseline):
+
+| Model | Triage | Investigation | Remediation |
+|---|---|---|---|
+| Claude Opus 4.6 | $0.68 | $4.13 | $10.50 |
+| Claude Sonnet 4.6 | $0.14 | $0.83 | $2.10 |
+| Claude Haiku 4.5 | $0.05 | $0.28 | $0.70 |
+| GPT-5.x (Azure OpenAI) | $0.24 | $1.45 | $3.70 |
+| Qwen3-14B self-hosted | ~$0 | ~$0 | ~$0 |
+
+**Compare with Azure SRE Agent's published per-task costs** (Section 5.2):
+roughly the same order of magnitude per task at the GPT tier, but Microsoft
+adds ~$3,504/yr/agent always-on **on top**.
+
+#### Volume-driven annual forecast
+
+Pick volume assumptions for an "average" agent and multiply. Three sample
+volumes — Low / Mid / High — with all investigations on Sonnet 4.6 (a
+sensible default) and triage on Haiku 4.5:
+
+| Volume / agent / month | Triage (Haiku) | Investigations (Sonnet) | Remediations (Sonnet) | Monthly $ | Annual $ |
+|---|---|---|---|---|---|
+| Low | 100 × $0.05 = $5 | 20 × $0.83 = $16.60 | 2 × $2.10 = $4.20 | **~$26** | **~$310** |
+| Mid | 500 × $0.05 = $25 | 100 × $0.83 = $83 | 10 × $2.10 = $21 | **~$129** | **~$1,550** |
+| High | 2,000 × $0.05 = $100 | 500 × $0.83 = $415 | 50 × $2.10 = $105 | **~$620** | **~$7,440** |
+
+Switch the High-volume row to all-Opus and it becomes ~$5,500/month
+(~$66k/yr/agent) — which is why **model choice per task tier matters more than
+fleet size**. This is the lever Azure SRE Agent partially gives up because it
+charges by AAU regardless of which provider you pick.
+
+### 5.6 Crossover analysis
+
+Total annual cost / agent (LLM spend only on the kagent side; always-on +
+matched active-flow on the Microsoft side):
+
+| Per-agent / yr | Azure SRE Agent (GPT 5.3) | kagent (Sonnet) | Ratio |
+|---|---|---|---|
+| Low volume | $3,504 + $192 = **$3,696** | **$310** | ~12× |
+| Mid volume | $3,504 + $822 = **$4,326** | **$1,550** | ~2.8× |
+| High volume | $3,504 + $4,200 = **$7,700** | **$7,440** | ~1× (flat) |
+
+For 10 agents at mid-volume:
+
+| | Year 1 | Year 2+ |
+|---|---|---|
+| Azure SRE Agent | ~$43,000 | ~$43,000 |
+| kagent stack | ~$15,500 LLM + ~$50k FTE = **~$65k** | ~$15,500 LLM + small ops tail = **~$18k** |
+
+**Crossover behaviour:**
+
+- **Low- / mid-volume agents**: kagent wins immediately on a per-agent basis,
+  even before fleet effects, because the always-on baseline dominates.
+- **High-volume agents on heavy models**: the two converge — at that point the
+  decision is on features and control, not cost.
+- **The biggest cost lever is which model handles which task tier**, not which
+  platform hosts the agent. Use Sonnet/Haiku by default and reserve Opus for
+  the cases where it materially shortens the investigation.
+
+### 5.7 What we actually need to do
+
+Because the bill is dominated by tokens, and tokens are dominated by volume
+and model choice, **forecasts in a static doc go stale fast**. The plan
+should be to **measure**:
+
+1. **Instrument agentgateway** to emit per-call token counts to Mimir (we
+   already run LGTM). Tag by agent, task tier, and model.
+2. **Build a Grafana dashboard** for daily / monthly token spend by agent and
+   by model.
+3. **Set a monthly budget alert** in Grafana and a soft cap in agentgateway.
+4. **Review the model-routing config every quarter** — promote tasks down to
+   Haiku where Sonnet was overkill; promote up to Opus where Sonnet was
+   missing diagnoses.
+
+Once the dashboard exists, we replace the assumptions in 5.5 / 5.6 with real
+30-day rolling numbers and the comparison in this section becomes evidence-
+based instead of model-based.
+
+### 5.8 Caveats
+
+- **$/AAU is illustrative.** The $0.10 reference is from a Microsoft blog
+  example; real EA / CSP pricing may differ. A 30% Microsoft discount narrows
+  but does not close the always-on gap.
+- **List prices for Anthropic / Azure OpenAI** are public list rates — real
+  EA / committed-use discounts can lower the kagent side too.
+- **Token-per-task assumptions** are calibrated against Microsoft's own
+  scenarios; once we have 30 days of measured data we should replace them.
+- **Microsoft's internal data** (35K incidents / 1,300 agents = ~27
+  incidents/agent/yr) suggests average usage is closer to the Low row than
+  the High row. If our volumes are similar, the always-on tax is the dominant
+  Microsoft cost and the kagent side stays well under $1,000/agent/yr.
+
+The headline: **what we're really committing to is an LLM bill that scales
+with how often agents run, not a per-agent SaaS subscription**. That gives us
+direct levers (model choice, prompt length, caching, batching) that
+Azure SRE Agent partially abstracts away.
 
 ---
 
@@ -390,7 +580,9 @@ that cannot or should not run on a managed agent.
 
 - [microsoft/sre-agent (GitHub)](https://github.com/microsoft/sre-agent)
 - [Azure/sre-agent-plugins](https://github.com/Azure/sre-agent-plugins)
-- [Azure SRE Agent pricing blog](https://aka.ms/sreagent/pricing/blog)
+- [Pricing and Billing for Azure SRE Agent (Microsoft Learn)](https://learn.microsoft.com/en-us/azure/sre-agent/pricing-billing) — source for AAU rates and per-task scenarios
+- [Azure SRE Agent pricing page](https://azure.microsoft.com/en-us/pricing/details/sre-agent/)
+- [Azure SRE Agent pricing blog (April 2026 active-flow update)](https://aka.ms/sreagent/pricing/blog) — source for $0.10/AAU illustrative rate
 - [Context Engineering: Lessons from Building Azure SRE Agent](https://techcommunity.microsoft.com/blog/appsonazureblog/context-engineering-lessons-from-building-azure-sre-agent/4481200)
 - [Azure SRE Agent GA announcement](https://aka.ms/sreagent/ga)
 - In-house: `aks-mgmt-stack/holmes-argoworkflows/`, `kagent-triage/`,
