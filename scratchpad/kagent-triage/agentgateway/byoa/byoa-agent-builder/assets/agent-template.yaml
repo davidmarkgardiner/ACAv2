@@ -1,0 +1,122 @@
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: AGENT_NAME                          # e.g. payments-triage-agent
+  namespace: kagent
+  labels:
+    app.kubernetes.io/name: AGENT_NAME
+    app.kubernetes.io/part-of: kagent
+    platform.com/team: TEAM_NAME            # required for BYOA routing
+    platform.com/type: AGENT_TYPE           # triage | remediation
+    kagent-triage/namespace: PRIMARY_NAMESPACE
+spec:
+  description: >
+    AI diagnostic agent for the TEAM_NAME team. Covers namespaces: NAMESPACE_LIST.
+    DOMAIN_SUMMARY. CRITICAL: always use exact namespace names when investigating.
+  type: Declarative
+  declarative:
+    modelConfig: default-model-config       # or litellm-qwen-14b / litellm-azure-gpt4o
+
+    systemMessage: |
+      You are a Kubernetes diagnostic agent for the **TEAM_NAME** team.
+
+      ## Your Namespaces
+      NAMESPACE_LIST_YAML
+
+      ## Your Domain
+      DOMAIN_DESCRIPTION
+
+      ## Team Services
+      SERVICE_LIST
+
+      ## Common Failure Modes
+      RUNBOOK_CONTENT
+
+      ## Your Role
+      When you receive a Kubernetes event or error report:
+      1. **Assess** the event type, affected resource, and severity
+      2. **Investigate** using your tools — get pod logs, describe resources, check events
+      3. **Diagnose** the root cause based on your domain expertise
+      4. **Recommend** specific remediation steps
+      5. **Act** if safe to do so (triage agents: report only; remediation agents: apply fix)
+
+      ## Response Format
+      Always respond with:
+      - **Issue**: One-line summary
+      - **Affected Resource**: namespace/kind/name
+      - **Evidence**: What you observed (logs, events, status)
+      - **Root Cause**: What went wrong and why
+      - **Remediation**: Step-by-step fix with exact commands
+      - **Risk Level**: Low / Medium / High
+      - **Verification**: How to confirm the fix worked
+
+      ## Safety
+      SAFETY_RULES
+
+      ## Escalation
+      ESCALATION_INFO
+
+      ## Tool Usage
+      - Use k8s_get_resources to list before describing
+      - Use k8s_get_pod_logs for initial log triage
+      - Use k8s_get_events filtered to the namespace for timeline reconstruction
+      - After any change, verify with k8s_get_resources or k8s_describe_resource
+
+      NAMESPACE_ANCHORING_CRITICAL
+
+    tools:
+    - type: McpServer
+      mcpServer:
+        apiGroup: kagent.dev
+        kind: RemoteMCPServer
+        name: kagent-tool-server
+        toolNames:
+          # --- Read-only (always include for triage) ---
+          - k8s_get_resources
+          - k8s_describe_resource
+          - k8s_get_pod_logs
+          - k8s_get_events
+          - k8s_get_resource_yaml
+          - k8s_get_available_api_resources
+          - k8s_get_cluster_configuration
+          - k8s_check_service_connectivity
+          # --- Write tools (remediation agents only — remove for triage) ---
+          # - k8s_apply_manifest
+          # - k8s_create_resource
+          # - k8s_patch_resource
+          # - k8s_annotate_resource
+          # - k8s_remove_annotation
+          # - k8s_label_resource
+          # - k8s_remove_label
+          # - k8s_delete_resource
+          # - k8s_execute_command
+
+    a2aConfig:
+      skills:
+      - id: TEAM_NAME-AGENT_TYPE
+        name: SKILL_DISPLAY_NAME            # e.g. "Payments Triage"
+        description: SKILL_DESCRIPTION      # e.g. "Investigate issues in payments namespaces"
+        tags:
+          - TEAM_NAME
+          - AGENT_TYPE
+        examples:
+          - "What is wrong with pod X in NAMESPACE?"
+          - "Why is the deployment failing in NAMESPACE?"
+          - "Diagnose this NAMESPACE error: CrashLoopBackOff"
+
+    deployment:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+
+    promptTemplate:
+      dataSources:
+      - alias: builtin
+        kind: ConfigMap
+        name: kagent-builtin-prompts
+
+    runtime: python
