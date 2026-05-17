@@ -3,6 +3,36 @@
 import { useState } from 'react'
 import { useAuth } from '@/context/AuthContext'
 
+/**
+ * Map Firebase auth error codes to user-friendly messages.
+ * Prevents leaking internal error details to end users.
+ */
+function getAuthErrorMessage(error: unknown): string {
+  const code = (error as { code?: string })?.code ?? '';
+  switch (code) {
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/user-disabled':
+      return 'This account has been disabled. Please contact support.';
+    case 'auth/user-not-found':
+    case 'auth/wrong-password':
+    case 'auth/invalid-credential':
+      return 'Invalid email or password.';
+    case 'auth/email-already-in-use':
+      return 'An account with this email already exists.';
+    case 'auth/weak-password':
+      return 'Password should be at least 6 characters.';
+    case 'auth/too-many-requests':
+      return 'Too many attempts. Please try again later.';
+    case 'auth/popup-closed-by-user':
+      return 'Sign-in was cancelled.';
+    case 'auth/network-request-failed':
+      return 'Network error. Please check your connection.';
+    default:
+      return 'An error occurred. Please try again.';
+  }
+}
+
 export default function LoginForm() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -29,8 +59,8 @@ export default function LoginForm() {
       } else {
         await signup(email, password)
       }
-    } catch (error: any) {
-      setError(error.message)
+    } catch (error: unknown) {
+      setError(getAuthErrorMessage(error))
     } finally {
       setLoading(false)
     }
@@ -41,8 +71,8 @@ export default function LoginForm() {
       setError('')
       setLoading(true)
       await loginWithGoogle()
-    } catch (error: any) {
-      setError(error.message)
+    } catch (error: unknown) {
+      setError(getAuthErrorMessage(error))
     } finally {
       setLoading(false)
     }
